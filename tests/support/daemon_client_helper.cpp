@@ -8,13 +8,21 @@
 
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
+    if (application.arguments().size() != 4) {
+        return 2;
+    }
+    bool intervalValid = false;
+    const uint intervalMs = application.arguments().at(3).toUInt(&intervalValid);
+    if (!intervalValid || intervalMs == 0) {
+        return 2;
+    }
     QDBusInterface daemon(QStringLiteral("io.github.josephur.RokuDeck1"),
                           QStringLiteral("/io/github/josephur/RokuDeck1"),
                           QStringLiteral("io.github.josephur.RokuDeck1"),
                           QDBusConnection::sessionBus());
     auto* watcher = new QDBusPendingCallWatcher(
-        daemon.asyncCall(QStringLiteral("RegisterClient"), QStringLiteral("widget-owner"),
-                         QStringList{QStringLiteral("SERIAL-A")}, 1200u),
+        daemon.asyncCall(QStringLiteral("RegisterClient"), application.arguments().at(1),
+                         QStringList{application.arguments().at(2)}, intervalMs),
         &application);
     QObject::connect(watcher, &QDBusPendingCallWatcher::finished, &application,
                      [&application, watcher](QDBusPendingCallWatcher*) {

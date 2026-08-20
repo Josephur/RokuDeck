@@ -5,13 +5,13 @@
 #include "core/qprocess_runner.h"
 #include "rokudeck1_adaptor.h"
 
-#include <QCoreApplication>
 #include <QDBusError>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QUuid>
 
 #include <algorithm>
@@ -84,14 +84,48 @@ constexpr auto objectPath = "/io/github/josephur/RokuDeck1";
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
+[[nodiscard]] QList<DeviceRecord> parseDiscoveredDevices(const ProcessResult& result) {
+    if (result.timedOut || result.exitCode != 0) {
+        return {};
+    }
+    QJsonParseError error;
+    const QJsonDocument document = QJsonDocument::fromJson(result.standardOutput, &error);
+    if (error.error != QJsonParseError::NoError) {
+        return {};
+    }
+
+    QList<DeviceRecord> devices;
+    const QJsonArray values = document.isArray()
+                                  ? document.array()
+                                  : document.object().value(QStringLiteral("devices")).toArray();
+    for (const QJsonValue& value : values) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const QJsonObject object = value.toObject();
+        DeviceRecord device;
+        device.serial = object.value(QStringLiteral("serialNumber")).toString().trimmed();
+        device.displayName = object.value(QStringLiteral("deviceName")).toString().trimmed();
+        device.address = object.value(QStringLiteral("ip")).toString().trimmed();
+        if (!device.serial.isEmpty() && !device.address.isEmpty() && device.serial.size() <= 256 &&
+            device.displayName.size() <= 256 && device.address.size() <= 256) {
+            devices.append(std::move(device));
+        }
+    }
+    return devices;
+}
+
 } // namespace
 
 DaemonService::DaemonService(QDBusConnection connection,
                              std::function<bool()> hasEnabledAutomations,
                              std::unique_ptr<ProcessRunner> processRunner,
-                             std::unique_ptr<ConfigStore> configStore, QObject* parent)
+                             std::unique_ptr<ConfigStore> configStore,
+                             std::chrono::milliseconds idleGrace, QObject* parent)
     : QObject(parent), m_connection(std::move(connection)),
-      m_hasEnabledAutomations(std::move(hasEnabledAutomations)),
+      m_hasEnabledAutomations(hasEnabledAutomations ? std::move(hasEnabledAutomations)
+                                                    : [] { return false; }),
+      m_idleGrace(std::max(idleGrace, std::chrono::milliseconds(1))),
       m_configStore(configStore ? std::move(configStore) : std::make_unique<ConfigStore>()),
       m_processRunner(processRunner ? std::move(processRunner)
                                     : std::make_unique<QProcessRunner>()),
@@ -102,15 +136,13 @@ DaemonService::DaemonService(QDBusConnection connection,
 
     for (const DeviceRecord& device : m_configStore->loadDevices()) {
         m_deviceRegistry.upsert(device);
+        m_addressGenerations.insert(device.serial, 1);
     }
 
     m_idleTimer.setSingleShot(true);
-    m_idleTimer.setInterval(static_cast<int>(idleGracePeriod.count()));
-    connect(&m_idleTimer, &QTimer::timeout, this, [] {
-        if (QCoreApplication::instance()) {
-            QCoreApplication::quit();
-        }
-    });
+    m_idleTimer.setInterval(static_cast<int>(std::min<std::chrono::milliseconds::rep>(
+        m_idleGrace.count(), std::numeric_limits<int>::max())));
+    connect(&m_idleTimer, &QTimer::timeout, this, &DaemonService::handleIdleTimeout);
 
     m_pollTimer.setInterval(50);
     connect(&m_pollTimer, &QTimer::timeout, this, &DaemonService::pollDueDevices);
@@ -132,16 +164,27 @@ DaemonService::~DaemonService() {
 }
 
 bool DaemonService::registerOnBus() {
+    m_lastRegistrationError.clear();
     if (m_registeredOnBus) {
         return true;
     }
-    if (!m_connection.isConnected() ||
-        !m_connection.registerObject(QString::fromLatin1(objectPath), this,
-                                     QDBusConnection::ExportScriptableSlots |
-                                         QDBusConnection::ExportScriptableSignals)) {
+    if (!m_connection.isConnected()) {
+        m_lastRegistrationError = QStringLiteral("the session bus is not connected");
+        return false;
+    }
+    if (!m_connection.registerObject(QString::fromLatin1(objectPath), this,
+                                     QDBusConnection::ExportAdaptors)) {
+        m_lastRegistrationError = m_connection.lastError().message();
+        if (m_lastRegistrationError.isEmpty()) {
+            m_lastRegistrationError = QStringLiteral("failed to register the D-Bus object");
+        }
         return false;
     }
     if (!m_connection.registerService(QString::fromLatin1(serviceName))) {
+        m_lastRegistrationError = m_connection.lastError().message();
+        if (m_lastRegistrationError.isEmpty()) {
+            m_lastRegistrationError = QStringLiteral("failed to own the D-Bus service name");
+        }
         m_connection.unregisterObject(QString::fromLatin1(objectPath));
         return false;
     }
@@ -153,9 +196,38 @@ void DaemonService::upsertDevice(const DeviceRecord& device) {
     if (device.serial.isEmpty()) {
         return;
     }
+    if (mergeDevice(device)) {
+        m_configStore->saveDevices(m_deviceRegistry.devices());
+        Q_EMIT DeviceListChanged(ListDevices());
+    }
+}
+
+bool DaemonService::mergeDevice(const DeviceRecord& device) {
+    if (device.serial.isEmpty()) {
+        return false;
+    }
+    const auto previous = findDevice(device.serial);
+    const bool changed = !previous || previous->displayName != device.displayName ||
+                         previous->address != device.address;
+    if (!changed) {
+        return false;
+    }
+
+    const bool addressChanged = previous && previous->address != device.address;
     m_deviceRegistry.upsert(device);
-    m_configStore->saveDevices(m_deviceRegistry.devices());
-    Q_EMIT DeviceListChanged(ListDevices());
+    if (!previous) {
+        m_addressGenerations.insert(device.serial, 1);
+    } else if (addressChanged) {
+        m_addressGenerations[device.serial] = m_addressGenerations.value(device.serial, 1) + 1;
+        m_snapshots.remove(device.serial);
+    } else {
+        auto snapshotIt = m_snapshots.find(device.serial);
+        if (snapshotIt != m_snapshots.end()) {
+            snapshotIt->displayName = device.displayName;
+            snapshotIt->address = device.address;
+        }
+    }
+    return true;
 }
 
 QString DaemonService::devicesJson(const QList<DeviceRecord>& devices) {
@@ -311,8 +383,95 @@ void DaemonService::UnregisterClient(const QString& clientId) {
     updateIdleTimer();
 }
 
-QString DaemonService::DiscoverDevices() const {
+QString DaemonService::DiscoverDevices() {
+    if (m_discoveryActive) {
+        return ListDevices();
+    }
+
+    m_discoveryActive = true;
+    updateIdleTimer();
+    ProcessRequest request;
+    request.program = QStringLiteral("rds");
+    request.arguments = {QStringLiteral("--json"), QStringLiteral("--quiet"),
+                         QStringLiteral("--timeout"), QStringLiteral("3000"),
+                         QStringLiteral("discover")};
+    request.timeout = std::chrono::milliseconds(3000);
+    QPointer<DaemonService> service(this);
+    m_processRunner->start(request, [service](ProcessResult result) {
+        if (!service || service->m_shuttingDown) {
+            return;
+        }
+        service->m_discoveryActive = false;
+        bool changed = false;
+        for (const DeviceRecord& device : parseDiscoveredDevices(result)) {
+            changed = service->mergeDevice(device) || changed;
+        }
+        if (changed) {
+            service->m_configStore->saveDevices(service->m_deviceRegistry.devices());
+            Q_EMIT service->DeviceListChanged(service->ListDevices());
+        }
+        service->updateIdleTimer();
+    });
     return ListDevices();
+}
+
+DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& serial,
+                                                               const QString& commandJson) const {
+    constexpr qsizetype maximumCommandBytes = 2048;
+    const QByteArray encoded = commandJson.toUtf8();
+    if (encoded.size() > maximumCommandBytes) {
+        return {{}, QStringLiteral("commandTooLarge")};
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(encoded, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return {{}, QStringLiteral("invalidCommand")};
+    }
+    const QJsonObject object = document.object();
+    const QStringList objectKeys = object.keys();
+    const QString operation = object.value(QStringLiteral("operation")).toString();
+    if (operation == QStringLiteral("keypress")) {
+        const QSet<QString> expectedKeys{QStringLiteral("operation"), QStringLiteral("key")};
+        if (QSet<QString>(objectKeys.cbegin(), objectKeys.cend()) != expectedKeys) {
+            return {{}, QStringLiteral("invalidCommand")};
+        }
+        const QString key = object.value(QStringLiteral("key")).toString();
+        static const QSet<QString> allowedKeys{
+            QStringLiteral("Home"),      QStringLiteral("Back"), QStringLiteral("Up"),
+            QStringLiteral("Down"),      QStringLiteral("Left"), QStringLiteral("Right"),
+            QStringLiteral("Select"),    QStringLiteral("Play"), QStringLiteral("Pause"),
+            QStringLiteral("Rev"),       QStringLiteral("Fwd"),  QStringLiteral("InstantReplay"),
+            QStringLiteral("FindRemote")};
+        if (key.isEmpty() || key.size() > 32 || key.startsWith(QChar(u'-')) ||
+            !allowedKeys.contains(key)) {
+            return {{}, QStringLiteral("unsupportedCommand")};
+        }
+        if (key == QStringLiteral("FindRemote")) {
+            const auto snapshotIt = m_snapshots.constFind(serial);
+            if (snapshotIt == m_snapshots.cend() ||
+                !snapshotIt->capabilities.contains(QStringLiteral("supports-find-remote"))) {
+                return {{}, QStringLiteral("unsupportedCapability")};
+            }
+        }
+        return {{QStringLiteral("keypress"), key}, {}};
+    }
+
+    if (operation == QStringLiteral("launch")) {
+        const QSet<QString> expectedKeys{QStringLiteral("operation"), QStringLiteral("appId")};
+        if (QSet<QString>(objectKeys.cbegin(), objectKeys.cend()) != expectedKeys) {
+            return {{}, QStringLiteral("invalidCommand")};
+        }
+        const QString appId = object.value(QStringLiteral("appId")).toString();
+        static const QRegularExpression safeAppId(
+            QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"));
+        if (!safeAppId.match(appId).hasMatch()) {
+            return {{}, QStringLiteral("unsupportedCommand")};
+        }
+        return {{QStringLiteral("launch"), appId}, {}};
+    }
+
+    return {{}, QStringLiteral("unsupportedOperation")};
 }
 
 QString DaemonService::SendCommand(const QString& serial, const QString& commandJson) {
@@ -325,27 +484,16 @@ QString DaemonService::SendCommand(const QString& serial, const QString& command
         return requestId;
     }
 
-    QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(commandJson.toUtf8(), &parseError);
-    const QJsonArray argumentValues =
-        document.isObject() ? document.object().value(QStringLiteral("arguments")).toArray()
-                            : QJsonArray();
-    QStringList arguments;
-    for (const QJsonValue& value : argumentValues) {
-        if (!value.isString() || value.toString().isEmpty()) {
-            arguments.clear();
-            break;
-        }
-        arguments.append(value.toString());
-    }
-    if (parseError.error != QJsonParseError::NoError || arguments.isEmpty()) {
-        QTimer::singleShot(0, this, [this, requestId, serial] {
-            finishCommandWithError(requestId, serial, QStringLiteral("invalidCommand"));
+    const ValidatedCommand validated = validateCommand(serial, commandJson);
+    if (!validated.errorCode.isEmpty()) {
+        QTimer::singleShot(0, this, [this, requestId, serial, errorCode = validated.errorCode] {
+            finishCommandWithError(requestId, serial, errorCode);
         });
         return requestId;
     }
 
-    m_commandQueues[serial].enqueue({requestId, serial, arguments});
+    m_commandQueues[serial].enqueue({requestId, serial, validated.arguments});
+    updateIdleTimer();
     processNextCommand(serial);
     return requestId;
 }
@@ -359,7 +507,11 @@ void DaemonService::processNextCommand(const QString& serial) {
     const auto device = findDevice(serial);
     if (!device) {
         const QueuedCommand command = queueIt->dequeue();
+        if (queueIt->isEmpty()) {
+            m_commandQueues.erase(queueIt);
+        }
         finishCommandWithError(command.requestId, serial, QStringLiteral("unknownDevice"));
+        updateIdleTimer();
         processNextCommand(serial);
         return;
     }
@@ -369,7 +521,7 @@ void DaemonService::processNextCommand(const QString& serial) {
     request.program = QStringLiteral("rds");
     request.arguments = {QStringLiteral("--json"),    QStringLiteral("--quiet"),
                          QStringLiteral("--timeout"), QStringLiteral("3000"),
-                         QStringLiteral("command"),   device->address};
+                         QStringLiteral("--ip"),      device->address};
     request.arguments.append(command.arguments);
     request.timeout = std::chrono::milliseconds(3000);
     m_activeCommandSerials.insert(serial);
@@ -389,6 +541,7 @@ void DaemonService::processNextCommand(const QString& serial) {
         service->m_activeCommandSerials.remove(serial);
         service->finishCommand(command, result);
         service->processNextCommand(serial);
+        service->updateIdleTimer();
     });
 }
 
@@ -433,26 +586,41 @@ void DaemonService::pollDueDevices() {
             continue;
         }
         const QString address = device->address;
+        const quint64 addressGeneration = m_addressGenerations.value(claim.serial);
         QPointer<DaemonService> service(this);
-        m_rdsClient.queryDevice(address, [service, claim, address](RdsQueryResult result) {
-            if (!service || service->m_shuttingDown) {
-                return;
-            }
-            if (!result || result.value().serial != claim.serial) {
-                static_cast<void>(service->m_pollScheduler.recordResult(claim, false));
-                return;
-            }
+        m_rdsClient.queryDevice(
+            address, [service, claim, address, addressGeneration](RdsQueryResult result) {
+                if (!service || service->m_shuttingDown) {
+                    return;
+                }
+                const auto currentDevice = service->findDevice(claim.serial);
+                if (!currentDevice || currentDevice->address != address ||
+                    service->m_addressGenerations.value(claim.serial) != addressGeneration) {
+                    static_cast<void>(service->m_pollScheduler.recordResult(claim, true));
+                    return;
+                }
+                if (!result || result.value().serial != claim.serial) {
+                    static_cast<void>(service->m_pollScheduler.recordResult(claim, false));
+                    return;
+                }
 
-            DeviceSnapshot snapshot = result.value();
-            snapshot.serial = claim.serial;
-            snapshot.address = address;
-            snapshot.capturedAt = QDateTime::currentDateTimeUtc();
-            service->m_snapshots.insert(claim.serial, snapshot);
-            service->m_deviceRegistry.upsert({claim.serial, snapshot.displayName, address});
-            service->m_configStore->saveDevices(service->m_deviceRegistry.devices());
-            static_cast<void>(service->m_pollScheduler.recordResult(claim, true));
-            Q_EMIT service->DeviceSnapshotChanged(claim.serial, snapshotJson(snapshot));
-        });
+                DeviceSnapshot snapshot = result.value();
+                snapshot.serial = claim.serial;
+                snapshot.address = address;
+                snapshot.capturedAt = QDateTime::currentDateTimeUtc();
+                if (snapshot.displayName.isEmpty()) {
+                    snapshot.displayName = currentDevice->displayName;
+                }
+                service->m_snapshots.insert(claim.serial, snapshot);
+                const bool deviceChanged =
+                    service->mergeDevice({claim.serial, snapshot.displayName, address});
+                if (deviceChanged) {
+                    service->m_configStore->saveDevices(service->m_deviceRegistry.devices());
+                    Q_EMIT service->DeviceListChanged(service->ListDevices());
+                }
+                static_cast<void>(service->m_pollScheduler.recordResult(claim, true));
+                Q_EMIT service->DeviceSnapshotChanged(claim.serial, snapshotJson(snapshot));
+            });
     }
 }
 
@@ -461,6 +629,7 @@ void DaemonService::removeClientsForOwner(const QString& owner) {
     for (const ClientRegistration& registration : registrations) {
         removePollInterests(registration);
     }
+    m_ownerWatcher.removeWatchedService(owner);
     updateIdleTimer();
 }
 
@@ -469,11 +638,23 @@ void DaemonService::automationEnablementChanged() {
 }
 
 void DaemonService::updateIdleTimer() {
-    if (m_clients.isEmpty() && !m_hasEnabledAutomations()) {
+    if (m_clients.isEmpty() && !m_hasEnabledAutomations() && !hasAcceptedWork()) {
         m_idleTimer.start();
     } else {
         m_idleTimer.stop();
     }
+}
+
+bool DaemonService::hasAcceptedWork() const {
+    return m_discoveryActive || !m_activeCommandSerials.isEmpty() || !m_commandQueues.isEmpty();
+}
+
+void DaemonService::handleIdleTimeout() {
+    if (!m_clients.isEmpty() || m_hasEnabledAutomations() || hasAcceptedWork()) {
+        updateIdleTimer();
+        return;
+    }
+    Q_EMIT idleExitRequested();
 }
 
 quint32 DaemonService::effectiveInterval(const QString& serial) const {
@@ -490,7 +671,15 @@ bool DaemonService::idleTimerActive() const {
 }
 
 int DaemonService::idleGracePeriodMs() const {
-    return static_cast<int>(idleGracePeriod.count());
+    return m_idleTimer.interval();
+}
+
+qsizetype DaemonService::watchedClientOwnerCount() const {
+    return m_ownerWatcher.watchedServices().size();
+}
+
+QString DaemonService::lastRegistrationError() const {
+    return m_lastRegistrationError;
 }
 
 } // namespace RokuDeck

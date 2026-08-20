@@ -44,4 +44,4 @@ add_test(NAME daemon-dbus COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FIL
 
 add_executable(daemon-client-helper support/daemon_client_helper.cpp)
 target_link_libraries(daemon-client-helper PRIVATE Qt6::Core Qt6::DBus)
-add_dependencies(daemon-dbus-test daemon-client-helper)
+add_dependencies(daemon-dbus-test daemon-client-helper rokudeckd)

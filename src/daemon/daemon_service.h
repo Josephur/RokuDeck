@@ -29,14 +29,14 @@ namespace RokuDeck {
 
 class DaemonService final : public QObject, protected QDBusContext {
     Q_OBJECT
-    Q_CLASSINFO("D-Bus Interface", "io.github.josephur.RokuDeck1")
 
   public:
     explicit DaemonService(
         QDBusConnection connection = QDBusConnection::sessionBus(),
         std::function<bool()> hasEnabledAutomations = [] { return false; },
         std::unique_ptr<ProcessRunner> processRunner = {},
-        std::unique_ptr<ConfigStore> configStore = {}, QObject* parent = nullptr);
+        std::unique_ptr<ConfigStore> configStore = {},
+        std::chrono::milliseconds idleGrace = std::chrono::seconds(30), QObject* parent = nullptr);
     ~DaemonService() override;
 
     [[nodiscard]] bool registerOnBus();
@@ -46,27 +46,28 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] quint32 effectiveInterval(const QString& serial) const;
     [[nodiscard]] bool idleTimerActive() const;
     [[nodiscard]] int idleGracePeriodMs() const;
+    [[nodiscard]] qsizetype watchedClientOwnerCount() const;
+    [[nodiscard]] QString lastRegistrationError() const;
 
   public Q_SLOTS:
-    Q_SCRIPTABLE [[nodiscard]] QString ListDevices() const;
-    Q_SCRIPTABLE [[nodiscard]] QString GetSnapshot(const QString& serial) const;
-    Q_SCRIPTABLE void RegisterClient(const QString& clientId, const QStringList& serials,
-                                     uint intervalMs);
-    Q_SCRIPTABLE void UpdateClientInterest(const QString& clientId, const QStringList& serials,
-                                           uint intervalMs);
-    Q_SCRIPTABLE void UnregisterClient(const QString& clientId);
-    Q_SCRIPTABLE [[nodiscard]] QString DiscoverDevices() const;
-    Q_SCRIPTABLE [[nodiscard]] QString SendCommand(const QString& serial,
-                                                   const QString& commandJson);
+    [[nodiscard]] QString ListDevices() const;
+    [[nodiscard]] QString GetSnapshot(const QString& serial) const;
+    void RegisterClient(const QString& clientId, const QStringList& serials, uint intervalMs);
+    void UpdateClientInterest(const QString& clientId, const QStringList& serials, uint intervalMs);
+    void UnregisterClient(const QString& clientId);
+    [[nodiscard]] QString DiscoverDevices();
+    [[nodiscard]] QString SendCommand(const QString& serial, const QString& commandJson);
 
   Q_SIGNALS:
-    Q_SCRIPTABLE void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
-    Q_SCRIPTABLE void DeviceListChanged(const QString& devicesJson);
-    Q_SCRIPTABLE void CommandFinished(const QString& requestId, const QString& resultJson);
+    void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
+    void DeviceListChanged(const QString& devicesJson);
+    void CommandFinished(const QString& requestId, const QString& resultJson);
+    void idleExitRequested();
 
   private Q_SLOTS:
     void removeClientsForOwner(const QString& owner);
     void pollDueDevices();
+    void handleIdleTimeout();
 
   private:
     struct QueuedCommand {
@@ -75,12 +76,21 @@ class DaemonService final : public QObject, protected QDBusContext {
         QStringList arguments;
     };
 
+    struct ValidatedCommand {
+        QStringList arguments;
+        QString errorCode;
+    };
+
     [[nodiscard]] QString callerOwner() const;
     [[nodiscard]] std::optional<DeviceRecord> findDevice(const QString& serial) const;
     void removePollInterests(const ClientRegistration& registration);
     void applyPollInterests(const ClientRegistration& registration);
     void watchOwner(const QString& owner);
     void updateIdleTimer();
+    [[nodiscard]] bool hasAcceptedWork() const;
+    [[nodiscard]] bool mergeDevice(const DeviceRecord& device);
+    [[nodiscard]] ValidatedCommand validateCommand(const QString& serial,
+                                                   const QString& commandJson) const;
     void processNextCommand(const QString& serial);
     void finishCommand(const QueuedCommand& command, const ProcessResult& result);
     void finishCommandWithError(const QString& requestId, const QString& serial,
@@ -89,10 +99,9 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot);
 
-    static constexpr std::chrono::milliseconds idleGracePeriod{30000};
-
     QDBusConnection m_connection;
     std::function<bool()> m_hasEnabledAutomations;
+    std::chrono::milliseconds m_idleGrace;
     std::unique_ptr<ConfigStore> m_configStore;
     std::unique_ptr<ProcessRunner> m_processRunner;
     DeviceRegistry m_deviceRegistry;
@@ -103,10 +112,13 @@ class DaemonService final : public QObject, protected QDBusContext {
     QTimer m_idleTimer;
     QTimer m_pollTimer;
     QHash<QString, DeviceSnapshot> m_snapshots;
+    QHash<QString, quint64> m_addressGenerations;
     QHash<QString, QQueue<QueuedCommand>> m_commandQueues;
     QSet<QString> m_activeCommandSerials;
     bool m_registeredOnBus = false;
+    bool m_discoveryActive = false;
     bool m_shuttingDown = false;
+    QString m_lastRegistrationError;
 };
 
 } // namespace RokuDeck
