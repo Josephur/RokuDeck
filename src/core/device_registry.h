@@ -16,6 +16,7 @@ struct DeviceRecord {
 class DeviceRegistry final {
 public:
     void upsert(const DeviceRecord &device);
+    bool remove(const QString &serial);
     [[nodiscard]] QList<DeviceRecord> devices() const;
 
 private:

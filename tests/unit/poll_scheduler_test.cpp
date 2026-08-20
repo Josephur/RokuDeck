@@ -13,6 +13,12 @@ private Q_SLOTS:
     void mergesInterestsBySerialAtShortestInterval();
     void failedDeviceDoesNotDeferHealthyDevice();
     void backoffIsBoundedAndUsesInjectedJitter();
+    void dueDeviceIsClaimedUntilResultArrives();
+    void repeatedInterestPreservesDeadlineAndBackoff();
+    void normalIntervalMayExceedBackoffCeiling();
+    void backoffGrowthUsesExactJitterAndSuccessResetsIt();
+    void schedulingNearClockMaximumDoesNotOverflow();
+    void removesObsoleteInterestsAndLastDeviceSchedule();
 };
 
 void PollSchedulerTest::mergesInterestsBySerialAtShortestInterval()
@@ -71,6 +77,108 @@ void PollSchedulerTest::backoffIsBoundedAndUsesInjectedJitter()
 
     QCOMPARE(jitterCalls, 20);
     QVERIFY(scheduler.delayFor(QStringLiteral("SERIAL-A")) <= PollScheduler::maximumBackoff());
+}
+
+void PollSchedulerTest::dueDeviceIsClaimedUntilResultArrives()
+{
+    PollScheduler::TimePoint now{};
+    PollScheduler scheduler([&] { return now; }, [](auto delay) { return delay; });
+    scheduler.setInterest({QStringLiteral("widget"), QStringLiteral("SERIAL-A"),
+                           {QStringLiteral("power")}, 100ms});
+    now += 100ms;
+
+    QCOMPARE(scheduler.dueDevices(), QStringList({QStringLiteral("SERIAL-A")}));
+    QVERIFY(scheduler.dueDevices().isEmpty());
+    scheduler.recordResult(QStringLiteral("SERIAL-A"), true);
+    now += 100ms;
+    QCOMPARE(scheduler.dueDevices(), QStringList({QStringLiteral("SERIAL-A")}));
+}
+
+void PollSchedulerTest::repeatedInterestPreservesDeadlineAndBackoff()
+{
+    PollScheduler::TimePoint now{};
+    PollScheduler scheduler([&] { return now; }, [](auto delay) { return delay; });
+    const PollInterest interest{QStringLiteral("widget"), QStringLiteral("SERIAL-A"),
+                                {QStringLiteral("power")}, 1s};
+    scheduler.setInterest(interest);
+    now += 1s;
+    QCOMPARE(scheduler.dueDevices(), QStringList({QStringLiteral("SERIAL-A")}));
+    scheduler.recordResult(QStringLiteral("SERIAL-A"), false);
+    QCOMPARE(scheduler.delayFor(QStringLiteral("SERIAL-A")), 2s);
+
+    scheduler.setInterest(interest);
+    QCOMPARE(scheduler.delayFor(QStringLiteral("SERIAL-A")), 2s);
+    now += 1s;
+    QVERIFY(scheduler.dueDevices().isEmpty());
+    now += 1s;
+    QCOMPARE(scheduler.dueDevices(), QStringList({QStringLiteral("SERIAL-A")}));
+}
+
+void PollSchedulerTest::normalIntervalMayExceedBackoffCeiling()
+{
+    PollScheduler::TimePoint now{};
+    PollScheduler scheduler([&] { return now; }, [](auto delay) { return delay; });
+    scheduler.setInterest({QStringLiteral("widget"), QStringLiteral("SERIAL-A"),
+                           {QStringLiteral("power")}, 10min});
+
+    QCOMPARE(scheduler.intervalFor(QStringLiteral("SERIAL-A")), 10min);
+    now += 5min;
+    QVERIFY(scheduler.dueDevices().isEmpty());
+    now += 5min;
+    QCOMPARE(scheduler.dueDevices(), QStringList({QStringLiteral("SERIAL-A")}));
+}
+
+void PollSchedulerTest::backoffGrowthUsesExactJitterAndSuccessResetsIt()
+{
+    PollScheduler::TimePoint now{};
+    PollScheduler scheduler([&] { return now; }, [](auto delay) { return delay + 10ms; });
+    scheduler.setInterest({QStringLiteral("widget"), QStringLiteral("SERIAL-A"),
+                           {QStringLiteral("power")}, 1s});
+    now += 1s;
+    (void)scheduler.dueDevices();
+
+    scheduler.recordResult(QStringLiteral("SERIAL-A"), false);
+    QCOMPARE(scheduler.delayFor(QStringLiteral("SERIAL-A")), 2010ms);
+    now += 2010ms;
+    (void)scheduler.dueDevices();
+    scheduler.recordResult(QStringLiteral("SERIAL-A"), false);
+    QCOMPARE(scheduler.delayFor(QStringLiteral("SERIAL-A")), 4010ms);
+    now += 4010ms;
+    (void)scheduler.dueDevices();
+    scheduler.recordResult(QStringLiteral("SERIAL-A"), true);
+    QCOMPARE(scheduler.delayFor(QStringLiteral("SERIAL-A")), 1s);
+}
+
+void PollSchedulerTest::schedulingNearClockMaximumDoesNotOverflow()
+{
+    PollScheduler::TimePoint now = PollScheduler::TimePoint::max() - 500ms;
+    PollScheduler scheduler([&] { return now; }, [](auto delay) { return delay; });
+    scheduler.setInterest({QStringLiteral("widget"), QStringLiteral("SERIAL-A"),
+                           {QStringLiteral("power")}, 1s});
+
+    QVERIFY(scheduler.dueDevices().isEmpty());
+    now = PollScheduler::TimePoint::max();
+    QCOMPARE(scheduler.dueDevices(), QStringList({QStringLiteral("SERIAL-A")}));
+}
+
+void PollSchedulerTest::removesObsoleteInterestsAndLastDeviceSchedule()
+{
+    PollScheduler::TimePoint now{};
+    PollScheduler scheduler([&] { return now; }, [](auto delay) { return delay; });
+    scheduler.setInterest({QStringLiteral("widget-a"), QStringLiteral("SERIAL-A"),
+                           {QStringLiteral("power"), QStringLiteral("app")}, 1s});
+    scheduler.setInterest({QStringLiteral("automation-a"), QStringLiteral("SERIAL-A"),
+                           {QStringLiteral("power"), QStringLiteral("audio")}, 5s});
+
+    QVERIFY(scheduler.removeInterest(QStringLiteral("widget-a"), QStringLiteral("SERIAL-A")));
+    QCOMPARE(scheduler.deviceCount(), 1);
+    QCOMPARE(scheduler.intervalFor(QStringLiteral("SERIAL-A")), 5s);
+    QCOMPARE(scheduler.fieldsFor(QStringLiteral("SERIAL-A")),
+             QSet<QString>({QStringLiteral("power"), QStringLiteral("audio")}));
+    QVERIFY(!scheduler.removeInterest(QStringLiteral("widget-a"), QStringLiteral("SERIAL-A")));
+
+    QVERIFY(scheduler.removeInterest(QStringLiteral("automation-a"), QStringLiteral("SERIAL-A")));
+    QCOMPARE(scheduler.deviceCount(), 0);
 }
 
 QTEST_GUILESS_MAIN(PollSchedulerTest)

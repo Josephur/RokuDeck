@@ -6,6 +6,23 @@
 #include <utility>
 
 namespace RokuDeck {
+namespace {
+
+[[nodiscard]] PollScheduler::TimePoint saturatingAdd(PollScheduler::TimePoint start,
+                                                     std::chrono::milliseconds delay)
+{
+    if (delay <= std::chrono::milliseconds::zero()) {
+        return start;
+    }
+    const auto remaining = PollScheduler::TimePoint::max() - start;
+    const auto remainingMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+    if (delay >= remainingMilliseconds) {
+        return PollScheduler::TimePoint::max();
+    }
+    return start + std::chrono::duration_cast<PollScheduler::TimePoint::duration>(delay);
+}
+
+} // namespace
 
 PollScheduler::PollScheduler(Clock clock, JitterSource jitter)
     : m_clock(std::move(clock))
@@ -22,9 +39,22 @@ void PollScheduler::setInterest(const PollInterest &interest)
     rebuildSchedule(interest.serial);
 }
 
+bool PollScheduler::removeInterest(const QString &clientId, const QString &serial)
+{
+    auto clientIt = m_interestsByClient.find(clientId);
+    if (clientIt == m_interestsByClient.end() || clientIt->remove(serial) == 0) {
+        return false;
+    }
+    if (clientIt->isEmpty()) {
+        m_interestsByClient.erase(clientIt);
+    }
+    rebuildSchedule(serial);
+    return true;
+}
+
 void PollScheduler::rebuildSchedule(const QString &serial)
 {
-    std::chrono::milliseconds shortest = maximumBackoff();
+    std::chrono::milliseconds shortest = std::chrono::milliseconds::max();
     QSet<QString> fields;
     bool found = false;
     for (auto clientIt = m_interestsByClient.cbegin(); clientIt != m_interestsByClient.cend(); ++clientIt) {
@@ -41,12 +71,26 @@ void PollScheduler::rebuildSchedule(const QString &serial)
         return;
     }
 
-    Schedule &schedule = m_schedules[serial];
+    auto scheduleIt = m_schedules.find(serial);
+    if (scheduleIt == m_schedules.end()) {
+        Schedule schedule;
+        schedule.interval = shortest;
+        schedule.delay = shortest;
+        schedule.nextDue = saturatingAdd(m_clock(), shortest);
+        schedule.fields = std::move(fields);
+        m_schedules.insert(serial, std::move(schedule));
+        return;
+    }
+
+    Schedule &schedule = scheduleIt.value();
+    const bool intervalChanged = schedule.interval != shortest;
     schedule.interval = shortest;
-    schedule.delay = shortest;
-    schedule.nextDue = m_clock() + shortest;
     schedule.fields = std::move(fields);
-    schedule.failures = 0;
+    if (intervalChanged && schedule.failures == 0) {
+        schedule.delay = shortest;
+        const TimePoint earlierDeadline = saturatingAdd(m_clock(), shortest);
+        schedule.nextDue = std::min(schedule.nextDue, earlierDeadline);
+    }
 }
 
 void PollScheduler::recordResult(const QString &serial, bool succeeded)
@@ -56,6 +100,7 @@ void PollScheduler::recordResult(const QString &serial, bool succeeded)
         return;
     }
     Schedule &schedule = scheduleIt.value();
+    schedule.inFlight = false;
     if (succeeded) {
         schedule.failures = 0;
         schedule.delay = schedule.interval;
@@ -63,22 +108,24 @@ void PollScheduler::recordResult(const QString &serial, bool succeeded)
         schedule.failures = std::min(schedule.failures + 1U, 30U);
         const unsigned int shift = std::min(schedule.failures, 20U);
         const auto multiplier = static_cast<std::chrono::milliseconds::rep>(1ULL << shift);
-        const auto maxCount = maximumBackoff().count();
+        const auto backoffCeiling = std::max(maximumBackoff(), schedule.interval);
+        const auto maxCount = backoffCeiling.count();
         const auto intervalCount = schedule.interval.count();
         const auto baseCount = intervalCount > maxCount / multiplier ? maxCount : intervalCount * multiplier;
         const auto jittered = m_jitter(std::chrono::milliseconds(baseCount));
-        schedule.delay = std::clamp(jittered, std::chrono::milliseconds::zero(), maximumBackoff());
+        schedule.delay = std::clamp(jittered, std::chrono::milliseconds::zero(), backoffCeiling);
     }
-    schedule.nextDue = m_clock() + schedule.delay;
+    schedule.nextDue = saturatingAdd(m_clock(), schedule.delay);
 }
 
-QStringList PollScheduler::dueDevices() const
+QStringList PollScheduler::dueDevices()
 {
     QStringList due;
     const TimePoint now = m_clock();
-    for (auto it = m_schedules.cbegin(); it != m_schedules.cend(); ++it) {
-        if (it->nextDue <= now) {
+    for (auto it = m_schedules.begin(); it != m_schedules.end(); ++it) {
+        if (!it->inFlight && it->nextDue <= now) {
             due.append(it.key());
+            it->inFlight = true;
         }
     }
     due.sort();

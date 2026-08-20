@@ -10,6 +10,11 @@ void DeviceRegistry::upsert(const DeviceRecord &device)
     }
 }
 
+bool DeviceRegistry::remove(const QString &serial)
+{
+    return m_devicesBySerial.remove(serial) > 0;
+}
+
 QList<DeviceRecord> DeviceRegistry::devices() const
 {
     return m_devicesBySerial.values();

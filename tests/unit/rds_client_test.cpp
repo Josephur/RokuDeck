@@ -6,8 +6,13 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
 #include <QTimer>
+#include <QTemporaryDir>
 #include <QtTest>
+
+#include <memory>
 
 using namespace RokuDeck;
 using namespace RokuDeck::Test;
@@ -22,6 +27,7 @@ private Q_SLOTS:
     void reportsMalformedEnvelopeAsTypedError();
     void processRunnerCapsCapturedOutput();
     void processRunnerKillsOnTimeoutAndCompletesOnce();
+    void destroyingRunnerCancelsAndCompletesOutstandingRequest();
 };
 
 void RdsClientTest::usesArgumentsWithoutShell()
@@ -105,27 +111,70 @@ void RdsClientTest::processRunnerCapsCapturedOutput()
 
 void RdsClientTest::processRunnerKillsOnTimeoutAndCompletesOnce()
 {
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QString pidFilePath = temporaryDirectory.filePath(QStringLiteral("timeout-helper.pid"));
     QProcessRunner runner;
     ProcessRequest request;
     request.program = QCoreApplication::applicationDirPath() + QStringLiteral("/rds-process-helper");
-    request.arguments = {QStringLiteral("--hang")};
-    request.timeout = 20ms;
+    request.arguments = {QStringLiteral("--hang"), QStringLiteral("--pid-file"), pidFilePath};
+    request.timeout = 500ms;
 
     int callbackCount = 0;
+    bool childExitedAtCallback = false;
     std::optional<ProcessResult> received;
     QEventLoop loop;
     runner.start(request, [&](ProcessResult result) {
         ++callbackCount;
+        QFile pidFile(pidFilePath);
+        QVERIFY(pidFile.open(QIODevice::ReadOnly));
+        const QByteArray pid = pidFile.readAll().trimmed();
+        childExitedAtCallback = !QFileInfo::exists(QStringLiteral("/proc/") + QString::fromLatin1(pid));
         received = std::move(result);
         loop.quit();
     });
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(pidFilePath), 400);
     QTimer::singleShot(2000, &loop, &QEventLoop::quit);
     loop.exec();
     QTest::qWait(100);
 
     QVERIFY(received.has_value());
     QVERIFY(received->timedOut);
+    QVERIFY(childExitedAtCallback);
     QCOMPARE(callbackCount, 1);
+}
+
+void RdsClientTest::destroyingRunnerCancelsAndCompletesOutstandingRequest()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QString pidFilePath = temporaryDirectory.filePath(QStringLiteral("destroy-helper.pid"));
+    int callbackCount = 0;
+    bool childExitedAtCallback = false;
+    std::optional<ProcessResult> received;
+
+    auto runner = std::make_unique<QProcessRunner>();
+    ProcessRequest request;
+    request.program = QCoreApplication::applicationDirPath() + QStringLiteral("/rds-process-helper");
+    request.arguments = {QStringLiteral("--hang"), QStringLiteral("--pid-file"), pidFilePath};
+    request.timeout = 2s;
+    runner->start(request, [&](ProcessResult result) {
+        ++callbackCount;
+        QFile pidFile(pidFilePath);
+        QVERIFY(pidFile.open(QIODevice::ReadOnly));
+        const QByteArray pid = pidFile.readAll().trimmed();
+        childExitedAtCallback = !QFileInfo::exists(QStringLiteral("/proc/") + QString::fromLatin1(pid));
+        received = std::move(result);
+    });
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(pidFilePath), 1000);
+
+    runner.reset();
+
+    QCOMPARE(callbackCount, 1);
+    QVERIFY(received.has_value());
+    QCOMPARE(received->exitCode, -1);
+    QVERIFY(!received->timedOut);
+    QVERIFY(childExitedAtCallback);
 }
 
 QTEST_GUILESS_MAIN(RdsClientTest)

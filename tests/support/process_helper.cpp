@@ -24,6 +24,15 @@ int main(int argc, char *argv[])
         return 0;
     }
     if (arguments.contains(QStringLiteral("--hang"))) {
+        const qsizetype pidFileIndex = arguments.indexOf(QStringLiteral("--pid-file"));
+        if (pidFileIndex >= 0 && pidFileIndex + 1 < arguments.size()) {
+            QFile pidFile(arguments.at(pidFileIndex + 1));
+            if (!pidFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                return 4;
+            }
+            pidFile.write(QByteArray::number(QCoreApplication::applicationPid()));
+            pidFile.close();
+        }
         QThread::msleep(1000);
     }
     return 0;

@@ -2,6 +2,7 @@
 #include "qprocess_runner.h"
 
 #include <QProcess>
+#include <QPointer>
 #include <QTimer>
 
 #include <algorithm>
@@ -11,15 +12,6 @@
 
 namespace RokuDeck {
 namespace {
-
-struct RunState {
-    QProcess *process = nullptr;
-    ProcessCallback callback;
-    QByteArray standardOutput;
-    QByteArray standardError;
-    bool completed = false;
-    bool timedOut = false;
-};
 
 void appendCapped(QByteArray &destination, QByteArray chunk)
 {
@@ -31,59 +23,100 @@ void appendCapped(QByteArray &destination, QByteArray chunk)
 
 } // namespace
 
+struct QProcessRunner::RunState {
+    QProcess *process = nullptr;
+    QTimer *timer = nullptr;
+    ProcessCallback callback;
+    QByteArray standardOutput;
+    QByteArray standardError;
+    bool completed = false;
+    bool timedOut = false;
+};
+
+QProcessRunner::~QProcessRunner()
+{
+    const QList<std::shared_ptr<RunState>> activeStates = m_activeStates;
+    for (const auto &state : activeStates) {
+        if (state->completed) {
+            continue;
+        }
+        state->timer->stop();
+        disconnect(state->process, nullptr, this, nullptr);
+        if (state->process->state() != QProcess::NotRunning) {
+            state->process->kill();
+            state->process->waitForFinished(-1);
+        }
+        complete(state, -1);
+    }
+}
+
+void QProcessRunner::drain(const std::shared_ptr<RunState> &state)
+{
+    appendCapped(state->standardOutput, state->process->readAllStandardOutput());
+    appendCapped(state->standardError, state->process->readAllStandardError());
+}
+
+void QProcessRunner::complete(const std::shared_ptr<RunState> &state, int exitCode)
+{
+    if (state->completed) {
+        return;
+    }
+    state->completed = true;
+    state->timer->stop();
+    drain(state);
+
+    ProcessResult result;
+    result.exitCode = exitCode;
+    result.standardOutput = std::move(state->standardOutput);
+    result.standardError = std::move(state->standardError);
+    result.timedOut = state->timedOut;
+    ProcessCallback callback = std::move(state->callback);
+    m_activeStates.removeOne(state);
+    state->process->deleteLater();
+    callback(std::move(result));
+}
+
 void QProcessRunner::start(const ProcessRequest &request, ProcessCallback callback)
 {
     auto state = std::make_shared<RunState>();
     state->process = new QProcess(this);
     state->callback = std::move(callback);
+    m_activeStates.append(state);
 
-    QTimer *timer = new QTimer(state->process);
-    timer->setSingleShot(true);
+    state->timer = new QTimer(state->process);
+    state->timer->setSingleShot(true);
     const auto timeoutCount = std::clamp<std::chrono::milliseconds::rep>(
         request.timeout.count(), 0, std::numeric_limits<int>::max());
-    timer->setInterval(static_cast<int>(timeoutCount));
+    state->timer->setInterval(static_cast<int>(timeoutCount));
 
-    const auto readOutput = [state] {
-        appendCapped(state->standardOutput, state->process->readAllStandardOutput());
-        appendCapped(state->standardError, state->process->readAllStandardError());
-    };
-    const auto finish = [state, timer, readOutput](int exitCode) {
-        if (state->completed) {
-            return;
+    QPointer<QProcessRunner> runner(this);
+    const auto readOutput = [runner, state] {
+        if (runner) {
+            runner->drain(state);
         }
-        state->completed = true;
-        timer->stop();
-        readOutput();
-
-        ProcessResult result;
-        result.exitCode = exitCode;
-        result.standardOutput = std::move(state->standardOutput);
-        result.standardError = std::move(state->standardError);
-        result.timedOut = state->timedOut;
-        ProcessCallback callback = std::move(state->callback);
-        state->process->deleteLater();
-        callback(std::move(result));
     };
-
     connect(state->process, &QProcess::readyReadStandardOutput, this, readOutput);
     connect(state->process, &QProcess::readyReadStandardError, this, readOutput);
     connect(state->process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-            [finish](int exitCode, QProcess::ExitStatus) mutable { finish(exitCode); });
-    connect(state->process, &QProcess::errorOccurred, this, [state, finish](QProcess::ProcessError error) mutable {
-        if (error == QProcess::FailedToStart) {
-            finish(-1);
+            [runner, state](int exitCode, QProcess::ExitStatus) {
+                if (runner) {
+                    runner->complete(state, exitCode);
+                }
+            });
+    connect(state->process, &QProcess::errorOccurred, this, [runner, state](QProcess::ProcessError error) {
+        if (runner && error == QProcess::FailedToStart) {
+            runner->complete(state, -1);
         }
     });
-    connect(timer, &QTimer::timeout, this, [state, finish]() mutable {
+    connect(state->timer, &QTimer::timeout, this, [state] {
         state->timedOut = true;
         state->process->kill();
-        finish(-1);
     });
 
     state->process->setProgram(request.program);
     state->process->setArguments(request.arguments);
     state->process->start();
-    timer->start();
+    state->timer->start();
 }
 
 } // namespace RokuDeck

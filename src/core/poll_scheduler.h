@@ -28,9 +28,10 @@ public:
                            JitterSource jitter = [](auto delay) { return delay; });
 
     void setInterest(const PollInterest &interest);
+    bool removeInterest(const QString &clientId, const QString &serial);
     void recordResult(const QString &serial, bool succeeded);
 
-    [[nodiscard]] QStringList dueDevices() const;
+    [[nodiscard]] QStringList dueDevices();
     [[nodiscard]] qsizetype deviceCount() const;
     [[nodiscard]] std::chrono::milliseconds intervalFor(const QString &serial) const;
     [[nodiscard]] std::chrono::milliseconds delayFor(const QString &serial) const;
@@ -47,6 +48,7 @@ private:
         TimePoint nextDue{};
         QSet<QString> fields;
         unsigned int failures = 0;
+        bool inFlight = false;
     };
 
     void rebuildSchedule(const QString &serial);

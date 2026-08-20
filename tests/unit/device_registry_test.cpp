@@ -11,6 +11,7 @@ class DeviceRegistryTest final : public QObject {
 private Q_SLOTS:
     void rediscoveryUpdatesAddressBySerial();
     void distinctSerialsAtOneAddressRemainDistinct();
+    void removesStaleDeviceBySerial();
 };
 
 void DeviceRegistryTest::rediscoveryUpdatesAddressBySerial()
@@ -30,6 +31,16 @@ void DeviceRegistryTest::distinctSerialsAtOneAddressRemainDistinct()
     registry.upsert({QStringLiteral("SERIAL-B"), QStringLiteral("Fixture Two"), QStringLiteral("198.51.100.7")});
 
     QCOMPARE(registry.devices().size(), 2);
+}
+
+void DeviceRegistryTest::removesStaleDeviceBySerial()
+{
+    DeviceRegistry registry;
+    registry.upsert({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture One"), QStringLiteral("203.0.113.7")});
+
+    QVERIFY(registry.remove(QStringLiteral("SERIAL-A")));
+    QVERIFY(registry.devices().isEmpty());
+    QVERIFY(!registry.remove(QStringLiteral("SERIAL-A")));
 }
 
 QTEST_GUILESS_MAIN(DeviceRegistryTest)
