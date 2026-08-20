@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-install:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Install Qt 6 and KDE Frameworks 6 dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          appstream
+          base-devel
+          cmake
+          dbus
+          extra-cmake-modules
+          git
+          kconfig
+          kcoreaddons
+          ninja
+          qt6-base
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake --preset dev
+
+      - name: Build
+        run: cmake --build --preset dev
+
+      - name: Test without hardware
+        run: ctest --preset dev --output-on-failure
+
+      - name: Verify install tree
+        run: |
+          cmake --install build/dev --prefix "$PWD/build/install"
+          test -x build/install/bin/rokudeckctl
+          test -x build/install/lib/libexec/rokudeckd
+          test -f build/install/share/dbus-1/interfaces/io.github.josephur.RokuDeck1.xml

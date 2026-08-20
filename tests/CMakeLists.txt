@@ -45,3 +45,22 @@ add_test(NAME daemon-dbus COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FIL
 add_executable(daemon-client-helper support/daemon_client_helper.cpp)
 target_link_libraries(daemon-client-helper PRIVATE Qt6::Core Qt6::DBus)
 add_dependencies(daemon-dbus-test daemon-client-helper rokudeckd)
+
+add_executable(rokudeckctl-test integration/rokudeckctl_test.cpp)
+target_include_directories(rokudeckctl-test PRIVATE ${PROJECT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(rokudeckctl-test
+  PRIVATE ROKUDECKCTL_PATH="${CMAKE_BINARY_DIR}/src/cli/rokudeckctl"
+)
+target_link_libraries(rokudeckctl-test
+  PRIVATE
+    RokuDeck::Cli
+    RokuDeck::Daemon
+    KF6::ConfigCore
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Test
+)
+add_test(NAME rokudeckctl
+  COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:rokudeckctl-test>
+)
+add_dependencies(rokudeckctl-test rokudeckctl)
