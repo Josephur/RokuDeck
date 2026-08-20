@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 
 namespace RokuDeck {
 
@@ -40,6 +41,7 @@ public:
     [[nodiscard]] qsizetype deviceCount() const;
     [[nodiscard]] std::chrono::milliseconds intervalFor(const QString &serial) const;
     [[nodiscard]] std::chrono::milliseconds delayFor(const QString &serial) const;
+    [[nodiscard]] std::optional<TimePoint> nextDueFor(const QString &serial) const;
     [[nodiscard]] QSet<QString> fieldsFor(const QString &serial) const;
     [[nodiscard]] static constexpr std::chrono::milliseconds maximumBackoff()
     {

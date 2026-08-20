@@ -166,6 +166,15 @@ std::chrono::milliseconds PollScheduler::delayFor(const QString &serial) const
     return m_schedules.value(serial).delay;
 }
 
+std::optional<PollScheduler::TimePoint> PollScheduler::nextDueFor(const QString &serial) const
+{
+    const auto scheduleIt = m_schedules.constFind(serial);
+    if (scheduleIt == m_schedules.cend()) {
+        return std::nullopt;
+    }
+    return scheduleIt->nextDue;
+}
+
 QSet<QString> PollScheduler::fieldsFor(const QString &serial) const
 {
     return m_schedules.value(serial).fields;

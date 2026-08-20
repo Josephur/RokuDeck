@@ -249,8 +249,11 @@ void PollSchedulerTest::removeAndReaddPreservesActiveClaim()
     QVERIFY(newerClaim.token != originalClaim.token);
 
     const auto deadlineDelay = scheduler.delayFor(QStringLiteral("SERIAL-A"));
+    const auto newerDeadline = scheduler.nextDueFor(QStringLiteral("SERIAL-A"));
+    QVERIFY(newerDeadline.has_value());
     QVERIFY(!scheduler.recordResult(originalClaim, false));
     QCOMPARE(scheduler.delayFor(QStringLiteral("SERIAL-A")), deadlineDelay);
+    QVERIFY(scheduler.nextDueFor(QStringLiteral("SERIAL-A")) == newerDeadline);
     QVERIFY(scheduler.claimDuePolls().isEmpty());
 
     QVERIFY(scheduler.recordResult(newerClaim, true));
