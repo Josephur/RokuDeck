@@ -6,4 +6,5 @@
   <power-mode>PowerOn</power-mode>
   <supports-find-remote>true</supports-find-remote>
   <supports-audio-guide>false</supports-audio-guide>
+  <supports-fixture-mode>sometimes</supports-fixture-mode>
 </device-info>

@@ -64,6 +64,9 @@ ParseResult<DeviceSnapshot> parseDeviceInfo(QByteArrayView xml)
     if (!sawRoot) {
         return {ParseError{ParseError::Code::MissingRequiredElement, QStringLiteral("Missing device-info root element")}};
     }
+    if (snapshot.serial.isEmpty()) {
+        return {ParseError{ParseError::Code::MissingRequiredElement, QStringLiteral("Missing device serial number")}};
+    }
 
     if (snapshot.power == PowerState::On) {
         snapshot.health = DeviceHealth::Online;

@@ -29,6 +29,7 @@ ParseResult<MediaPlaybackState> parseMediaPlayer(QByteArrayView xml)
 {
     QXmlStreamReader reader(QByteArray(xml.data(), xml.size()));
     bool sawRoot = false;
+    std::optional<MediaPlaybackState> state;
 
     while (!reader.atEnd()) {
         reader.readNext();
@@ -40,14 +41,11 @@ ParseResult<MediaPlaybackState> parseMediaPlayer(QByteArrayView xml)
             if (reader.name() != u"player") {
                 return {ParseError{ParseError::Code::UnexpectedRootElement, QStringLiteral("Expected player root element")}};
             }
-            continue;
-        }
-        if (reader.name() == u"state") {
-            const QString value = reader.readElementText(QXmlStreamReader::SkipChildElements).trimmed();
-            if (reader.hasError()) {
-                return {ParseError{ParseError::Code::MalformedXml, reader.errorString()}};
+            const QString value = reader.attributes().value(u"state").toString().trimmed();
+            if (!value.isEmpty()) {
+                state = mediaStateFor(value);
             }
-            return {mediaStateFor(value)};
+            continue;
         }
         reader.skipCurrentElement();
     }
@@ -55,7 +53,10 @@ ParseResult<MediaPlaybackState> parseMediaPlayer(QByteArrayView xml)
     if (reader.hasError()) {
         return {ParseError{ParseError::Code::MalformedXml, reader.errorString()}};
     }
-    return {ParseError{ParseError::Code::MissingRequiredElement, QStringLiteral("Missing player state element")}};
+    if (!state.has_value()) {
+        return {ParseError{ParseError::Code::MissingRequiredElement, QStringLiteral("Missing player state attribute")}};
+    }
+    return {state.value()};
 }
 
 } // namespace RokuDeck

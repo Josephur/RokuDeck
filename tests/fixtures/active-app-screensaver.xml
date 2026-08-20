@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <active-app>
-  <app id="screensaver" type="screensaver">Fixture Screensaver</app>
+  <screensaver id="fixture-screensaver">Fixture Screensaver</screensaver>
 </active-app>

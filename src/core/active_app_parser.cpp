@@ -9,6 +9,8 @@ ParseResult<ActiveAppState> parseActiveApp(QByteArrayView xml)
 {
     QXmlStreamReader reader(QByteArray(xml.data(), xml.size()));
     bool sawRoot = false;
+    std::optional<ActiveAppState> activeApp;
+    std::optional<ActiveAppState> screensaver;
 
     while (!reader.atEnd()) {
         reader.readNext();
@@ -22,7 +24,8 @@ ParseResult<ActiveAppState> parseActiveApp(QByteArrayView xml)
             }
             continue;
         }
-        if (reader.name() != u"app") {
+        const bool isScreensaver = reader.name() == u"screensaver";
+        if (!isScreensaver && reader.name() != u"app") {
             reader.skipCurrentElement();
             continue;
         }
@@ -33,19 +36,32 @@ ParseResult<ActiveAppState> parseActiveApp(QByteArrayView xml)
         app.type = attributes.value(u"type").toString();
         app.input = attributes.value(u"input").toString();
         app.name = reader.readElementText(QXmlStreamReader::SkipChildElements).trimmed();
-        app.screensaver = app.type.compare(u"screensaver", Qt::CaseInsensitive) == 0
+        app.screensaver = isScreensaver || app.type.compare(u"screensaver", Qt::CaseInsensitive) == 0
                 || app.id.compare(u"screensaver", Qt::CaseInsensitive) == 0
             ? TriState::Active
             : TriState::Inactive;
+        if (isScreensaver && app.type.isEmpty()) {
+            app.type = QStringLiteral("screensaver");
+        }
 
         if (reader.hasError()) {
             return {ParseError{ParseError::Code::MalformedXml, reader.errorString()}};
         }
-        return {std::move(app)};
+        if (app.screensaver == TriState::Active) {
+            screensaver = std::move(app);
+        } else {
+            activeApp = std::move(app);
+        }
     }
 
     if (reader.hasError()) {
         return {ParseError{ParseError::Code::MalformedXml, reader.errorString()}};
+    }
+    if (screensaver.has_value()) {
+        return {std::move(screensaver.value())};
+    }
+    if (activeApp.has_value()) {
+        return {std::move(activeApp.value())};
     }
     return {ParseError{ParseError::Code::MissingRequiredElement, QStringLiteral("Missing active app element")}};
 }
