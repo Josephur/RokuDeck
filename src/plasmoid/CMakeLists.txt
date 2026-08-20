@@ -11,6 +11,8 @@ plasma_add_applet(io.github.josephur.rokudeck
     qml/FullRepresentation.qml
     qml/DeviceListItem.qml
     qml/DeviceDetail.qml
+    qml/RemoteControls.qml
+    qml/StatusBadge.qml
   CPP_SOURCES
     rokudeckapplet.cpp
     daemonproxy.cpp

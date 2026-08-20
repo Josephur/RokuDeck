@@ -2,6 +2,7 @@
 
 find_package(KF6 6.0 REQUIRED COMPONENTS I18n)
 find_package(Plasma 6.0 REQUIRED)
+find_package(Qt6 6.7 REQUIRED COMPONENTS QuickTest)
 
 add_executable(project-smoke smoke/project_smoke.cpp)
 target_link_libraries(project-smoke PRIVATE Qt6::Core Qt6::Test)
@@ -92,6 +93,20 @@ add_test(NAME plasmoid-bridge
   COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:plasmoid-bridge-test>
 )
 set_tests_properties(plasmoid-bridge PROPERTIES ENVIRONMENT QT_QPA_PLATFORM=offscreen)
+
+add_executable(plasmoid-qml-test qml/qmltest.cpp)
+target_link_libraries(plasmoid-qml-test
+  PRIVATE
+    KF6::I18n
+    KF6::I18nQml
+    Plasma::Plasma
+    Qt6::Qml
+    Qt6::QuickTest
+)
+add_test(NAME plasmoid-qml
+  COMMAND plasmoid-qml-test -input ${CMAKE_CURRENT_SOURCE_DIR}/qml
+)
+set_tests_properties(plasmoid-qml PROPERTIES ENVIRONMENT QT_QPA_PLATFORM=offscreen)
 
 add_executable(daemon-client-helper support/daemon_client_helper.cpp)
 target_link_libraries(daemon-client-helper PRIVATE Qt6::Core Qt6::DBus)
