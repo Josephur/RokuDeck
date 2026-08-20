@@ -197,6 +197,8 @@ class PlasmoidBridgeTest : public QObject {
     void destroyingOneAppletLeavesTheOtherRegistered();
     void partialSnapshotPreservesMissingFieldsAndExplicitlyClearsNullFields();
     void malformedPayloadMarksExistingStateStale();
+    void malformedSnapshotsAreRejectedAtomically_data();
+    void malformedSnapshotsAreRejectedAtomically();
     void successfulCommandRemainsPendingUntilFreshSnapshot();
     void staleRegistrationReplyCannotUnregisterReplacementOwner();
 
@@ -317,6 +319,86 @@ void PlasmoidBridgeTest::malformedPayloadMarksExistingStateStale() {
     for (int row = 0; row < model.rowCount(); ++row) {
         QCOMPARE(model.data(model.index(row), DevicesModel::StaleRole).toBool(), true);
     }
+}
+
+void PlasmoidBridgeTest::malformedSnapshotsAreRejectedAtomically_data() {
+    QTest::addColumn<QString>("snapshotJson");
+
+    const QJsonObject poisonedSnapshot{
+        {QStringLiteral("schemaVersion"), 1},
+        {QStringLiteral("serial"), QStringLiteral("SERIAL-A")},
+        {QStringLiteral("displayName"), QStringLiteral("Poisoned Name")},
+        {QStringLiteral("address"), QStringLiteral("203.0.113.99")},
+        {QStringLiteral("health"), QStringLiteral("offline")},
+        {QStringLiteral("power"), QStringLiteral("off")},
+        {QStringLiteral("screensaver"), QStringLiteral("active")},
+        {QStringLiteral("activeApp"),
+         QJsonObject{{QStringLiteral("name"), QStringLiteral("Poisoned App")}}},
+        {QStringLiteral("volume"), 99},
+        {QStringLiteral("muted"), true},
+        {QStringLiteral("capabilities"), QJsonArray{QStringLiteral("poisoned")}},
+        {QStringLiteral("capturedAt"), QStringLiteral("2026-08-20T16:04:00.000-04:00")},
+    };
+    const auto withMalformedValue = [&poisonedSnapshot](const QString& key,
+                                                        const QJsonValue& value) {
+        QJsonObject malformed = poisonedSnapshot;
+        malformed.insert(key, value);
+        return QString::fromUtf8(QJsonDocument(malformed).toJson(QJsonDocument::Compact));
+    };
+
+    QTest::newRow("null-serial") << withMalformedValue(QStringLiteral("serial"), QJsonValue::Null);
+    QTest::newRow("empty-serial") << withMalformedValue(QStringLiteral("serial"), QString());
+    QTest::newRow("null-display-name")
+        << withMalformedValue(QStringLiteral("displayName"), QJsonValue::Null);
+    QTest::newRow("null-address") << withMalformedValue(QStringLiteral("address"),
+                                                        QJsonValue::Null);
+    QTest::newRow("empty-address") << withMalformedValue(QStringLiteral("address"), QString());
+    QTest::newRow("null-health") << withMalformedValue(QStringLiteral("health"), QJsonValue::Null);
+    QTest::newRow("empty-health") << withMalformedValue(QStringLiteral("health"), QString());
+    QTest::newRow("null-power") << withMalformedValue(QStringLiteral("power"), QJsonValue::Null);
+    QTest::newRow("empty-power") << withMalformedValue(QStringLiteral("power"), QString());
+    QTest::newRow("null-screensaver")
+        << withMalformedValue(QStringLiteral("screensaver"), QJsonValue::Null);
+    QTest::newRow("empty-screensaver")
+        << withMalformedValue(QStringLiteral("screensaver"), QString());
+    QTest::newRow("invalid-captured-at")
+        << withMalformedValue(QStringLiteral("capturedAt"), QStringLiteral("not-a-timestamp"));
+    QTest::newRow("empty-captured-at")
+        << withMalformedValue(QStringLiteral("capturedAt"), QString());
+    QTest::newRow("null-captured-at")
+        << withMalformedValue(QStringLiteral("capturedAt"), QJsonValue::Null);
+    QTest::newRow("wrong-schema-version") << withMalformedValue(QStringLiteral("schemaVersion"), 2);
+    QTest::newRow("wrong-schema-type")
+        << withMalformedValue(QStringLiteral("schemaVersion"), QStringLiteral("1"));
+}
+
+void PlasmoidBridgeTest::malformedSnapshotsAreRejectedAtomically() {
+    QFETCH(QString, snapshotJson);
+
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-ATOMIC"));
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex index = firstIndex(model);
+    QTRY_COMPARE(model.data(index, DevicesModel::StaleRole).toBool(), false);
+
+    QSignalSpy errors(&proxy, &DaemonProxy::errorOccurred);
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"), snapshotJson);
+    QTRY_COMPARE_WITH_TIMEOUT(errors.count(), 1, 1000);
+
+    QCOMPARE(model.data(index, DevicesModel::NameRole).toString(), QStringLiteral("Living Room"));
+    QCOMPARE(model.data(index, DevicesModel::AddressRole).toString(), QStringLiteral("192.0.2.10"));
+    QCOMPARE(model.data(index, DevicesModel::HealthRole).toString(), QStringLiteral("online"));
+    QCOMPARE(model.data(index, DevicesModel::PowerRole).toString(), QStringLiteral("on"));
+    QCOMPARE(model.data(index, DevicesModel::ScreensaverRole).toString(),
+             QStringLiteral("inactive"));
+    QCOMPARE(model.data(index, DevicesModel::ActiveLabelRole).toString(),
+             QStringLiteral("Fixture Channel"));
+    QCOMPARE(model.data(index, DevicesModel::VolumeRole).toInt(), 45);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+    QCOMPARE(model.data(index, DevicesModel::CapabilitiesRole).toStringList(),
+             QStringList({QStringLiteral("power"), QStringLiteral("volume")}));
+    QCOMPARE(model.data(index, DevicesModel::StaleRole).toBool(), true);
 }
 
 void PlasmoidBridgeTest::successfulCommandRemainsPendingUntilFreshSnapshot() {

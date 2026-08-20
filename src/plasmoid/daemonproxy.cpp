@@ -76,16 +76,12 @@ std::optional<QList<DeviceDescription>> parseDevices(const QString& json) {
 }
 
 bool parseOptionalString(const QJsonObject& object, const QString& key,
-                         std::optional<QString>& destination) {
+                         std::optional<QString>& destination, bool allowEmpty) {
     const QJsonValue value = object.value(key);
     if (value.isUndefined()) {
         return true;
     }
-    if (value.isNull()) {
-        destination = QString();
-        return true;
-    }
-    if (!value.isString()) {
+    if (!value.isString() || (!allowEmpty && value.toString().isEmpty())) {
         return false;
     }
     destination = value.toString();
@@ -129,11 +125,12 @@ std::optional<DeviceStateSnapshot> parseSnapshot(const QString& json) {
     if (snapshot.serial.isEmpty()) {
         return std::nullopt;
     }
-    if (!parseOptionalString(*envelope, QStringLiteral("displayName"), snapshot.name) ||
-        !parseOptionalString(*envelope, QStringLiteral("address"), snapshot.address) ||
-        !parseOptionalString(*envelope, QStringLiteral("health"), snapshot.health) ||
-        !parseOptionalString(*envelope, QStringLiteral("power"), snapshot.power) ||
-        !parseOptionalString(*envelope, QStringLiteral("screensaver"), snapshot.screensaver) ||
+    if (!parseOptionalString(*envelope, QStringLiteral("displayName"), snapshot.name, true) ||
+        !parseOptionalString(*envelope, QStringLiteral("address"), snapshot.address, false) ||
+        !parseOptionalString(*envelope, QStringLiteral("health"), snapshot.health, false) ||
+        !parseOptionalString(*envelope, QStringLiteral("power"), snapshot.power, false) ||
+        !parseOptionalString(*envelope, QStringLiteral("screensaver"), snapshot.screensaver,
+                             false) ||
         !parseActiveLabel(*envelope, snapshot.activeLabel)) {
         return std::nullopt;
     }
@@ -180,15 +177,20 @@ std::optional<DeviceStateSnapshot> parseSnapshot(const QString& json) {
     }
 
     const QJsonValue capturedAtJson = envelope->value(QStringLiteral("capturedAt"));
-    if (!capturedAtJson.isUndefined() && !capturedAtJson.isNull() && !capturedAtJson.isString()) {
-        return std::nullopt;
+    if (!capturedAtJson.isUndefined()) {
+        if (!capturedAtJson.isString()) {
+            return std::nullopt;
+        }
+        const QString capturedAtValue = capturedAtJson.toString();
+        QDateTime capturedAt = QDateTime::fromString(capturedAtValue, Qt::ISODateWithMs);
+        if (!capturedAt.isValid()) {
+            capturedAt = QDateTime::fromString(capturedAtValue, Qt::ISODate);
+        }
+        if (!capturedAt.isValid()) {
+            return std::nullopt;
+        }
+        snapshot.stale = false;
     }
-    const QString capturedAtValue = capturedAtJson.toString();
-    QDateTime capturedAt = QDateTime::fromString(capturedAtValue, Qt::ISODateWithMs);
-    if (!capturedAt.isValid()) {
-        capturedAt = QDateTime::fromString(capturedAtValue, Qt::ISODate);
-    }
-    snapshot.stale = !capturedAt.isValid();
     return snapshot;
 }
 
