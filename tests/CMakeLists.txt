@@ -27,3 +27,21 @@ add_executable(poll-scheduler-test unit/poll_scheduler_test.cpp)
 target_include_directories(poll-scheduler-test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(poll-scheduler-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
 add_test(NAME poll-scheduler COMMAND poll-scheduler-test)
+
+add_executable(daemon-dbus-test integration/daemon_dbus_test.cpp)
+target_include_directories(daemon-dbus-test PRIVATE ${PROJECT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(daemon-dbus-test
+  PRIVATE
+    RokuDeck::Daemon
+    RokuDeck::DBusInterface
+    KF6::ConfigCore
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Test
+)
+find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session REQUIRED)
+add_test(NAME daemon-dbus COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:daemon-dbus-test>)
+
+add_executable(daemon-client-helper support/daemon_client_helper.cpp)
+target_link_libraries(daemon-client-helper PRIVATE Qt6::Core Qt6::DBus)
+add_dependencies(daemon-dbus-test daemon-client-helper)

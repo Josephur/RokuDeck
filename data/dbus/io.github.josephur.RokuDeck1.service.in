@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[D-BUS Service]
+Name=io.github.josephur.RokuDeck1
+Exec=@KDE_INSTALL_FULL_LIBEXECDIR@/rokudeckd
+SystemdService=rokudeckd.service

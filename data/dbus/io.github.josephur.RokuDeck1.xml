@@ -1,0 +1,46 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "https://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+  <interface name="io.github.josephur.RokuDeck1">
+    <method name="ListDevices">
+      <arg direction="out" type="s" name="devicesJson"/>
+    </method>
+    <method name="GetSnapshot">
+      <arg direction="in" type="s" name="serial"/>
+      <arg direction="out" type="s" name="snapshotJson"/>
+    </method>
+    <method name="RegisterClient">
+      <arg direction="in" type="s" name="clientId"/>
+      <arg direction="in" type="as" name="serials"/>
+      <arg direction="in" type="u" name="intervalMs"/>
+    </method>
+    <method name="UpdateClientInterest">
+      <arg direction="in" type="s" name="clientId"/>
+      <arg direction="in" type="as" name="serials"/>
+      <arg direction="in" type="u" name="intervalMs"/>
+    </method>
+    <method name="UnregisterClient">
+      <arg direction="in" type="s" name="clientId"/>
+    </method>
+    <method name="DiscoverDevices">
+      <arg direction="out" type="s" name="devicesJson"/>
+    </method>
+    <method name="SendCommand">
+      <arg direction="in" type="s" name="serial"/>
+      <arg direction="in" type="s" name="commandJson"/>
+      <arg direction="out" type="s" name="requestId"/>
+    </method>
+    <signal name="DeviceSnapshotChanged">
+      <arg type="s" name="serial"/>
+      <arg type="s" name="snapshotJson"/>
+    </signal>
+    <signal name="DeviceListChanged">
+      <arg type="s" name="devicesJson"/>
+    </signal>
+    <signal name="CommandFinished">
+      <arg type="s" name="requestId"/>
+      <arg type="s" name="resultJson"/>
+    </signal>
+  </interface>
+</node>
