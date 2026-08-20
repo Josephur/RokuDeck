@@ -5,11 +5,13 @@
 #include "devicesmodel.h"
 #include "rokudeck1_interface.h"
 
-#include <QDateTime>
+#include <KLocalizedString>
+
 #include <QDBusConnection>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusServiceWatcher>
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -17,6 +19,8 @@
 #include <QJsonValue>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -34,7 +38,9 @@ std::optional<QJsonObject> parseEnvelope(const QString& json) {
         return std::nullopt;
     }
     const QJsonObject object = document.object();
-    if (object.value(QStringLiteral("schemaVersion")).toInt() != 1) {
+    const QJsonValue schemaVersion = object.value(QStringLiteral("schemaVersion"));
+    if (!schemaVersion.isDouble() || schemaVersion.toInt() != 1 ||
+        schemaVersion.toDouble() != 1.0) {
         return std::nullopt;
     }
     return object;
@@ -47,6 +53,7 @@ std::optional<QList<DeviceDescription>> parseDevices(const QString& json) {
     }
 
     QList<DeviceDescription> devices;
+    QSet<QString> serials;
     const QJsonArray array = envelope->value(QStringLiteral("devices")).toArray();
     devices.reserve(array.size());
     for (const QJsonValue& value : array) {
@@ -54,31 +61,61 @@ std::optional<QList<DeviceDescription>> parseDevices(const QString& json) {
             return std::nullopt;
         }
         const QJsonObject object = value.toObject();
-        DeviceDescription device;
-        device.serial = object.value(QStringLiteral("serial")).toString();
-        device.name = object.value(QStringLiteral("displayName")).toString();
-        device.address = object.value(QStringLiteral("address")).toString();
-        if (device.serial.isEmpty()) {
+        const QJsonValue serial = object.value(QStringLiteral("serial"));
+        const QJsonValue name = object.value(QStringLiteral("displayName"));
+        const QJsonValue address = object.value(QStringLiteral("address"));
+        if (!serial.isString() || serial.toString().isEmpty() || !name.isString() ||
+            !address.isString() || serials.contains(serial.toString())) {
             return std::nullopt;
         }
+        DeviceDescription device{serial.toString(), name.toString(), address.toString()};
         devices.append(device);
+        serials.insert(device.serial);
     }
     return devices;
 }
 
-QString activeLabel(const QJsonObject& object) {
+bool parseOptionalString(const QJsonObject& object, const QString& key,
+                         std::optional<QString>& destination) {
+    const QJsonValue value = object.value(key);
+    if (value.isUndefined()) {
+        return true;
+    }
+    if (value.isNull()) {
+        destination = QString();
+        return true;
+    }
+    if (!value.isString()) {
+        return false;
+    }
+    destination = value.toString();
+    return true;
+}
+
+bool parseActiveLabel(const QJsonObject& object, std::optional<QString>& destination) {
     const QJsonValue activeAppValue = object.value(QStringLiteral("activeApp"));
+    if (activeAppValue.isUndefined()) {
+        return true;
+    }
+    if (activeAppValue.isNull()) {
+        destination = QString();
+        return true;
+    }
     if (!activeAppValue.isObject()) {
-        return {};
+        return false;
     }
     const QJsonObject activeApp = activeAppValue.toObject();
+    destination = QString();
     for (const auto* key : {"name", "input", "id"}) {
-        const QString label = activeApp.value(QString::fromLatin1(key)).toString();
-        if (!label.isEmpty()) {
-            return label;
+        const QJsonValue value = activeApp.value(QString::fromLatin1(key));
+        if (!value.isUndefined() && !value.isNull() && !value.isString()) {
+            return false;
+        }
+        if (value.isString() && !value.toString().isEmpty() && destination->isEmpty()) {
+            destination = value.toString();
         }
     }
-    return {};
+    return true;
 }
 
 std::optional<DeviceStateSnapshot> parseSnapshot(const QString& json) {
@@ -92,36 +129,61 @@ std::optional<DeviceStateSnapshot> parseSnapshot(const QString& json) {
     if (snapshot.serial.isEmpty()) {
         return std::nullopt;
     }
-    snapshot.name = envelope->value(QStringLiteral("displayName")).toString();
-    snapshot.address = envelope->value(QStringLiteral("address")).toString();
-    snapshot.health = envelope->value(QStringLiteral("health")).toString(QStringLiteral("unknown"));
-    snapshot.power = envelope->value(QStringLiteral("power")).toString(QStringLiteral("unknown"));
-    snapshot.screensaver =
-        envelope->value(QStringLiteral("screensaver")).toString(QStringLiteral("unknown"));
-    snapshot.activeLabel = activeLabel(*envelope);
+    if (!parseOptionalString(*envelope, QStringLiteral("displayName"), snapshot.name) ||
+        !parseOptionalString(*envelope, QStringLiteral("address"), snapshot.address) ||
+        !parseOptionalString(*envelope, QStringLiteral("health"), snapshot.health) ||
+        !parseOptionalString(*envelope, QStringLiteral("power"), snapshot.power) ||
+        !parseOptionalString(*envelope, QStringLiteral("screensaver"), snapshot.screensaver) ||
+        !parseActiveLabel(*envelope, snapshot.activeLabel)) {
+        return std::nullopt;
+    }
 
     const QJsonValue volume = envelope->value(QStringLiteral("volume"));
-    if (volume.isDouble()) {
-        snapshot.volume = volume.toInt();
+    if (volume.isNull()) {
+        snapshot.volume = std::optional<int>();
+    } else if (!volume.isUndefined()) {
+        if (!volume.isDouble() || !std::isfinite(volume.toDouble()) ||
+            volume.toDouble() < std::numeric_limits<int>::min() ||
+            volume.toDouble() > std::numeric_limits<int>::max() ||
+            volume.toDouble() != std::trunc(volume.toDouble())) {
+            return std::nullopt;
+        }
+        snapshot.volume = std::optional<int>{volume.toInt()};
     }
     const QJsonValue muted = envelope->value(QStringLiteral("muted"));
-    if (muted.isBool()) {
-        snapshot.muted = muted.toBool();
-    }
-
-    QSet<QString> capabilities;
-    const QJsonValue capabilitiesValue = envelope->value(QStringLiteral("capabilities"));
-    if (capabilitiesValue.isArray()) {
-        for (const QJsonValue& capability : capabilitiesValue.toArray()) {
-            if (capability.isString() && !capability.toString().isEmpty()) {
-                capabilities.insert(capability.toString());
-            }
+    if (muted.isNull()) {
+        snapshot.muted = std::optional<bool>();
+    } else if (!muted.isUndefined()) {
+        if (!muted.isBool()) {
+            return std::nullopt;
         }
+        snapshot.muted = std::optional<bool>{muted.toBool()};
     }
-    snapshot.capabilities = QStringList(capabilities.cbegin(), capabilities.cend());
-    std::ranges::sort(snapshot.capabilities);
 
-    const QString capturedAtValue = envelope->value(QStringLiteral("capturedAt")).toString();
+    const QJsonValue capabilitiesValue = envelope->value(QStringLiteral("capabilities"));
+    if (capabilitiesValue.isNull()) {
+        snapshot.capabilities = QStringList();
+    } else if (!capabilitiesValue.isUndefined()) {
+        if (!capabilitiesValue.isArray()) {
+            return std::nullopt;
+        }
+        QSet<QString> capabilities;
+        for (const QJsonValue& capability : capabilitiesValue.toArray()) {
+            if (!capability.isString() || capability.toString().isEmpty()) {
+                return std::nullopt;
+            }
+            capabilities.insert(capability.toString());
+        }
+        QStringList sortedCapabilities(capabilities.cbegin(), capabilities.cend());
+        std::ranges::sort(sortedCapabilities);
+        snapshot.capabilities = sortedCapabilities;
+    }
+
+    const QJsonValue capturedAtJson = envelope->value(QStringLiteral("capturedAt"));
+    if (!capturedAtJson.isUndefined() && !capturedAtJson.isNull() && !capturedAtJson.isString()) {
+        return std::nullopt;
+    }
+    const QString capturedAtValue = capturedAtJson.toString();
     QDateTime capturedAt = QDateTime::fromString(capturedAtValue, Qt::ISODateWithMs);
     if (!capturedAt.isValid()) {
         capturedAt = QDateTime::fromString(capturedAtValue, Qt::ISODate);
@@ -146,9 +208,7 @@ QJsonObject commandObject(const QString& action, const QVariant& value) {
 } // namespace
 
 DaemonProxy::DaemonProxy(DevicesModel* devices, QString clientId, QObject* parent)
-    : QObject(parent),
-      m_devices(devices),
-      m_clientId(std::move(clientId)),
+    : QObject(parent), m_devices(devices), m_clientId(std::move(clientId)),
       m_interface(std::make_unique<IoGithubJosephurRokuDeck1Interface>(
           QString::fromLatin1(serviceName), QString::fromLatin1(objectPath),
           QDBusConnection::sessionBus())),
@@ -205,25 +265,23 @@ void DaemonProxy::refresh() {
     }
     const quint64 generation = m_generation;
     auto* watcher = new QDBusPendingCallWatcher(m_interface->ListDevices(), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this,
-            [this, watcher, generation]() {
-                const QDBusPendingReply<QString> reply = *watcher;
-                watcher->deleteLater();
-                if (!m_active || generation != m_generation) {
-                    return;
-                }
-                if (reply.isError()) {
-                    setAvailable(false);
-                    Q_EMIT errorOccurred(QStringLiteral("RokuDeck daemon is unavailable"));
-                    return;
-                }
-                applyDeviceListJson(reply.value());
-                setAvailable(true);
-            });
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation]() {
+        const QDBusPendingReply<QString> reply = *watcher;
+        watcher->deleteLater();
+        if (!m_active || generation != m_generation) {
+            return;
+        }
+        if (reply.isError()) {
+            setAvailable(false);
+            Q_EMIT errorOccurred(i18nc("@info", "RokuDeck daemon is unavailable"));
+            return;
+        }
+        applyDeviceListJson(reply.value());
+        setAvailable(true);
+    });
 }
 
-void DaemonProxy::sendCommand(const QString& serial, const QString& action,
-                              const QVariant& value) {
+void DaemonProxy::sendCommand(const QString& serial, const QString& action, const QVariant& value) {
     if (!m_active || serial.isEmpty() || action.isEmpty() || !m_devices->containsSerial(serial)) {
         return;
     }
@@ -239,7 +297,7 @@ void DaemonProxy::sendCommand(const QString& serial, const QString& action,
                     return;
                 }
                 if (reply.isError() || reply.value().isEmpty()) {
-                    Q_EMIT errorOccurred(QStringLiteral("The Roku command was rejected"));
+                    Q_EMIT errorOccurred(i18nc("@info", "The Roku command was rejected"));
                     return;
                 }
                 const QString requestId = reply.value();
@@ -273,7 +331,8 @@ void DaemonProxy::applyDeviceListJson(const QString& devicesJson) {
     }
     const std::optional<QList<DeviceDescription>> devices = parseDevices(devicesJson);
     if (!devices) {
-        Q_EMIT errorOccurred(QStringLiteral("The RokuDeck device list is invalid"));
+        m_devices->markAllStale();
+        Q_EMIT errorOccurred(i18nc("@info", "The RokuDeck device list is invalid"));
         return;
     }
     m_devices->replaceDevices(*devices);
@@ -289,7 +348,8 @@ void DaemonProxy::applySnapshotJson(const QString& expectedSerial, const QString
     }
     const std::optional<DeviceStateSnapshot> snapshot = parseSnapshot(snapshotJson);
     if (!snapshot || snapshot->serial != expectedSerial) {
-        Q_EMIT errorOccurred(QStringLiteral("The RokuDeck device snapshot is invalid"));
+        m_devices->markStale(expectedSerial);
+        Q_EMIT errorOccurred(i18nc("@info", "The RokuDeck device snapshot is invalid"));
         return;
     }
     m_devices->applySnapshot(*snapshot);
@@ -330,25 +390,22 @@ void DaemonProxy::updateRegistration() {
     m_registrationPending = true;
     const bool updating = m_registered;
     const quint64 generation = m_generation;
-    const QDBusPendingCall call = updating
-        ? m_interface->UpdateClientInterest(m_clientId, desiredSerials, pollIntervalMs)
-        : m_interface->RegisterClient(m_clientId, desiredSerials, pollIntervalMs);
+    const QDBusPendingCall call =
+        updating ? m_interface->UpdateClientInterest(m_clientId, desiredSerials, pollIntervalMs)
+                 : m_interface->RegisterClient(m_clientId, desiredSerials, pollIntervalMs);
     auto* watcher = new QDBusPendingCallWatcher(call, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this, watcher, generation, desiredSerials]() {
                 const QDBusPendingReply<> reply = *watcher;
                 watcher->deleteLater();
                 if (!m_active || generation != m_generation) {
-                    if (m_interface) {
-                        static_cast<void>(m_interface->UnregisterClient(m_clientId));
-                    }
                     return;
                 }
                 m_registrationPending = false;
                 if (reply.isError()) {
                     m_registered = false;
                     m_registeredSerials.clear();
-                    Q_EMIT errorOccurred(QStringLiteral("RokuDeck widget registration failed"));
+                    Q_EMIT errorOccurred(i18nc("@info", "RokuDeck widget registration failed"));
                     return;
                 }
                 m_registered = true;
@@ -387,13 +444,13 @@ void DaemonProxy::handleCommandFinished(const QString& requestId, const QString&
         !result->value(QStringLiteral("success")).isBool()) {
         m_devices->finishPendingCommand(serial, requestId);
         m_requestSerials.remove(requestId);
-        Q_EMIT errorOccurred(QStringLiteral("The Roku command result is invalid"));
+        Q_EMIT errorOccurred(i18nc("@info", "The Roku command result is invalid"));
         return;
     }
     if (!result->value(QStringLiteral("success")).toBool()) {
         m_devices->finishPendingCommand(serial, requestId);
         m_requestSerials.remove(requestId);
-        Q_EMIT errorOccurred(QStringLiteral("The Roku command failed"));
+        Q_EMIT errorOccurred(i18nc("@info", "The Roku command failed"));
         return;
     }
     m_awaitingSnapshot[serial].insert(requestId);

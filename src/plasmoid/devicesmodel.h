@@ -21,13 +21,13 @@ struct DeviceStateSnapshot {
     QString serial;
     std::optional<QString> name;
     std::optional<QString> address;
-    QString health = QStringLiteral("unknown");
-    QString power = QStringLiteral("unknown");
-    QString screensaver = QStringLiteral("unknown");
-    QString activeLabel;
-    std::optional<int> volume;
-    std::optional<bool> muted;
-    QStringList capabilities;
+    std::optional<QString> health;
+    std::optional<QString> power;
+    std::optional<QString> screensaver;
+    std::optional<QString> activeLabel;
+    std::optional<std::optional<int>> volume;
+    std::optional<std::optional<bool>> muted;
+    std::optional<QStringList> capabilities;
     bool stale = true;
 };
 
@@ -59,6 +59,7 @@ class DevicesModel final : public QAbstractListModel {
 
     void replaceDevices(const QList<DeviceDescription>& devices);
     void applySnapshot(const DeviceStateSnapshot& snapshot);
+    void markStale(const QString& serial);
     void markAllStale();
     void markCommandPending(const QString& serial, const QString& requestId);
     void finishPendingCommand(const QString& serial, const QString& requestId);

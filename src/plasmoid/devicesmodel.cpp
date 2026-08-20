@@ -4,6 +4,8 @@
 
 #include <QVariant>
 
+#include <utility>
+
 namespace RokuDeck {
 namespace {
 
@@ -148,13 +150,27 @@ void DevicesModel::applySnapshot(const DeviceStateSnapshot& snapshot) {
     if (snapshot.address) {
         updateRole(current.address, *snapshot.address, AddressRole, changedRoles);
     }
-    updateRole(current.health, snapshot.health, HealthRole, changedRoles);
-    updateRole(current.power, snapshot.power, PowerRole, changedRoles);
-    updateRole(current.screensaver, snapshot.screensaver, ScreensaverRole, changedRoles);
-    updateRole(current.activeLabel, snapshot.activeLabel, ActiveLabelRole, changedRoles);
-    updateRole(current.volume, snapshot.volume, VolumeRole, changedRoles);
-    updateRole(current.muted, snapshot.muted, MutedRole, changedRoles);
-    updateRole(current.capabilities, snapshot.capabilities, CapabilitiesRole, changedRoles);
+    if (snapshot.health) {
+        updateRole(current.health, *snapshot.health, HealthRole, changedRoles);
+    }
+    if (snapshot.power) {
+        updateRole(current.power, *snapshot.power, PowerRole, changedRoles);
+    }
+    if (snapshot.screensaver) {
+        updateRole(current.screensaver, *snapshot.screensaver, ScreensaverRole, changedRoles);
+    }
+    if (snapshot.activeLabel) {
+        updateRole(current.activeLabel, *snapshot.activeLabel, ActiveLabelRole, changedRoles);
+    }
+    if (snapshot.volume) {
+        updateRole(current.volume, *snapshot.volume, VolumeRole, changedRoles);
+    }
+    if (snapshot.muted) {
+        updateRole(current.muted, *snapshot.muted, MutedRole, changedRoles);
+    }
+    if (snapshot.capabilities) {
+        updateRole(current.capabilities, *snapshot.capabilities, CapabilitiesRole, changedRoles);
+    }
     updateRole(current.stale, snapshot.stale, StaleRole, changedRoles);
 
     if (!changedRoles.isEmpty()) {
@@ -163,15 +179,19 @@ void DevicesModel::applySnapshot(const DeviceStateSnapshot& snapshot) {
     }
 }
 
+void DevicesModel::markStale(const QString& serial) {
+    const qsizetype row = indexOfSerial(serial);
+    if (row < 0 || m_devices[row].stale) {
+        return;
+    }
+    m_devices[row].stale = true;
+    const QModelIndex changedIndex = index(static_cast<int>(row));
+    Q_EMIT dataChanged(changedIndex, changedIndex, {StaleRole});
+}
+
 void DevicesModel::markAllStale() {
-    for (qsizetype row = 0; row < m_devices.size(); ++row) {
-        DeviceItem& device = m_devices[row];
-        if (device.stale) {
-            continue;
-        }
-        device.stale = true;
-        const QModelIndex changedIndex = index(static_cast<int>(row));
-        Q_EMIT dataChanged(changedIndex, changedIndex, {StaleRole});
+    for (const DeviceItem& device : std::as_const(m_devices)) {
+        markStale(device.serial);
     }
 }
 

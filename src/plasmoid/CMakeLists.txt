@@ -15,7 +15,9 @@ plasma_add_applet(io.github.josephur.rokudeck
     rokudeckapplet.cpp
     daemonproxy.cpp
     devicesmodel.cpp
-  GENERATE_APPLET_CLASS
+)
+target_compile_definitions(io.github.josephur.rokudeck
+  PRIVATE TRANSLATION_DOMAIN="plasma_applet_io.github.josephur.rokudeck"
 )
 
 target_link_libraries(io.github.josephur.rokudeck

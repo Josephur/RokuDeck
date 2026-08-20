@@ -5,14 +5,15 @@
 #include <QAbstractItemModel>
 #include <QUuid>
 
+#include <KPluginFactory>
+
 namespace RokuDeck {
 
-RokuDeckApplet::RokuDeckApplet(QObject* parent)
-    : QObject(parent),
-      m_devices(this),
+RokuDeckApplet::RokuDeckApplet(QObject* parent, const KPluginMetaData& data,
+                               const QVariantList& args)
+    : Plasma::Applet(parent, data, args), m_devices(this),
       m_daemon(&m_devices,
-               QStringLiteral("plasmoid-") +
-                   QUuid::createUuid().toString(QUuid::WithoutBraces),
+               QStringLiteral("plasmoid-") + QUuid::createUuid().toString(QUuid::WithoutBraces),
                this) {
     connect(&m_devices, &QAbstractItemModel::rowsInserted, this,
             &RokuDeckApplet::ensureSelectedSerial);
@@ -23,6 +24,13 @@ RokuDeckApplet::RokuDeckApplet(QObject* parent)
     connect(&m_daemon, &DaemonProxy::availableChanged, this,
             [this](bool) { Q_EMIT availableChanged(); });
     connect(&m_daemon, &DaemonProxy::errorOccurred, this, &RokuDeckApplet::setLastError);
+    connect(this, &Plasma::Applet::destroyedChanged, this, [this](bool destroyed) {
+        if (destroyed) {
+            m_daemon.stop();
+        } else {
+            m_daemon.start();
+        }
+    });
     m_daemon.start();
 }
 
@@ -80,4 +88,9 @@ void RokuDeckApplet::setLastError(const QString& message) {
     Q_EMIT lastErrorChanged();
 }
 
+K_PLUGIN_CLASS_WITH_JSON(RokuDeckApplet, "metadata.json")
+
 } // namespace RokuDeck
+
+#include "moc_rokudeckapplet.cpp"
+#include "rokudeckapplet.moc"

@@ -6,14 +6,13 @@
 #include <QTest>
 
 using RokuDeck::DeviceDescription;
-using RokuDeck::DeviceStateSnapshot;
 using RokuDeck::DevicesModel;
+using RokuDeck::DeviceStateSnapshot;
 
 namespace {
 
 DeviceDescription device(const char* serial, const char* name) {
-    return {QString::fromLatin1(serial), QString::fromLatin1(name),
-            QStringLiteral("192.0.2.10")};
+    return {QString::fromLatin1(serial), QString::fromLatin1(name), QStringLiteral("192.0.2.10")};
 }
 
 QList<DeviceDescription> deviceArray(std::initializer_list<DeviceDescription> devices) {
@@ -26,8 +25,8 @@ DeviceStateSnapshot snapshot(const char* serial, int volume, bool muted) {
     value.health = QStringLiteral("online");
     value.power = QStringLiteral("on");
     value.screensaver = QStringLiteral("inactive");
-    value.volume = volume;
-    value.muted = muted;
+    value.volume = std::optional<int>{volume};
+    value.muted = std::optional<bool>{muted};
     value.stale = false;
     return value;
 }
@@ -47,6 +46,7 @@ class DevicesModelTest : public QObject {
     void emitsOnlyRolesWhoseValuesChanged();
     void reconcilesDevicesBySerialWithoutLosingState();
     void pendingStateRemainsUntilEveryRequestFinishes();
+    void reportsIncrementalDeviceInsertionAndRemoval();
 };
 
 void DevicesModelTest::updatesOneDeviceWithoutResettingTheModel() {
@@ -65,18 +65,12 @@ void DevicesModelTest::exposesTheCompleteStableRoleContract() {
     DevicesModel model;
 
     const QHash<int, QByteArray> expected{
-        {Qt::UserRole + 1, "serial"},
-        {Qt::UserRole + 2, "name"},
-        {Qt::UserRole + 3, "address"},
-        {Qt::UserRole + 4, "health"},
-        {Qt::UserRole + 5, "power"},
-        {Qt::UserRole + 6, "screensaver"},
-        {Qt::UserRole + 7, "activeLabel"},
-        {Qt::UserRole + 8, "volume"},
-        {Qt::UserRole + 9, "muted"},
-        {Qt::UserRole + 10, "capabilities"},
-        {Qt::UserRole + 11, "stale"},
-        {Qt::UserRole + 12, "pendingCommand"},
+        {Qt::UserRole + 1, "serial"},      {Qt::UserRole + 2, "name"},
+        {Qt::UserRole + 3, "address"},     {Qt::UserRole + 4, "health"},
+        {Qt::UserRole + 5, "power"},       {Qt::UserRole + 6, "screensaver"},
+        {Qt::UserRole + 7, "activeLabel"}, {Qt::UserRole + 8, "volume"},
+        {Qt::UserRole + 9, "muted"},       {Qt::UserRole + 10, "capabilities"},
+        {Qt::UserRole + 11, "stale"},      {Qt::UserRole + 12, "pendingCommand"},
     };
 
     QCOMPARE(model.roleNames(), expected);
@@ -93,7 +87,7 @@ void DevicesModelTest::emitsOnlyRolesWhoseValuesChanged() {
     QCOMPARE(changed.count(), 0);
 
     DeviceStateSnapshot updated = initial;
-    updated.volume = 46;
+    updated.volume = std::optional<int>{46};
     model.applySnapshot(updated);
     QCOMPARE(changed.count(), 1);
     QCOMPARE(changedRoles(changed), QList<int>{DevicesModel::VolumeRole});
@@ -143,6 +137,26 @@ void DevicesModelTest::pendingStateRemainsUntilEveryRequestFinishes() {
     QCOMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), false);
     QCOMPARE(changed.count(), 2);
     QCOMPARE(changedRoles(changed), QList<int>{DevicesModel::PendingCommandRole});
+}
+
+void DevicesModelTest::reportsIncrementalDeviceInsertionAndRemoval() {
+    DevicesModel model;
+    QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+    QSignalSpy removed(&model, &QAbstractItemModel::rowsRemoved);
+    QSignalSpy reset(&model, &QAbstractItemModel::modelReset);
+
+    model.replaceDevices(
+        deviceArray({device("SERIAL-A", "Living Room"), device("SERIAL-B", "Office")}));
+    QCOMPARE(inserted.count(), 2);
+    QCOMPARE(removed.count(), 0);
+    QCOMPARE(reset.count(), 0);
+
+    model.replaceDevices(deviceArray({device("SERIAL-B", "Office")}));
+    QCOMPARE(inserted.count(), 2);
+    QCOMPARE(removed.count(), 1);
+    QCOMPARE(removed.constLast().at(1).toInt(), 1);
+    QCOMPARE(removed.constLast().at(2).toInt(), 1);
+    QCOMPARE(reset.count(), 0);
 }
 
 QTEST_GUILESS_MAIN(DevicesModelTest)

@@ -5,17 +5,18 @@
 #include "daemonproxy.h"
 #include "devicesmodel.h"
 
-#include <QObject>
+#include <Plasma/Applet>
+
+#include <KPluginMetaData>
+
 #include <QString>
 #include <QVariant>
-#include <qqmlregistration.h>
+#include <QVariantList>
 
 namespace RokuDeck {
 
-class RokuDeckApplet final : public QObject {
+class RokuDeckApplet final : public Plasma::Applet {
     Q_OBJECT
-    QML_NAMED_ELEMENT(RokuDeckBridge)
-    QML_SINGLETON
 
     Q_PROPERTY(DevicesModel* devices READ devices CONSTANT)
     Q_PROPERTY(QString selectedSerial READ selectedSerial WRITE setSelectedSerial NOTIFY
@@ -24,7 +25,7 @@ class RokuDeckApplet final : public QObject {
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
 
   public:
-    explicit RokuDeckApplet(QObject* parent = nullptr);
+    explicit RokuDeckApplet(QObject* parent, const KPluginMetaData& data, const QVariantList& args);
     ~RokuDeckApplet() override;
 
     [[nodiscard]] DevicesModel* devices();
