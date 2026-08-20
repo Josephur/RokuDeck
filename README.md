@@ -1,3 +1,7 @@
+> [!WARNING]
+> **RokuDeck is alpha software and is not considered working at this time.** Expect missing
+> features, breaking changes, and defects. Do not rely on it for everyday TV control or automation.
+
 # RokuDeck
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSES/GPL-3.0-or-later.txt)
