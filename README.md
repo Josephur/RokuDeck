@@ -1,5 +1,7 @@
 # RokuDeck
 
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSES/GPL-3.0-or-later.txt)
+
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
 ## Overview
