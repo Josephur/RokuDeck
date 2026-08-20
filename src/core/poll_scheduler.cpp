@@ -102,12 +102,17 @@ void PollScheduler::rebuildSchedule(const QString &serial)
     }
 }
 
-void PollScheduler::recordResult(const QString &serial, bool succeeded)
+bool PollScheduler::recordResult(const PollClaim &claim, bool succeeded)
 {
-    m_inFlightSerials.remove(serial);
-    auto scheduleIt = m_schedules.find(serial);
+    const auto activeClaimIt = m_activeClaims.constFind(claim.serial);
+    if (claim.token == 0 || activeClaimIt == m_activeClaims.cend() || activeClaimIt.value() != claim.token) {
+        return false;
+    }
+    m_activeClaims.remove(claim.serial);
+
+    auto scheduleIt = m_schedules.find(claim.serial);
     if (scheduleIt == m_schedules.end()) {
-        return;
+        return true;
     }
     Schedule &schedule = scheduleIt.value();
     if (succeeded) {
@@ -125,19 +130,24 @@ void PollScheduler::recordResult(const QString &serial, bool succeeded)
         schedule.delay = std::clamp(jittered, std::chrono::milliseconds::zero(), backoffCeiling);
     }
     schedule.nextDue = saturatingAdd(m_clock(), schedule.delay);
+    return true;
 }
 
-QStringList PollScheduler::dueDevices()
+QList<PollClaim> PollScheduler::claimDuePolls()
 {
-    QStringList due;
+    QList<PollClaim> due;
     const TimePoint now = m_clock();
     for (auto it = m_schedules.begin(); it != m_schedules.end(); ++it) {
-        if (!m_inFlightSerials.contains(it.key()) && it->nextDue <= now) {
-            due.append(it.key());
-            m_inFlightSerials.insert(it.key());
+        if (!m_activeClaims.contains(it.key()) && it->nextDue <= now) {
+            if (m_nextClaimToken == 0) {
+                break;
+            }
+            const quint64 token = m_nextClaimToken++;
+            due.append({it.key(), token});
+            m_activeClaims.insert(it.key(), token);
         }
     }
-    due.sort();
+    std::ranges::sort(due, {}, &PollClaim::serial);
     return due;
 }
 

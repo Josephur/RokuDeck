@@ -2,9 +2,9 @@
 #pragma once
 
 #include <QHash>
+#include <QList>
 #include <QSet>
 #include <QString>
-#include <QStringList>
 
 #include <chrono>
 #include <functional>
@@ -18,6 +18,11 @@ struct PollInterest {
     std::chrono::milliseconds interval{1000};
 };
 
+struct PollClaim {
+    QString serial;
+    quint64 token = 0;
+};
+
 class PollScheduler final {
 public:
     using TimePoint = std::chrono::steady_clock::time_point;
@@ -29,9 +34,9 @@ public:
 
     void setInterest(const PollInterest &interest);
     bool removeInterest(const QString &clientId, const QString &serial);
-    void recordResult(const QString &serial, bool succeeded);
+    [[nodiscard]] bool recordResult(const PollClaim &claim, bool succeeded);
 
-    [[nodiscard]] QStringList dueDevices();
+    [[nodiscard]] QList<PollClaim> claimDuePolls();
     [[nodiscard]] qsizetype deviceCount() const;
     [[nodiscard]] std::chrono::milliseconds intervalFor(const QString &serial) const;
     [[nodiscard]] std::chrono::milliseconds delayFor(const QString &serial) const;
@@ -56,7 +61,8 @@ private:
     JitterSource m_jitter;
     QHash<QString, QHash<QString, PollInterest>> m_interestsByClient;
     QHash<QString, Schedule> m_schedules;
-    QSet<QString> m_inFlightSerials;
+    QHash<QString, quint64> m_activeClaims;
+    quint64 m_nextClaimToken = 1;
 };
 
 } // namespace RokuDeck
