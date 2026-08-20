@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<device-info>
+  <serial-number>TEST-SERIAL-0001</serial-number>
+  <user-device-name>Fixture Display</user-device-name>
+  <power-mode>PowerOn</power-mode>
+  <supports-find-remote>true</supports-find-remote>
+  <supports-audio-guide>false</supports-audio-guide>
+</device-info>

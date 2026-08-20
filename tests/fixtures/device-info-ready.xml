@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<device-info>
+  <serial-number>TEST-SERIAL-0002</serial-number>
+  <user-device-name>Standby Fixture</user-device-name>
+  <power-mode>Ready</power-mode>
+</device-info>

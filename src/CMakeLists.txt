@@ -1,1 +1,3 @@
-# Production targets are added by subsequent implementation tasks.
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+add_subdirectory(core)
