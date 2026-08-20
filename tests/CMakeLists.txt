@@ -38,6 +38,14 @@ target_include_directories(poll-scheduler-test PRIVATE ${PROJECT_SOURCE_DIR}/src
 target_link_libraries(poll-scheduler-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
 add_test(NAME poll-scheduler COMMAND poll-scheduler-test)
 
+add_executable(devices-model-test
+  unit/devices_model_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/plasmoid/devicesmodel.cpp
+)
+target_include_directories(devices-model-test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(devices-model-test PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME devices-model COMMAND devices-model-test)
+
 add_executable(daemon-dbus-test integration/daemon_dbus_test.cpp)
 target_include_directories(daemon-dbus-test PRIVATE ${PROJECT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(daemon-dbus-test
