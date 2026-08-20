@@ -122,10 +122,15 @@ DaemonService::DaemonService(QDBusConnection connection,
                              std::function<bool()> hasEnabledAutomations,
                              std::unique_ptr<ProcessRunner> processRunner,
                              std::unique_ptr<ConfigStore> configStore,
-                             std::chrono::milliseconds idleGrace, QObject* parent)
+                             std::chrono::milliseconds idleGrace,
+                             DeadlineRemaining deadlineRemaining, QObject* parent)
     : QObject(parent), m_connection(std::move(connection)),
       m_hasEnabledAutomations(hasEnabledAutomations ? std::move(hasEnabledAutomations)
                                                     : [] { return false; }),
+      m_deadlineRemaining(
+          deadlineRemaining
+              ? std::move(deadlineRemaining)
+              : [](const QDeadlineTimer& deadline) { return deadline.remainingTime(); }),
       m_idleGrace(std::max(idleGrace, std::chrono::milliseconds(1))),
       m_configStore(configStore ? std::move(configStore) : std::make_unique<ConfigStore>()),
       m_processRunner(processRunner ? std::move(processRunner)
@@ -514,7 +519,7 @@ void DaemonService::processNextCommand(const QString& serial) {
         queueIt == m_commandQueues.end() || queueIt->isEmpty()) {
         return;
     }
-    while (!queueIt->isEmpty() && queueIt->head().deadline.hasExpired()) {
+    while (!queueIt->isEmpty() && m_deadlineRemaining(queueIt->head().deadline) <= 0) {
         const QueuedCommand expired = queueIt->dequeue();
         finishCommandWithError(expired.requestId, serial, QStringLiteral("timedOut"));
     }
@@ -542,9 +547,19 @@ void DaemonService::processNextCommand(const QString& serial) {
                          QStringLiteral("--timeout"), QStringLiteral("3000"),
                          QStringLiteral("--ip"),      device->address};
     request.arguments.append(command.arguments);
-    const qint64 remainingMs = command.deadline.remainingTime();
+    const qint64 remainingMs = m_deadlineRemaining(command.deadline);
+    if (remainingMs <= 0) {
+        queueIt->dequeue();
+        if (queueIt->isEmpty()) {
+            m_commandQueues.erase(queueIt);
+        }
+        finishCommandWithError(command.requestId, serial, QStringLiteral("timedOut"));
+        updateIdleTimer();
+        processNextCommand(serial);
+        return;
+    }
     request.timeout = std::chrono::milliseconds(
-        std::max<qint64>(1, std::min<qint64>(CommandContract::executionTimeoutMs, remainingMs)));
+        std::min<qint64>(CommandContract::executionTimeoutMs, remainingMs));
     m_activeCommandSerials.insert(serial);
 
     QPointer<DaemonService> service(this);

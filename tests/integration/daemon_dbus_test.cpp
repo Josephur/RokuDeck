@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "command_contract.h"
 #include "core/process_runner.h"
 #include "daemon/config_store.h"
 #include "daemon/daemon_service.h"
@@ -52,6 +53,8 @@ class DaemonDbusTest final : public QObject {
     void queryFailureDoesNotBlockAnotherDevice();
     void commandSchemaRejectsUnboundedAndUnsupportedWork();
     void commandQueueIsBoundedPerDevice();
+    void expiryBetweenSweepAndDispatchDoesNotReachRunner();
+    void deepestQueuedCommandsExpireWithoutDispatch();
     void commandsSerializePerDevice();
     void commandsOnDifferentDevicesRunIndependently();
     void pendingCommandDefersActualIdleExpiry();
@@ -65,7 +68,8 @@ class DaemonDbusTest final : public QObject {
     [[nodiscard]] static QDBusMessage waitForReply(const QDBusPendingCall& pending);
     [[nodiscard]] static QJsonObject jsonResult(const QDBusMessage& reply);
     [[nodiscard]] static bool waitForHelperRegistration(QProcess& client);
-    void recreateDaemon(std::chrono::milliseconds idleGrace = 30s);
+    void recreateDaemon(std::chrono::milliseconds idleGrace = 30s,
+                        DaemonService::DeadlineRemaining deadlineRemaining = {});
 
     QTemporaryDir m_configDirectory;
     QString m_configPath;
@@ -86,7 +90,8 @@ void DaemonDbusTest::init() {
     recreateDaemon();
 }
 
-void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace) {
+void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
+                                    DaemonService::DeadlineRemaining deadlineRemaining) {
     m_proxy.reset();
     m_daemon.reset();
     auto runner = std::make_unique<FakeProcessRunner>();
@@ -95,7 +100,7 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace) {
     auto configStore = std::make_unique<ConfigStore>(std::move(config));
     m_daemon = std::make_unique<DaemonService>(
         QDBusConnection::sessionBus(), [this] { return m_automationEnabled; }, std::move(runner),
-        std::move(configStore), idleGrace);
+        std::move(configStore), idleGrace, std::move(deadlineRemaining));
     QVERIFY2(m_daemon->registerOnBus(),
              "the test daemon could not own its private session-bus name");
     m_proxy = std::make_unique<IoGithubJosephurRokuDeck1Interface>(
@@ -624,6 +629,53 @@ void DaemonDbusTest::commandQueueIsBoundedPerDevice() {
     QCOMPARE(rejected.value(QStringLiteral("schemaVersion")).toInt(), 1);
     QCOMPARE(rejected.value(QStringLiteral("success")).toBool(), false);
     QCOMPARE(rejected.value(QStringLiteral("error")).toString(), QStringLiteral("queueFull"));
+}
+
+void DaemonDbusTest::expiryBetweenSweepAndDispatchDoesNotReachRunner() {
+    int deadlineReads = 0;
+    recreateDaemon(
+        30s, [&deadlineReads](const QDeadlineTimer&) { return deadlineReads++ == 0 ? 1 : 0; });
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.20")});
+    QSignalSpy finished(m_daemon.get(), &DaemonService::CommandFinished);
+
+    const QDBusMessage reply = waitForReply(
+        m_proxy->SendCommand(QStringLiteral("SERIAL-A"),
+                             QStringLiteral(R"json({"operation":"keypress","key":"Home"})json")));
+
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 500);
+    QCOMPARE(m_runner->requests.size(), 0);
+    const QJsonObject result =
+        QJsonDocument::fromJson(finished.front().at(1).toString().toUtf8()).object();
+    QCOMPARE(result.value(QStringLiteral("success")).toBool(), false);
+    QCOMPARE(result.value(QStringLiteral("error")).toString(), QStringLiteral("timedOut"));
+}
+
+void DaemonDbusTest::deepestQueuedCommandsExpireWithoutDispatch() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.20")});
+    const QString command = QStringLiteral(R"json({"operation":"keypress","key":"Home"})json");
+    QSignalSpy finished(m_daemon.get(), &DaemonService::CommandFinished);
+    for (int index = 0; index < CommandContract::maximumOutstandingPerDevice; ++index) {
+        const QDBusMessage reply =
+            waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), command));
+        QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+    }
+    QCOMPARE(m_runner->requests.size(), 1);
+
+    QTest::qWait(CommandContract::daemonCompletionDeadlineMs + 50);
+    m_runner->complete({0, QByteArrayLiteral("{}"), {}, false});
+
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), CommandContract::maximumOutstandingPerDevice, 500);
+    QCOMPARE(m_runner->requests.size(), 1);
+    int timedOut = 0;
+    for (const QList<QVariant>& arguments : finished) {
+        const QJsonObject result =
+            QJsonDocument::fromJson(arguments.at(1).toString().toUtf8()).object();
+        timedOut += result.value(QStringLiteral("error")).toString() == QStringLiteral("timedOut");
+    }
+    QCOMPARE(timedOut, CommandContract::maximumOutstandingPerDevice - 1);
 }
 
 void DaemonDbusTest::commandsSerializePerDevice() {

@@ -32,12 +32,15 @@ class DaemonService final : public QObject, protected QDBusContext {
     Q_OBJECT
 
   public:
+    using DeadlineRemaining = std::function<qint64(const QDeadlineTimer&)>;
+
     explicit DaemonService(
         QDBusConnection connection = QDBusConnection::sessionBus(),
         std::function<bool()> hasEnabledAutomations = [] { return false; },
         std::unique_ptr<ProcessRunner> processRunner = {},
         std::unique_ptr<ConfigStore> configStore = {},
-        std::chrono::milliseconds idleGrace = std::chrono::seconds(30), QObject* parent = nullptr);
+        std::chrono::milliseconds idleGrace = std::chrono::seconds(30),
+        DeadlineRemaining deadlineRemaining = {}, QObject* parent = nullptr);
     ~DaemonService() override;
 
     [[nodiscard]] bool registerOnBus();
@@ -103,6 +106,7 @@ class DaemonService final : public QObject, protected QDBusContext {
 
     QDBusConnection m_connection;
     std::function<bool()> m_hasEnabledAutomations;
+    DeadlineRemaining m_deadlineRemaining;
     std::chrono::milliseconds m_idleGrace;
     std::unique_ptr<ConfigStore> m_configStore;
     std::unique_ptr<ProcessRunner> m_processRunner;
