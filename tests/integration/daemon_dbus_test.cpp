@@ -51,6 +51,7 @@ class DaemonDbusTest final : public QObject {
     void discoveryUpdatesSerialKeyedRegistry();
     void queryFailureDoesNotBlockAnotherDevice();
     void commandSchemaRejectsUnboundedAndUnsupportedWork();
+    void commandQueueIsBoundedPerDevice();
     void commandsSerializePerDevice();
     void commandsOnDifferentDevicesRunIndependently();
     void pendingCommandDefersActualIdleExpiry();
@@ -600,6 +601,29 @@ void DaemonDbusTest::commandSchemaRejectsUnboundedAndUnsupportedWork() {
     QCOMPARE(m_runner->lastRequest.arguments.last(2),
              QStringList({QStringLiteral("keypress"), QStringLiteral("FindRemote")}));
     m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
+}
+
+void DaemonDbusTest::commandQueueIsBoundedPerDevice() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.20")});
+    const QString command = QStringLiteral(R"json({"operation":"keypress","key":"Home"})json");
+    QSignalSpy finished(m_daemon.get(), &DaemonService::CommandFinished);
+
+    for (int index = 0; index < 5; ++index) {
+        const QDBusMessage accepted =
+            waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), command));
+        QVERIFY2(accepted.type() != QDBusMessage::ErrorMessage,
+                 qPrintable(accepted.errorMessage()));
+        QVERIFY(!accepted.arguments().front().toString().isEmpty());
+    }
+
+    QCOMPARE(m_runner->requests.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 500);
+    const QJsonObject rejected =
+        QJsonDocument::fromJson(finished.front().at(1).toString().toUtf8()).object();
+    QCOMPARE(rejected.value(QStringLiteral("schemaVersion")).toInt(), 1);
+    QCOMPARE(rejected.value(QStringLiteral("success")).toBool(), false);
+    QCOMPARE(rejected.value(QStringLiteral("error")).toString(), QStringLiteral("queueFull"));
 }
 
 void DaemonDbusTest::commandsSerializePerDevice() {

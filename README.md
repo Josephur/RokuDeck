@@ -36,6 +36,16 @@ Implemented foundation capabilities:
 Planned product capabilities include the Plasma widget, device controls in the panel, and safe
 audio/TV automation across multiple devices.
 
+### Planned widget customization
+
+Each Plasma widget instance will let users choose its device set, default selected device,
+displayed status information, visible controls, and compact-representation behavior. Multiple
+widgets may use overlapping or separate device sets while the shared daemon continues to deduplicate
+backend polling. Device settings will support friendly naming and ordering alongside discovery,
+manual setup, capability inspection, connection testing, polling preferences, and per-device
+automation permission. This customization model is approved direction, not functionality included
+in the current foundation.
+
 ## Architecture
 
 `rokudeckd` is the only component that invokes `rds`, polls devices, or stores device
@@ -89,7 +99,9 @@ Use `--json` for machine-readable output and `--quiet` to suppress successful ou
 `ACTION` is sent as a keypress; a JSON object is passed to the daemon's supported-command schema.
 The CLI returns `2` for usage errors, `3` when the service is unavailable, `4` for an unknown
 device, `5` for an unsupported command, `6` for a safety rejection, and `7` for transport or
-service-response failure.
+service-response failure. The daemon accepts at most four outstanding commands per device and
+gives every accepted request a bounded completion deadline; the CLI waits beyond that deadline for
+the matching completion signal. A saturated queue is rejected before another TV action is added.
 
 ## Automation Safety
 
@@ -121,6 +133,10 @@ serial numbers, network names, credentials, or diagnostic output containing them
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+Report vulnerabilities through the private channel in [SECURITY.md](SECURITY.md).
 
 ## License
 

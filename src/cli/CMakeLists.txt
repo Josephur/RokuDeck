@@ -5,7 +5,7 @@ add_library(rokudeck-cli STATIC
   dbus_client.cpp
 )
 add_library(RokuDeck::Cli ALIAS rokudeck-cli)
-target_include_directories(rokudeck-cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(rokudeck-cli PUBLIC ${PROJECT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(rokudeck-cli
   PUBLIC
     RokuDeck::DBusInterface

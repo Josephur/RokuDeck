@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "dbus_client.h"
 
+#include "command_contract.h"
 #include "rokudeck1_interface.h"
 
 #include <QDBusError>
 #include <QDBusPendingReply>
 #include <QEventLoop>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -149,18 +151,22 @@ ClientResult DbusClient::discover() const {
 
 ClientResult DbusClient::sendCommand(const QString& device, const QString& action) const {
     auto proxy = makeProxy();
+    proxy.setTimeout(CommandContract::clientCompletionTimeoutMs);
     if (!proxy.isValid()) {
         return failure(ExitCode::ServiceUnavailable,
                        QStringLiteral("io.github.josephur.RokuDeck1 is unavailable"));
     }
 
     std::optional<ClientResult> completed;
+    QHash<QString, QString> earlyCompletions;
     QString requestId;
     QEventLoop eventLoop;
     const QMetaObject::Connection signalConnection =
         QObject::connect(&proxy, &IoGithubJosephurRokuDeck1Interface::CommandFinished, &eventLoop,
                          [&](const QString& finishedId, const QString& payload) {
-                             if (!requestId.isEmpty() && finishedId == requestId) {
+                             if (requestId.isEmpty()) {
+                                 earlyCompletions.insert(finishedId, payload);
+                             } else if (finishedId == requestId) {
                                  completed = parseObject(payload);
                                  eventLoop.quit();
                              }
@@ -178,11 +184,15 @@ ClientResult DbusClient::sendCommand(const QString& device, const QString& actio
         return failure(ExitCode::TransportFailure,
                        QStringLiteral("the service returned an empty command request ID"));
     }
+    if (const auto early = earlyCompletions.constFind(requestId);
+        early != earlyCompletions.cend()) {
+        completed = parseObject(early.value());
+    }
 
     if (!completed) {
         QTimer timeout;
         timeout.setSingleShot(true);
-        timeout.setInterval(5000);
+        timeout.setInterval(CommandContract::clientCompletionTimeoutMs);
         QObject::connect(&timeout, &QTimer::timeout, &eventLoop, &QEventLoop::quit);
         timeout.start();
         eventLoop.exec();

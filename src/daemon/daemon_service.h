@@ -12,6 +12,7 @@
 #include <QDBusConnection>
 #include <QDBusContext>
 #include <QDBusServiceWatcher>
+#include <QDeadlineTimer>
 #include <QHash>
 #include <QObject>
 #include <QQueue>
@@ -74,6 +75,7 @@ class DaemonService final : public QObject, protected QDBusContext {
         QString requestId;
         QString serial;
         QStringList arguments;
+        QDeadlineTimer deadline;
     };
 
     struct ValidatedCommand {

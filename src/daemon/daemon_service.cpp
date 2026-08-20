@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "daemon_service.h"
 
+#include "command_contract.h"
 #include "config_store.h"
 #include "core/qprocess_runner.h"
 #include "rokudeck1_adaptor.h"
@@ -492,7 +493,16 @@ QString DaemonService::SendCommand(const QString& serial, const QString& command
         return requestId;
     }
 
-    m_commandQueues[serial].enqueue({requestId, serial, validated.arguments});
+    QQueue<QueuedCommand>& queue = m_commandQueues[serial];
+    if (queue.size() >= CommandContract::maximumOutstandingPerDevice) {
+        QTimer::singleShot(0, this, [this, requestId, serial] {
+            finishCommandWithError(requestId, serial, QStringLiteral("queueFull"));
+        });
+        return requestId;
+    }
+
+    queue.enqueue({requestId, serial, validated.arguments,
+                   QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs, Qt::PreciseTimer)});
     updateIdleTimer();
     processNextCommand(serial);
     return requestId;
@@ -502,6 +512,15 @@ void DaemonService::processNextCommand(const QString& serial) {
     auto queueIt = m_commandQueues.find(serial);
     if (m_shuttingDown || m_activeCommandSerials.contains(serial) ||
         queueIt == m_commandQueues.end() || queueIt->isEmpty()) {
+        return;
+    }
+    while (!queueIt->isEmpty() && queueIt->head().deadline.hasExpired()) {
+        const QueuedCommand expired = queueIt->dequeue();
+        finishCommandWithError(expired.requestId, serial, QStringLiteral("timedOut"));
+    }
+    if (queueIt->isEmpty()) {
+        m_commandQueues.erase(queueIt);
+        updateIdleTimer();
         return;
     }
     const auto device = findDevice(serial);
@@ -523,7 +542,9 @@ void DaemonService::processNextCommand(const QString& serial) {
                          QStringLiteral("--timeout"), QStringLiteral("3000"),
                          QStringLiteral("--ip"),      device->address};
     request.arguments.append(command.arguments);
-    request.timeout = std::chrono::milliseconds(3000);
+    const qint64 remainingMs = command.deadline.remainingTime();
+    request.timeout = std::chrono::milliseconds(
+        std::max<qint64>(1, std::min<qint64>(CommandContract::executionTimeoutMs, remainingMs)));
     m_activeCommandSerials.insert(serial);
 
     QPointer<DaemonService> service(this);

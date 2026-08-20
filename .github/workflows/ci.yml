@@ -47,3 +47,5 @@ jobs:
           test -x build/install/bin/rokudeckctl
           test -x build/install/lib/libexec/rokudeckd
           test -f build/install/share/dbus-1/interfaces/io.github.josephur.RokuDeck1.xml
+          test -f build/install/share/dbus-1/services/io.github.josephur.RokuDeck1.service
+          test -f build/install/lib/systemd/user/rokudeckd.service

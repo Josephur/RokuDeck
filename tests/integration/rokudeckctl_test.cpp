@@ -59,6 +59,7 @@ class RokuDeckCtlTest final : public QObject {
     void jsonStatusPreservesSchemaVersion();
     void jsonDiscoveryUsesDaemonContract();
     void jsonCommandWaitsForDaemonCompletion();
+    void queuedCommandRemainsAccountedUntilCompletion();
     void quietSuppressesSuccessfulOutput();
     void invalidUsageHasDocumentedExitCode();
     void unavailableServiceHasDocumentedExitCode();
@@ -198,6 +199,30 @@ void RokuDeckCtlTest::jsonCommandWaitsForDaemonCompletion() {
     QCOMPARE(document.object().value(QStringLiteral("schemaVersion")).toInt(), 1);
     QCOMPARE(document.object().value(QStringLiteral("success")).toBool(), true);
     QVERIFY(!document.object().value(QStringLiteral("requestId")).toString().isEmpty());
+}
+
+void RokuDeckCtlTest::queuedCommandRemainsAccountedUntilCompletion() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-TEST"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("192.0.2.10")});
+    std::unique_ptr<QProcess> first = startCli(
+        {QStringLiteral("command"), QStringLiteral("SERIAL-TEST"), QStringLiteral("Home")});
+    QVERIFY2(first, "first rokudeckctl process did not start");
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 1000);
+
+    std::unique_ptr<QProcess> second = startCli(
+        {QStringLiteral("command"), QStringLiteral("SERIAL-TEST"), QStringLiteral("Back")});
+    QVERIFY2(second, "second rokudeckctl process did not start");
+    QTest::qWait(4500);
+    QCOMPARE(m_runner->requests.size(), 1);
+
+    m_runner->complete({0, QByteArrayLiteral("{}"), {}, false});
+    QCOMPARE(finishCli(*first).exitCode, 0);
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 2, 1000);
+
+    QTest::qWait(800);
+    QCOMPARE(second->state(), QProcess::Running);
+    m_runner->complete({0, QByteArrayLiteral("{}"), {}, false});
+    QCOMPARE(finishCli(*second).exitCode, 0);
 }
 
 void RokuDeckCtlTest::quietSuppressesSuccessfulOutput() {
