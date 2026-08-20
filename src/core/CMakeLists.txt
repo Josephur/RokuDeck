@@ -4,8 +4,13 @@ add_library(rokudeck-core STATIC
   active_app_parser.cpp
   audio_device_parser.cpp
   device_info_parser.cpp
+  device_registry.cpp
   device_state.cpp
   media_player_parser.cpp
+  poll_scheduler.cpp
+  process_runner.h
+  qprocess_runner.cpp
+  rds_client.cpp
 )
 
 add_library(RokuDeck::Core ALIAS rokudeck-core)
