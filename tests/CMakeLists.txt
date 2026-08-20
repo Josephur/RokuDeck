@@ -4,6 +4,16 @@ add_executable(project-smoke smoke/project_smoke.cpp)
 target_link_libraries(project-smoke PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME project-smoke COMMAND project-smoke)
 
+find_program(BASH_EXECUTABLE bash REQUIRED)
+add_test(NAME public-privacy
+  COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/privacy/public_repository_scan.sh
+)
+set_tests_properties(public-privacy PROPERTIES WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+add_test(NAME public-contract
+  COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/project/public_contract_test.sh
+)
+set_tests_properties(public-contract PROPERTIES WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+
 add_executable(device-parsers-test unit/device_parsers_test.cpp)
 target_include_directories(device-parsers-test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(device-parsers-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)

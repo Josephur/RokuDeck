@@ -35,6 +35,7 @@ struct DeviceSnapshot {
     QSet<QString> capabilities;
     QDateTime capturedAt;
     DeviceHealth health = DeviceHealth::Unknown;
+    bool partialFailure = false;
 
     void normalize();
 };

@@ -14,7 +14,7 @@
 
 - Complete `docs/superpowers/plans/2026-08-20-rokudeck-foundation.md` first.
 - Use plugin ID `io.github.josephur.rokudeck` and D-Bus API `io.github.josephur.RokuDeck1`.
-- Follow Plasma 6 patterns from `/home/josephur/dev/kde-reference` and installed Plasma widgets; never modify either reference location.
+- Follow Plasma 6 patterns from `$HOME/dev/kde-reference` and installed Plasma widgets; never modify either reference location.
 - The widget must not invoke `rds`, open sockets, or poll independently.
 - Every control is capability-gated and configurable per widget.
 - Prefix local shell commands with `rtk`.

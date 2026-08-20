@@ -34,7 +34,8 @@ Implemented foundation capabilities:
 - parser, transport, scheduler, daemon-contract, and CLI integration tests.
 
 Planned product capabilities include the Plasma widget, device controls in the panel, and safe
-audio/TV automation across multiple devices.
+audio/TV automation across multiple devices. Users will choose which applications count as audio
+triggers, which audio outputs and headphones are relevant, and which TVs each rule controls.
 
 ### Planned widget customization
 
@@ -116,13 +117,20 @@ device-info, active-app, and audio-device queries. It sends no POST, power, volu
 request and prints only the reported power state, never the configured address or device
 identifiers.
 
-The planned automation engine will coordinate Linux audio and Roku TV audio. Its approved safety
-direction includes a per-device maximum volume that clamps every RokuDeck-issued path and blocks
-loudness-increasing commands when fresh volume state is unavailable. The rule option **Only run
-while TV is on** means `PowerOn`, which includes screensaver mode; screensaver active/inactive is a
-separate condition. Unknown or stale state will not satisfy a positive rule condition. These rules
-and guards are design commitments for the later automation phase, not implemented features in the
-current foundation.
+The planned automation engine will coordinate Linux audio and Roku TV audio. A rule may react when
+user-selected applications begin or stop playback, when qualifying playback starts or stops, when
+the default output changes, or when a selected output or headset becomes active or inactive. Rules
+will be able to mute a selected TV or lower it to a configured volume, then restore only when no
+other active rule still needs that property and the TV still matches RokuDeck's last applied value.
+Manual changes therefore take precedence instead of being fought by restoration.
+
+The approved safety direction also includes a per-device maximum volume that clamps every
+RokuDeck-issued path and blocks loudness-increasing commands when fresh volume state is unavailable.
+The rule option **Only run while TV is on** means `PowerOn`, which includes screensaver mode;
+screensaver active/inactive is a separate condition. Unknown or stale state will not satisfy a
+positive rule condition. These triggers, mute/lower-volume actions, restoration rules, and guards
+are design commitments for the later automation phase, not implemented features in the current
+foundation.
 
 ## Privacy
 

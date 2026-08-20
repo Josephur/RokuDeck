@@ -23,6 +23,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QUuid>
 #include <QXmlStreamReader>
 #include <QtTest>
 
@@ -50,7 +51,10 @@ class DaemonDbusTest final : public QObject {
     void deviceJsonIsVersionedAndAddressChangesPreserveIdentity();
     void addressChangeInvalidatesSnapshotAndRejectsStalePoll();
     void discoveryUpdatesSerialKeyedRegistry();
+    void discoveryFailureReturnsTypedError();
     void queryFailureDoesNotBlockAnotherDevice();
+    void incompatibleRdsDisablesPollingAndExposesDiagnostic();
+    void immediateMethodFailuresUseTypedDbusErrors();
     void commandSchemaRejectsUnboundedAndUnsupportedWork();
     void commandQueueIsBoundedPerDevice();
     void expiryBetweenSweepAndDispatchDoesNotReachRunner();
@@ -76,6 +80,8 @@ class DaemonDbusTest final : public QObject {
     bool m_automationEnabled = true;
     FakeProcessRunner* m_runner = nullptr;
     std::unique_ptr<DaemonService> m_daemon;
+    QString m_clientConnectionName;
+    std::unique_ptr<QDBusConnection> m_clientConnection;
     std::unique_ptr<IoGithubJosephurRokuDeck1Interface> m_proxy;
 };
 
@@ -103,15 +109,28 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
         std::move(configStore), idleGrace, std::move(deadlineRemaining));
     QVERIFY2(m_daemon->registerOnBus(),
              "the test daemon could not own its private session-bus name");
+    if (!m_clientConnection) {
+        m_clientConnectionName =
+            QStringLiteral("rokudeck-test-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        m_clientConnection = std::make_unique<QDBusConnection>(
+            QDBusConnection::connectToBus(QDBusConnection::SessionBus, m_clientConnectionName));
+        QVERIFY2(m_clientConnection->isConnected(),
+                 "could not create the test client bus connection");
+    }
     m_proxy = std::make_unique<IoGithubJosephurRokuDeck1Interface>(
         QStringLiteral("io.github.josephur.RokuDeck1"),
-        QStringLiteral("/io/github/josephur/RokuDeck1"), QDBusConnection::sessionBus());
+        QStringLiteral("/io/github/josephur/RokuDeck1"), *m_clientConnection);
 }
 
 void DaemonDbusTest::cleanup() {
     m_proxy.reset();
     m_daemon.reset();
     m_runner = nullptr;
+    m_clientConnection.reset();
+    if (!m_clientConnectionName.isEmpty()) {
+        QDBusConnection::disconnectFromBus(m_clientConnectionName);
+        m_clientConnectionName.clear();
+    }
     QCoreApplication::processEvents();
 }
 
@@ -175,10 +194,23 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
     QVERIFY2(introspected.type() != QDBusMessage::ErrorMessage,
              qPrintable(introspected.errorMessage()));
     QVERIFY(introspected.arguments().size() == 1);
+    const QString introspectionXml = introspected.arguments().front().toString();
+    QVERIFY(introspectionXml.contains(
+        QStringLiteral("io.github.josephur.RokuDeck1.Error.UnknownDevice")));
+    QVERIFY(introspectionXml.contains(
+        QStringLiteral("io.github.josephur.RokuDeck1.Error.UnsupportedCommand")));
+    QVERIFY(introspectionXml.contains(
+        QStringLiteral("io.github.josephur.RokuDeck1.Error.UnsupportedCapability")));
+    QVERIFY(introspectionXml.contains(
+        QStringLiteral("io.github.josephur.RokuDeck1.Error.SafetyRejected")));
+    QVERIFY(
+        introspectionXml.contains(QStringLiteral("io.github.josephur.RokuDeck1.Error.Timeout")));
+    QVERIFY(introspectionXml.contains(
+        QStringLiteral("io.github.josephur.RokuDeck1.Error.TransportFailure")));
 
     QHash<QString, QStringList> methods;
     QHash<QString, QStringList> signals;
-    QXmlStreamReader xml(introspected.arguments().front().toString());
+    QXmlStreamReader xml(introspectionXml);
     bool inTargetInterface = false;
     QString currentMember;
     bool currentIsSignal = false;
@@ -445,19 +477,36 @@ void DaemonDbusTest::addressChangeInvalidatesSnapshotAndRejectsStalePoll() {
 
     QSignalSpy snapshots(m_daemon.get(), &DaemonService::DeviceSnapshotChanged);
     QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 1000);
-    const QByteArray onlineEnvelope = R"json({
-        "results": [
-            {"endpoint":"/query/device-info","status":200,"body":"<device-info><serial-number>SERIAL-A</serial-number><user-device-name>Fixture Room</user-device-name><power-mode>PowerOn</power-mode><supports-find-remote>true</supports-find-remote></device-info>"}
-        ]
-    })json";
-    m_runner->complete({0, onlineEnvelope, {}, false});
+    m_runner->complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
+    const QByteArray onlineDevice = QByteArrayLiteral(
+        R"json({"deviceName":"Fixture Room","serialNumber":"SERIAL-A","powerMode":"PowerOn","supportsFindRemote":true})json");
+    m_runner->complete({0, onlineDevice, {}, false});
+    QCOMPARE(m_runner->requests.size(), 5);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<active-app><app id=\"fixture-app\" type=\"appl\">Fixture App</app></active-app>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<player state=\"idle\"/>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<audio-device><volume>18</volume><mute-status>false</mute-status></audio-device>","status":200,"headers":{}})json"),
+         {},
+         false});
     QCOMPARE(snapshots.size(), 1);
     QCOMPARE(jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("SERIAL-A")}))
                  .value(QStringLiteral("address"))
                  .toString(),
              QStringLiteral("192.0.2.30"));
 
-    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 2, 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 6, 1000);
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.31")});
     const QJsonObject invalidated =
@@ -473,7 +522,26 @@ void DaemonDbusTest::addressChangeInvalidatesSnapshotAndRejectsStalePoll() {
              QStringLiteral("192.0.2.30"));
     QCOMPARE(returnedAddress.value(QStringLiteral("health")).toString(), QStringLiteral("unknown"));
 
-    m_runner->complete({0, onlineEnvelope, {}, false});
+    m_runner->complete({0, onlineDevice, {}, false});
+    QCOMPARE(m_runner->requests.size(), 9);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<active-app><app id=\"fixture-app\" type=\"appl\">Fixture App</app></active-app>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<player state=\"idle\"/>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<audio-device><volume>18</volume><mute-status>false</mute-status></audio-device>","status":200,"headers":{}})json"),
+         {},
+         false});
     QCOMPARE(snapshots.size(), 1);
     const QJsonObject devices = jsonResult(call(QStringLiteral("ListDevices")));
     QCOMPARE(devices.value(QStringLiteral("devices"))
@@ -487,33 +555,51 @@ void DaemonDbusTest::addressChangeInvalidatesSnapshotAndRejectsStalePoll() {
 
 void DaemonDbusTest::discoveryUpdatesSerialKeyedRegistry() {
     QSignalSpy changed(m_daemon.get(), &DaemonService::DeviceListChanged);
-    const QDBusMessage started = waitForReply(m_proxy->DiscoverDevices());
-    QVERIFY2(started.type() != QDBusMessage::ErrorMessage, qPrintable(started.errorMessage()));
-    QCOMPARE(jsonResult(started).value(QStringLiteral("schemaVersion")).toInt(), 1);
-    QCOMPARE(m_runner->requests.size(), 1);
+    const QDBusPendingReply<QString> discovery = m_proxy->DiscoverDevices();
+    QDBusPendingCallWatcher discoveryWatcher(discovery);
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 500);
+    QVERIFY(!discoveryWatcher.isFinished());
     QCOMPARE(m_runner->lastRequest.program, QStringLiteral("rds"));
     QCOMPARE(m_runner->lastRequest.arguments,
              QStringList({QStringLiteral("--json"), QStringLiteral("--quiet"),
                           QStringLiteral("--timeout"), QStringLiteral("3000"),
                           QStringLiteral("discover")}));
+    QCOMPARE(m_runner->lastRequest.timeout, 7s);
 
     const QByteArray discovered = R"json([
         {"serialNumber":"SERIAL-A","deviceName":"First Fixture","ip":"198.51.100.40"},
         {"serialNumber":"SERIAL-B","deviceName":"Second Fixture","ip":"198.51.100.41"}
     ])json";
     m_runner->complete({0, discovered, {}, false});
+    const QDBusMessage completed = waitForReply(discovery);
+    QVERIFY2(completed.type() != QDBusMessage::ErrorMessage, qPrintable(completed.errorMessage()));
+    const QJsonArray completedDevices =
+        jsonResult(completed).value(QStringLiteral("devices")).toArray();
+    QCOMPARE(completedDevices.size(), 2);
+    QCOMPARE(completedDevices.at(0).toObject().value(QStringLiteral("serial")).toString(),
+             QStringLiteral("SERIAL-A"));
     QCOMPARE(changed.size(), 1);
     QJsonArray devices =
         jsonResult(waitForReply(m_proxy->ListDevices())).value(QStringLiteral("devices")).toArray();
     QCOMPARE(devices.size(), 2);
 
-    const QDBusMessage rediscovery = waitForReply(m_proxy->DiscoverDevices());
-    QVERIFY2(rediscovery.type() != QDBusMessage::ErrorMessage,
-             qPrintable(rediscovery.errorMessage()));
+    const QDBusPendingReply<QString> rediscovery = m_proxy->DiscoverDevices();
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 2, 500);
     const QByteArray moved = R"json([
         {"serialNumber":"SERIAL-A","deviceName":"First Fixture","ip":"198.51.100.42"}
     ])json";
     m_runner->complete({0, moved, {}, false});
+    const QDBusMessage rediscovered = waitForReply(rediscovery);
+    QVERIFY2(rediscovered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(rediscovered.errorMessage()));
+    QCOMPARE(jsonResult(rediscovered)
+                 .value(QStringLiteral("devices"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("address"))
+                 .toString(),
+             QStringLiteral("198.51.100.42"));
     QCOMPARE(changed.size(), 2);
     devices =
         jsonResult(waitForReply(m_proxy->ListDevices())).value(QStringLiteral("devices")).toArray();
@@ -522,6 +608,72 @@ void DaemonDbusTest::discoveryUpdatesSerialKeyedRegistry() {
              QStringLiteral("SERIAL-A"));
     QCOMPARE(devices.at(0).toObject().value(QStringLiteral("address")).toString(),
              QStringLiteral("198.51.100.42"));
+}
+
+void DaemonDbusTest::discoveryFailureReturnsTypedError() {
+    const QDBusPendingReply<QString> discovery = m_proxy->DiscoverDevices();
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 500);
+    m_runner->complete({-1, {}, QByteArrayLiteral("fixture timeout"), true});
+
+    const QDBusMessage reply = waitForReply(discovery);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(reply.errorName(), QStringLiteral("io.github.josephur.RokuDeck1.Error.Timeout"));
+}
+
+void DaemonDbusTest::incompatibleRdsDisablesPollingAndExposesDiagnostic() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.22")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("polling-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 500);
+    QCOMPARE(m_runner->lastRequest.arguments, QStringList{QStringLiteral("--version")});
+
+    m_runner->complete({0, QByteArrayLiteral("2.0.0\n"), {}, false});
+    QTRY_VERIFY_WITH_TIMEOUT(!m_daemon->pollingEnabled(), 500);
+    QVERIFY(m_daemon->pollingDiagnostic().contains(QStringLiteral("1.0.0")));
+    QTest::qWait(150);
+    QCOMPARE(m_runner->requests.size(), 1);
+
+    const QJsonObject snapshot =
+        jsonResult(waitForReply(m_proxy->GetSnapshot(QStringLiteral("SERIAL-A"))));
+    QCOMPARE(snapshot.value(QStringLiteral("schemaVersion")).toInt(), 1);
+    QVERIFY(
+        snapshot.value(QStringLiteral("diagnostic")).toString().contains(QStringLiteral("1.0.0")));
+}
+
+void DaemonDbusTest::immediateMethodFailuresUseTypedDbusErrors() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("203.0.113.50")});
+    QSignalSpy finished(m_daemon.get(), &DaemonService::CommandFinished);
+
+    const QDBusMessage unknown = waitForReply(m_proxy->GetSnapshot(QStringLiteral("MISSING")));
+    QCOMPARE(unknown.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(unknown.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.UnknownDevice"));
+
+    const QDBusMessage unsupported = waitForReply(m_proxy->SendCommand(
+        QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"operation":"erase"})json")));
+    QCOMPARE(unsupported.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(unsupported.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.UnsupportedCommand"));
+
+    const QDBusMessage capability = waitForReply(m_proxy->SendCommand(
+        QStringLiteral("SERIAL-A"),
+        QStringLiteral(R"json({"operation":"keypress","key":"FindRemote"})json")));
+    QCOMPARE(capability.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(capability.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.UnsupportedCapability"));
+
+    const QDBusMessage safety = waitForReply(m_proxy->SendCommand(
+        QStringLiteral("SERIAL-A"),
+        QStringLiteral(R"json({"operation":"keypress","key":"VolumeUp"})json")));
+    QCOMPARE(safety.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(safety.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.SafetyRejected"));
+    QCOMPARE(finished.size(), 0);
+    QVERIFY(m_runner->requests.isEmpty());
 }
 
 void DaemonDbusTest::queryFailureDoesNotBlockAnotherDevice() {
@@ -535,16 +687,34 @@ void DaemonDbusTest::queryFailureDoesNotBlockAnotherDevice() {
               QStringList{QStringLiteral("SERIAL-A"), QStringLiteral("SERIAL-B")}, 1u});
     QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
              qPrintable(registered.errorMessage()));
-    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 2, 1000);
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 1000);
 
     QSignalSpy snapshots(m_daemon.get(), &DaemonService::DeviceSnapshotChanged);
+    m_runner->complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
+    QCOMPARE(m_runner->requests.size(), 3);
     m_runner->complete({1, {}, QByteArrayLiteral("fixture failure"), false});
-    const QByteArray standbyEnvelope = R"json({
-        "results": [
-            {"endpoint":"/query/device-info","status":200,"body":"<device-info><serial-number>SERIAL-B</serial-number><user-device-name>Standby Fixture</user-device-name><power-mode>Ready</power-mode></device-info>"}
-        ]
-    })json";
-    m_runner->complete({0, standbyEnvelope, {}, false});
+    const QByteArray standbyDevice = QByteArrayLiteral(
+        R"json({"deviceName":"Standby Fixture","serialNumber":"SERIAL-B","powerMode":"Ready"})json");
+    m_runner->complete({0, standbyDevice, {}, false});
+    QCOMPARE(m_runner->requests.size(), 6);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<active-app><app id=\"home\" type=\"home\">Roku</app></active-app>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<player state=\"idle\"/>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<audio-device><volume>12</volume><mute-status>false</mute-status></audio-device>","status":200,"headers":{}})json"),
+         {},
+         false});
 
     QCOMPARE(snapshots.size(), 1);
     QCOMPARE(snapshots.at(0).at(0).toString(), QStringLiteral("SERIAL-B"));
@@ -571,14 +741,13 @@ void DaemonDbusTest::commandSchemaRejectsUnboundedAndUnsupportedWork() {
     for (qsizetype index = 0; index < rejected.size(); ++index) {
         const QDBusMessage reply =
             waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), rejected.at(index)));
-        QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
-        QVERIFY(!reply.arguments().front().toString().isEmpty());
-        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), index + 1, 500);
-        const QJsonObject result =
-            QJsonDocument::fromJson(finished.at(index).at(1).toString().toUtf8()).object();
-        QCOMPARE(result.value(QStringLiteral("schemaVersion")).toInt(), 1);
-        QCOMPARE(result.value(QStringLiteral("success")).toBool(), false);
+        QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+        QCOMPARE(reply.errorName(),
+                 index == rejected.size() - 1
+                     ? QStringLiteral("io.github.josephur.RokuDeck1.Error.UnsupportedCapability")
+                     : QStringLiteral("io.github.josephur.RokuDeck1.Error.UnsupportedCommand"));
     }
+    QCOMPARE(finished.size(), 0);
     QVERIFY(m_runner->requests.isEmpty());
 
     const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
@@ -586,12 +755,17 @@ void DaemonDbusTest::commandSchemaRejectsUnboundedAndUnsupportedWork() {
     QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
              qPrintable(registered.errorMessage()));
     QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 1000);
-    const QByteArray capableEnvelope = R"json({
-        "results": [
-            {"endpoint":"/query/device-info","status":200,"body":"<device-info><serial-number>SERIAL-A</serial-number><user-device-name>Fixture Room</user-device-name><power-mode>PowerOn</power-mode><supports-find-remote>true</supports-find-remote></device-info>"}
-        ]
-    })json";
-    m_runner->complete({0, capableEnvelope, {}, false});
+    m_runner->complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"deviceName":"Fixture Room","serialNumber":"SERIAL-A","powerMode":"PowerOn","supportsFindRemote":true})json"),
+         {},
+         false});
+    QCOMPARE(m_runner->requests.size(), 5);
+    m_runner->complete({1, {}, QByteArrayLiteral("fixture app failure"), false});
+    m_runner->complete({1, {}, QByteArrayLiteral("fixture media failure"), false});
+    m_runner->complete({1, {}, QByteArrayLiteral("fixture audio failure"), false});
     const QDBusMessage unregistered =
         waitForReply(m_proxy->UnregisterClient(QStringLiteral("capability-widget")));
     QVERIFY2(unregistered.type() != QDBusMessage::ErrorMessage,
@@ -602,7 +776,7 @@ void DaemonDbusTest::commandSchemaRejectsUnboundedAndUnsupportedWork() {
     const QDBusMessage accepted =
         waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), findRemote));
     QVERIFY2(accepted.type() != QDBusMessage::ErrorMessage, qPrintable(accepted.errorMessage()));
-    QCOMPARE(m_runner->requests.size(), 2);
+    QCOMPARE(m_runner->requests.size(), 6);
     QCOMPARE(m_runner->lastRequest.arguments.last(2),
              QStringList({QStringLiteral("keypress"), QStringLiteral("FindRemote")}));
     m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
@@ -614,21 +788,21 @@ void DaemonDbusTest::commandQueueIsBoundedPerDevice() {
     const QString command = QStringLiteral(R"json({"operation":"keypress","key":"Home"})json");
     QSignalSpy finished(m_daemon.get(), &DaemonService::CommandFinished);
 
-    for (int index = 0; index < 5; ++index) {
+    for (int index = 0; index < CommandContract::maximumOutstandingPerDevice; ++index) {
         const QDBusMessage accepted =
             waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), command));
         QVERIFY2(accepted.type() != QDBusMessage::ErrorMessage,
                  qPrintable(accepted.errorMessage()));
         QVERIFY(!accepted.arguments().front().toString().isEmpty());
     }
+    const QDBusMessage rejected =
+        waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), command));
+    QCOMPARE(rejected.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(rejected.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.TransportFailure"));
 
     QCOMPARE(m_runner->requests.size(), 1);
-    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 500);
-    const QJsonObject rejected =
-        QJsonDocument::fromJson(finished.front().at(1).toString().toUtf8()).object();
-    QCOMPARE(rejected.value(QStringLiteral("schemaVersion")).toInt(), 1);
-    QCOMPARE(rejected.value(QStringLiteral("success")).toBool(), false);
-    QCOMPARE(rejected.value(QStringLiteral("error")).toString(), QStringLiteral("queueFull"));
+    QCOMPARE(finished.size(), 0);
 }
 
 void DaemonDbusTest::expiryBetweenSweepAndDispatchDoesNotReachRunner() {
@@ -649,7 +823,7 @@ void DaemonDbusTest::expiryBetweenSweepAndDispatchDoesNotReachRunner() {
     const QJsonObject result =
         QJsonDocument::fromJson(finished.front().at(1).toString().toUtf8()).object();
     QCOMPARE(result.value(QStringLiteral("success")).toBool(), false);
-    QCOMPARE(result.value(QStringLiteral("error")).toString(), QStringLiteral("timedOut"));
+    QCOMPARE(result.value(QStringLiteral("error")).toString(), QStringLiteral("timeout"));
 }
 
 void DaemonDbusTest::deepestQueuedCommandsExpireWithoutDispatch() {
@@ -673,7 +847,7 @@ void DaemonDbusTest::deepestQueuedCommandsExpireWithoutDispatch() {
     for (const QList<QVariant>& arguments : finished) {
         const QJsonObject result =
             QJsonDocument::fromJson(arguments.at(1).toString().toUtf8()).object();
-        timedOut += result.value(QStringLiteral("error")).toString() == QStringLiteral("timedOut");
+        timedOut += result.value(QStringLiteral("error")).toString() == QStringLiteral("timeout");
     }
     QCOMPARE(timedOut, CommandContract::maximumOutstandingPerDevice - 1);
 }

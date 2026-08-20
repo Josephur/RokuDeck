@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Josephur/RokuDeck/security/advisories/new
+    about: Report security issues privately. Do not disclose vulnerability details in a public issue.
+  - name: Support and troubleshooting
+    url: https://github.com/Josephur/RokuDeck/blob/main/SUPPORT.md
+    about: Read the support guide before filing an issue.

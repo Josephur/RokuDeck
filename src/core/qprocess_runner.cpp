@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "qprocess_runner.h"
 
-#include <QProcess>
+#include <QDeadlineTimer>
 #include <QPointer>
+#include <QProcess>
 #include <QTimer>
 
 #include <algorithm>
@@ -13,8 +14,7 @@
 namespace RokuDeck {
 namespace {
 
-void appendCapped(QByteArray &destination, QByteArray chunk)
-{
+void appendCapped(QByteArray& destination, QByteArray chunk) {
     const qsizetype available = QProcessRunner::maximumCapturedBytes() - destination.size();
     if (available > 0) {
         destination.append(chunk.first(std::min(available, chunk.size())));
@@ -24,8 +24,9 @@ void appendCapped(QByteArray &destination, QByteArray chunk)
 } // namespace
 
 struct QProcessRunner::RunState {
-    QProcess *process = nullptr;
-    QTimer *timer = nullptr;
+    QProcess* process = nullptr;
+    QTimer* timer = nullptr;
+    QTimer* terminationTimer = nullptr;
     ProcessCallback callback;
     QByteArray standardOutput;
     QByteArray standardError;
@@ -33,10 +34,9 @@ struct QProcessRunner::RunState {
     bool timedOut = false;
 };
 
-QProcessRunner::~QProcessRunner()
-{
+QProcessRunner::~QProcessRunner() {
     const QList<std::shared_ptr<RunState>> activeStates = m_activeStates;
-    for (const auto &state : activeStates) {
+    for (const auto& state : activeStates) {
         if (state->completed) {
             continue;
         }
@@ -44,25 +44,34 @@ QProcessRunner::~QProcessRunner()
         disconnect(state->process, nullptr, this, nullptr);
         if (state->process->state() != QProcess::NotRunning) {
             state->process->kill();
-            state->process->waitForFinished(-1);
+        }
+    }
+
+    QDeadlineTimer deadline(static_cast<qint64>(terminationGracePeriod().count()),
+                            Qt::PreciseTimer);
+    for (const auto& state : activeStates) {
+        if (state->completed) {
+            continue;
+        }
+        if (state->process->state() != QProcess::NotRunning && deadline.remainingTime() > 0) {
+            state->process->waitForFinished(static_cast<int>(deadline.remainingTime()));
         }
         complete(state, -1);
     }
 }
 
-void QProcessRunner::drain(const std::shared_ptr<RunState> &state)
-{
+void QProcessRunner::drain(const std::shared_ptr<RunState>& state) {
     appendCapped(state->standardOutput, state->process->readAllStandardOutput());
     appendCapped(state->standardError, state->process->readAllStandardError());
 }
 
-void QProcessRunner::complete(const std::shared_ptr<RunState> &state, int exitCode)
-{
+void QProcessRunner::complete(const std::shared_ptr<RunState>& state, int exitCode) {
     if (state->completed) {
         return;
     }
     state->completed = true;
     state->timer->stop();
+    state->terminationTimer->stop();
     drain(state);
 
     ProcessResult result;
@@ -72,12 +81,18 @@ void QProcessRunner::complete(const std::shared_ptr<RunState> &state, int exitCo
     result.timedOut = state->timedOut;
     ProcessCallback callback = std::move(state->callback);
     m_activeStates.removeOne(state);
-    state->process->deleteLater();
+    disconnect(state->process, nullptr, this, nullptr);
+    if (state->process->state() == QProcess::NotRunning) {
+        state->process->deleteLater();
+    } else {
+        state->process->setParent(nullptr);
+        connect(state->process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+                state->process, &QObject::deleteLater);
+    }
     callback(std::move(result));
 }
 
-void QProcessRunner::start(const ProcessRequest &request, ProcessCallback callback)
-{
+void QProcessRunner::start(const ProcessRequest& request, ProcessCallback callback) {
     auto state = std::make_shared<RunState>();
     state->process = new QProcess(this);
     state->callback = std::move(callback);
@@ -85,6 +100,9 @@ void QProcessRunner::start(const ProcessRequest &request, ProcessCallback callba
 
     state->timer = new QTimer(state->process);
     state->timer->setSingleShot(true);
+    state->terminationTimer = new QTimer(state->process);
+    state->terminationTimer->setSingleShot(true);
+    state->terminationTimer->setInterval(static_cast<int>(terminationGracePeriod().count()));
     const auto timeoutCount = std::clamp<std::chrono::milliseconds::rep>(
         request.timeout.count(), 0, std::numeric_limits<int>::max());
     state->timer->setInterval(static_cast<int>(timeoutCount));
@@ -103,14 +121,21 @@ void QProcessRunner::start(const ProcessRequest &request, ProcessCallback callba
                     runner->complete(state, exitCode);
                 }
             });
-    connect(state->process, &QProcess::errorOccurred, this, [runner, state](QProcess::ProcessError error) {
-        if (runner && error == QProcess::FailedToStart) {
-            runner->complete(state, -1);
-        }
-    });
+    connect(state->process, &QProcess::errorOccurred, this,
+            [runner, state](QProcess::ProcessError error) {
+                if (runner && error == QProcess::FailedToStart) {
+                    runner->complete(state, -1);
+                }
+            });
     connect(state->timer, &QTimer::timeout, this, [state] {
         state->timedOut = true;
         state->process->kill();
+        state->terminationTimer->start();
+    });
+    connect(state->terminationTimer, &QTimer::timeout, this, [runner, state] {
+        if (runner) {
+            runner->complete(state, -1);
+        }
     });
 
     state->process->setProgram(request.program);

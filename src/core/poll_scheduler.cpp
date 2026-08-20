@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "poll_scheduler.h"
 
+#include <QRandomGenerator>
+
 #include <algorithm>
 #include <limits>
 #include <utility>
@@ -9,8 +11,7 @@ namespace RokuDeck {
 namespace {
 
 [[nodiscard]] PollScheduler::TimePoint saturatingAdd(PollScheduler::TimePoint start,
-                                                     std::chrono::milliseconds delay)
-{
+                                                     std::chrono::milliseconds delay) {
     if (delay <= std::chrono::milliseconds::zero()) {
         return start;
     }
@@ -31,16 +32,29 @@ namespace {
     return PollScheduler::TimePoint(ClockDuration(startCount + delayCount));
 }
 
+[[nodiscard]] std::chrono::milliseconds productionJitter(std::chrono::milliseconds delay) {
+    if (delay <= std::chrono::milliseconds::zero()) {
+        return std::chrono::milliseconds::zero();
+    }
+    const long double base = static_cast<long double>(delay.count());
+    const long double lower = base * 0.8L;
+    const long double upper = base * 1.2L;
+    const long double sampled =
+        lower +
+        (upper - lower) * static_cast<long double>(QRandomGenerator::global()->generateDouble());
+    const long double maximum =
+        static_cast<long double>(std::numeric_limits<std::chrono::milliseconds::rep>::max());
+    return std::chrono::milliseconds(
+        static_cast<std::chrono::milliseconds::rep>(std::clamp(sampled, 0.0L, maximum)));
+}
+
 } // namespace
 
 PollScheduler::PollScheduler(Clock clock, JitterSource jitter)
-    : m_clock(std::move(clock))
-    , m_jitter(std::move(jitter))
-{
-}
+    : m_clock(std::move(clock)),
+      m_jitter(jitter ? std::move(jitter) : JitterSource(productionJitter)) {}
 
-void PollScheduler::setInterest(const PollInterest &interest)
-{
+void PollScheduler::setInterest(const PollInterest& interest) {
     if (interest.clientId.isEmpty() || interest.serial.isEmpty()) {
         return;
     }
@@ -48,8 +62,7 @@ void PollScheduler::setInterest(const PollInterest &interest)
     rebuildSchedule(interest.serial);
 }
 
-bool PollScheduler::removeInterest(const QString &clientId, const QString &serial)
-{
+bool PollScheduler::removeInterest(const QString& clientId, const QString& serial) {
     auto clientIt = m_interestsByClient.find(clientId);
     if (clientIt == m_interestsByClient.end() || clientIt->remove(serial) == 0) {
         return false;
@@ -61,12 +74,12 @@ bool PollScheduler::removeInterest(const QString &clientId, const QString &seria
     return true;
 }
 
-void PollScheduler::rebuildSchedule(const QString &serial)
-{
+void PollScheduler::rebuildSchedule(const QString& serial) {
     std::chrono::milliseconds shortest = std::chrono::milliseconds::max();
     QSet<QString> fields;
     bool found = false;
-    for (auto clientIt = m_interestsByClient.cbegin(); clientIt != m_interestsByClient.cend(); ++clientIt) {
+    for (auto clientIt = m_interestsByClient.cbegin(); clientIt != m_interestsByClient.cend();
+         ++clientIt) {
         const auto interestIt = clientIt->constFind(serial);
         if (interestIt == clientIt->cend()) {
             continue;
@@ -91,7 +104,7 @@ void PollScheduler::rebuildSchedule(const QString &serial)
         return;
     }
 
-    Schedule &schedule = scheduleIt.value();
+    Schedule& schedule = scheduleIt.value();
     const bool intervalChanged = schedule.interval != shortest;
     schedule.interval = shortest;
     schedule.fields = std::move(fields);
@@ -102,10 +115,10 @@ void PollScheduler::rebuildSchedule(const QString &serial)
     }
 }
 
-bool PollScheduler::recordResult(const PollClaim &claim, bool succeeded)
-{
+bool PollScheduler::recordResult(const PollClaim& claim, bool succeeded) {
     const auto activeClaimIt = m_activeClaims.constFind(claim.serial);
-    if (claim.token == 0 || activeClaimIt == m_activeClaims.cend() || activeClaimIt.value() != claim.token) {
+    if (claim.token == 0 || activeClaimIt == m_activeClaims.cend() ||
+        activeClaimIt.value() != claim.token) {
         return false;
     }
     m_activeClaims.remove(claim.serial);
@@ -114,7 +127,7 @@ bool PollScheduler::recordResult(const PollClaim &claim, bool succeeded)
     if (scheduleIt == m_schedules.end()) {
         return true;
     }
-    Schedule &schedule = scheduleIt.value();
+    Schedule& schedule = scheduleIt.value();
     if (succeeded) {
         schedule.failures = 0;
         schedule.delay = schedule.interval;
@@ -125,7 +138,8 @@ bool PollScheduler::recordResult(const PollClaim &claim, bool succeeded)
         const auto backoffCeiling = std::max(maximumBackoff(), schedule.interval);
         const auto maxCount = backoffCeiling.count();
         const auto intervalCount = schedule.interval.count();
-        const auto baseCount = intervalCount > maxCount / multiplier ? maxCount : intervalCount * multiplier;
+        const auto baseCount =
+            intervalCount > maxCount / multiplier ? maxCount : intervalCount * multiplier;
         const auto jittered = m_jitter(std::chrono::milliseconds(baseCount));
         schedule.delay = std::clamp(jittered, std::chrono::milliseconds::zero(), backoffCeiling);
     }
@@ -133,8 +147,7 @@ bool PollScheduler::recordResult(const PollClaim &claim, bool succeeded)
     return true;
 }
 
-QList<PollClaim> PollScheduler::claimDuePolls()
-{
+QList<PollClaim> PollScheduler::claimDuePolls() {
     QList<PollClaim> due;
     const TimePoint now = m_clock();
     for (auto it = m_schedules.begin(); it != m_schedules.end(); ++it) {
@@ -151,23 +164,19 @@ QList<PollClaim> PollScheduler::claimDuePolls()
     return due;
 }
 
-qsizetype PollScheduler::deviceCount() const
-{
+qsizetype PollScheduler::deviceCount() const {
     return m_schedules.size();
 }
 
-std::chrono::milliseconds PollScheduler::intervalFor(const QString &serial) const
-{
+std::chrono::milliseconds PollScheduler::intervalFor(const QString& serial) const {
     return m_schedules.value(serial).interval;
 }
 
-std::chrono::milliseconds PollScheduler::delayFor(const QString &serial) const
-{
+std::chrono::milliseconds PollScheduler::delayFor(const QString& serial) const {
     return m_schedules.value(serial).delay;
 }
 
-std::optional<PollScheduler::TimePoint> PollScheduler::nextDueFor(const QString &serial) const
-{
+std::optional<PollScheduler::TimePoint> PollScheduler::nextDueFor(const QString& serial) const {
     const auto scheduleIt = m_schedules.constFind(serial);
     if (scheduleIt == m_schedules.cend()) {
         return std::nullopt;
@@ -175,8 +184,7 @@ std::optional<PollScheduler::TimePoint> PollScheduler::nextDueFor(const QString 
     return scheduleIt->nextDue;
 }
 
-QSet<QString> PollScheduler::fieldsFor(const QString &serial) const
-{
+QSet<QString> PollScheduler::fieldsFor(const QString& serial) const {
     return m_schedules.value(serial).fields;
 }
 

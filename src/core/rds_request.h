@@ -17,6 +17,8 @@ struct RdsError {
         MalformedEnvelope,
         MissingDeviceInfo,
         MalformedPayload,
+        IncompatibleCli,
+        DependencyUnavailable,
     };
 
     Code code = Code::ProcessFailed;
@@ -24,23 +26,25 @@ struct RdsError {
 };
 
 class RdsQueryResult {
-public:
-    RdsQueryResult(DeviceSnapshot snapshot)
-        : m_result(std::move(snapshot))
-    {
+  public:
+    RdsQueryResult(DeviceSnapshot snapshot) : m_result(std::move(snapshot)) {}
+
+    RdsQueryResult(RdsError error) : m_result(std::move(error)) {}
+
+    [[nodiscard]] bool has_value() const {
+        return std::holds_alternative<DeviceSnapshot>(m_result);
+    }
+    [[nodiscard]] explicit operator bool() const {
+        return has_value();
+    }
+    [[nodiscard]] const DeviceSnapshot& value() const {
+        return std::get<DeviceSnapshot>(m_result);
+    }
+    [[nodiscard]] const RdsError& error() const {
+        return std::get<RdsError>(m_result);
     }
 
-    RdsQueryResult(RdsError error)
-        : m_result(std::move(error))
-    {
-    }
-
-    [[nodiscard]] bool has_value() const { return std::holds_alternative<DeviceSnapshot>(m_result); }
-    [[nodiscard]] explicit operator bool() const { return has_value(); }
-    [[nodiscard]] const DeviceSnapshot &value() const { return std::get<DeviceSnapshot>(m_result); }
-    [[nodiscard]] const RdsError &error() const { return std::get<RdsError>(m_result); }
-
-private:
+  private:
     std::variant<DeviceSnapshot, RdsError> m_result;
 };
 

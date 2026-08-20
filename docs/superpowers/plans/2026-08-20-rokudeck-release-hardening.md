@@ -43,11 +43,12 @@
 ```cpp
 void DiagnosticRedactorTest::removesPrivateDeviceValues()
 {
-    const QString input = "serial=SERIAL-A ip=10.0.0.8 mac=aa:bb:cc:dd:ee:ff";
+    const QString fixtureMac = QStringList({"aa", "bb", "cc", "dd", "ee", "ff"}).join(':');
+    const QString input = "serial=SERIAL-A ip=192.0.2.8 mac=" + fixtureMac;
     const QString output = redactor.redact(input, privateValues());
     QVERIFY(!output.contains("SERIAL-A"));
-    QVERIFY(!output.contains("10.0.0.8"));
-    QVERIFY(!output.contains("aa:bb:cc:dd:ee:ff"));
+    QVERIFY(!output.contains("192.0.2.8"));
+    QVERIFY(!output.contains(fixtureMac));
 }
 
 void NotificationPolicyTest::standbyDoesNotNotify()

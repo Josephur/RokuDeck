@@ -3,6 +3,12 @@
 <node>
   <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
   <interface name="io.github.josephur.RokuDeck1">
+    <annotation name="io.github.josephur.RokuDeck1.Error.UnknownDevice" value="exitCode=4"/>
+    <annotation name="io.github.josephur.RokuDeck1.Error.UnsupportedCommand" value="exitCode=5"/>
+    <annotation name="io.github.josephur.RokuDeck1.Error.UnsupportedCapability" value="exitCode=5"/>
+    <annotation name="io.github.josephur.RokuDeck1.Error.SafetyRejected" value="exitCode=6"/>
+    <annotation name="io.github.josephur.RokuDeck1.Error.Timeout" value="exitCode=7"/>
+    <annotation name="io.github.josephur.RokuDeck1.Error.TransportFailure" value="exitCode=7"/>
     <method name="ListDevices">
       <arg direction="out" type="s" name="devicesJson"/>
     </method>

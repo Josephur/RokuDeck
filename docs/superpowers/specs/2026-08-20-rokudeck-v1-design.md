@@ -42,7 +42,7 @@ The initial automation focus is coordinating Linux audio with Roku TV audio. Rul
 - PulseAudio-compatible APIs for audio observation; this works with PipeWire's PulseAudio compatibility layer
 - The external `rds` executable for Roku operations
 
-The local `/home/josephur/dev/kde-reference` tree is read-only reference material. RokuDeck follows current Plasma 6 patterns from that tree and the installed Plasma widgets, including `PlasmoidItem`, C++ QML models, KConfig settings pages, and `plasmoidviewer` testing.
+The local `$HOME/dev/kde-reference` tree is read-only reference material. RokuDeck follows current Plasma 6 patterns from that tree and the installed Plasma widgets, including `PlasmoidItem`, C++ QML models, KConfig settings pages, and `plasmoidviewer` testing.
 
 ## Architecture
 

@@ -308,20 +308,20 @@ void RdsClientTest::usesArgumentsWithoutShell()
 {
     FakeProcessRunner runner;
     RdsClient client(&runner);
-    client.queryDevice("10.0.0.8", [](auto) {});
+    client.queryDevice("192.0.2.8", [](auto) {});
     QCOMPARE(runner.lastRequest.program, QStringLiteral("rds"));
     QCOMPARE(runner.lastRequest.arguments.first(4),
              QStringList({"--json", "--quiet", "--timeout", "3000"}));
-    QVERIFY(runner.lastRequest.arguments.contains("10.0.0.8"));
+    QVERIFY(runner.lastRequest.arguments.contains("192.0.2.8"));
 }
 
 void DeviceRegistryTest::rediscoveryUpdatesAddressBySerial()
 {
     DeviceRegistry registry;
-    registry.upsert({"SERIAL-A", "Living Room", "10.0.0.8"});
-    registry.upsert({"SERIAL-A", "Living Room", "10.0.0.9"});
+    registry.upsert({"SERIAL-A", "Living Room", "192.0.2.8"});
+    registry.upsert({"SERIAL-A", "Living Room", "192.0.2.9"});
     QCOMPARE(registry.devices().size(), 1);
-    QCOMPARE(registry.devices().front().address, QStringLiteral("10.0.0.9"));
+    QCOMPARE(registry.devices().front().address, QStringLiteral("192.0.2.9"));
 }
 ```
 

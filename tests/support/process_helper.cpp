@@ -3,8 +3,7 @@
 #include <QFile>
 #include <QThread>
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char* argv[]) {
     QCoreApplication application(argc, argv);
     const QStringList arguments = application.arguments();
     if (arguments.contains(QStringLiteral("--emit-output"))) {
@@ -33,7 +32,7 @@ int main(int argc, char *argv[])
             pidFile.write(QByteArray::number(QCoreApplication::applicationPid()));
             pidFile.close();
         }
-        QThread::msleep(1000);
+        QThread::msleep(60000);
     }
     return 0;
 }

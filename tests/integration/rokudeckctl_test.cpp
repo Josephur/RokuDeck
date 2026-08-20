@@ -65,6 +65,7 @@ class RokuDeckCtlTest final : public QObject {
     void unavailableServiceHasDocumentedExitCode();
     void unknownDeviceHasDocumentedExitCode();
     void unsupportedCommandHasDocumentedExitCode();
+    void safetyRejectionHasDocumentedExitCode();
     void transportFailureHasDocumentedExitCode();
     void typedDbusErrorsHaveDocumentedExitCodes();
 
@@ -164,15 +165,25 @@ void RokuDeckCtlTest::jsonStatusPreservesSchemaVersion() {
 }
 
 void RokuDeckCtlTest::jsonDiscoveryUsesDaemonContract() {
-    m_daemon->upsertDevice({QStringLiteral("SERIAL-TEST"), QStringLiteral("Fixture Room"),
-                            QStringLiteral("192.0.2.10")});
-
-    const CliResult result = runCli({QStringLiteral("--json"), QStringLiteral("discover")});
+    std::unique_ptr<QProcess> cli =
+        startCli({QStringLiteral("--json"), QStringLiteral("discover")});
+    QVERIFY2(cli, "rokudeckctl did not start");
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 1000);
+    QCOMPARE(cli->state(), QProcess::Running);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json([{"serialNumber":"SERIAL-DISCOVERED","deviceName":"Discovered Fixture","ip":"192.0.2.44"}])json"),
+         {},
+         false});
+    const CliResult result = finishCli(*cli);
 
     QCOMPARE(result.exitCode, 0);
     const QJsonDocument document = parseJson(result.standardOutput);
     QVERIFY(document.isArray());
     QCOMPARE(document.array().size(), 1);
+    QCOMPARE(document.array().at(0).toObject().value(QStringLiteral("serial")).toString(),
+             QStringLiteral("SERIAL-DISCOVERED"));
     QCOMPARE(m_runner->requests.size(), 1);
     QCOMPARE(m_runner->lastRequest.program, QStringLiteral("rds"));
     QCOMPARE(m_runner->lastRequest.arguments,
@@ -272,6 +283,19 @@ void RokuDeckCtlTest::unsupportedCommandHasDocumentedExitCode() {
     QVERIFY(!result.standardError.isEmpty());
 }
 
+void RokuDeckCtlTest::safetyRejectionHasDocumentedExitCode() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-TEST"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("192.0.2.10")});
+
+    const CliResult result = runCli(
+        {QStringLiteral("command"), QStringLiteral("SERIAL-TEST"), QStringLiteral("VolumeUp")});
+
+    QCOMPARE(result.exitCode, 6);
+    QVERIFY(result.standardOutput.isEmpty());
+    QVERIFY(!result.standardError.isEmpty());
+    QVERIFY(m_runner->requests.isEmpty());
+}
+
 void RokuDeckCtlTest::transportFailureHasDocumentedExitCode() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-TEST"), QStringLiteral("Fixture Room"),
                             QStringLiteral("192.0.2.10")});
@@ -298,6 +322,11 @@ void RokuDeckCtlTest::typedDbusErrorsHaveDocumentedExitCodes() {
     QCOMPARE(
         Cli::exitCodeForError(QStringLiteral("io.github.josephur.RokuDeck1.Error.SafetyRejected")),
         Cli::ExitCode::SafetyRejected);
+    QCOMPARE(Cli::exitCodeForError(QStringLiteral("io.github.josephur.RokuDeck1.Error.Timeout")),
+             Cli::ExitCode::TransportFailure);
+    QCOMPARE(Cli::exitCodeForError(
+                 QStringLiteral("io.github.josephur.RokuDeck1.Error.TransportFailure")),
+             Cli::ExitCode::TransportFailure);
 }
 
 QTEST_GUILESS_MAIN(RokuDeckCtlTest)

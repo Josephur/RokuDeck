@@ -25,30 +25,28 @@ struct PollClaim {
 };
 
 class PollScheduler final {
-public:
+  public:
     using TimePoint = std::chrono::steady_clock::time_point;
     using Clock = std::function<TimePoint()>;
     using JitterSource = std::function<std::chrono::milliseconds(std::chrono::milliseconds)>;
 
-    explicit PollScheduler(Clock clock = std::chrono::steady_clock::now,
-                           JitterSource jitter = [](auto delay) { return delay; });
+    explicit PollScheduler(Clock clock = std::chrono::steady_clock::now, JitterSource jitter = {});
 
-    void setInterest(const PollInterest &interest);
-    bool removeInterest(const QString &clientId, const QString &serial);
-    [[nodiscard]] bool recordResult(const PollClaim &claim, bool succeeded);
+    void setInterest(const PollInterest& interest);
+    bool removeInterest(const QString& clientId, const QString& serial);
+    [[nodiscard]] bool recordResult(const PollClaim& claim, bool succeeded);
 
     [[nodiscard]] QList<PollClaim> claimDuePolls();
     [[nodiscard]] qsizetype deviceCount() const;
-    [[nodiscard]] std::chrono::milliseconds intervalFor(const QString &serial) const;
-    [[nodiscard]] std::chrono::milliseconds delayFor(const QString &serial) const;
-    [[nodiscard]] std::optional<TimePoint> nextDueFor(const QString &serial) const;
-    [[nodiscard]] QSet<QString> fieldsFor(const QString &serial) const;
-    [[nodiscard]] static constexpr std::chrono::milliseconds maximumBackoff()
-    {
+    [[nodiscard]] std::chrono::milliseconds intervalFor(const QString& serial) const;
+    [[nodiscard]] std::chrono::milliseconds delayFor(const QString& serial) const;
+    [[nodiscard]] std::optional<TimePoint> nextDueFor(const QString& serial) const;
+    [[nodiscard]] QSet<QString> fieldsFor(const QString& serial) const;
+    [[nodiscard]] static constexpr std::chrono::milliseconds maximumBackoff() {
         return std::chrono::minutes(5);
     }
 
-private:
+  private:
     struct Schedule {
         std::chrono::milliseconds interval{1000};
         std::chrono::milliseconds delay{1000};
@@ -57,7 +55,7 @@ private:
         unsigned int failures = 0;
     };
 
-    void rebuildSchedule(const QString &serial);
+    void rebuildSchedule(const QString& serial);
 
     Clock m_clock;
     JitterSource m_jitter;

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 include_guard(GLOBAL)
 
 if(ROKUDECK_ENABLE_DEVELOPER_MODE)

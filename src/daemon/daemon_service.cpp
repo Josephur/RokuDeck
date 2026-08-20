@@ -4,6 +4,7 @@
 #include "command_contract.h"
 #include "config_store.h"
 #include "core/qprocess_runner.h"
+#include "dbus_error_contract.h"
 #include "rokudeck1_adaptor.h"
 
 #include <QDBusError>
@@ -85,23 +86,59 @@ constexpr auto objectPath = "/io/github/josephur/RokuDeck1";
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
-[[nodiscard]] QList<DeviceRecord> parseDiscoveredDevices(const ProcessResult& result) {
-    if (result.timedOut || result.exitCode != 0) {
-        return {};
+[[nodiscard]] QString commandErrorName(const QString& errorCode) {
+    if (errorCode == QStringLiteral("unknownDevice")) {
+        return QString::fromLatin1(DbusError::unknownDevice);
+    }
+    if (errorCode == QStringLiteral("unsupportedCapability")) {
+        return QString::fromLatin1(DbusError::unsupportedCapability);
+    }
+    if (errorCode == QStringLiteral("safetyRejected")) {
+        return QString::fromLatin1(DbusError::safetyRejected);
+    }
+    return QString::fromLatin1(DbusError::unsupportedCommand);
+}
+
+struct DiscoveryResult {
+    QList<DeviceRecord> devices;
+    QString errorName;
+    QString errorMessage;
+};
+
+[[nodiscard]] DiscoveryResult parseDiscoveredDevices(const ProcessResult& result) {
+    if (result.timedOut) {
+        return {
+            {}, QString::fromLatin1(DbusError::timeout), QStringLiteral("rds discovery timed out")};
+    }
+    if (result.exitCode != 0) {
+        return {{},
+                QString::fromLatin1(DbusError::transportFailure),
+                QStringLiteral("rds discovery failed")};
     }
     QJsonParseError error;
     const QJsonDocument document = QJsonDocument::fromJson(result.standardOutput, &error);
     if (error.error != QJsonParseError::NoError) {
-        return {};
+        return {{},
+                QString::fromLatin1(DbusError::transportFailure),
+                QStringLiteral("rds discovery returned malformed JSON")};
     }
 
-    QList<DeviceRecord> devices;
+    if (!document.isArray() &&
+        (!document.isObject() || !document.object().value(QStringLiteral("devices")).isArray())) {
+        return {{},
+                QString::fromLatin1(DbusError::transportFailure),
+                QStringLiteral("rds discovery returned an unsupported payload")};
+    }
+
+    DiscoveryResult discovery;
     const QJsonArray values = document.isArray()
                                   ? document.array()
                                   : document.object().value(QStringLiteral("devices")).toArray();
     for (const QJsonValue& value : values) {
         if (!value.isObject()) {
-            continue;
+            return {{},
+                    QString::fromLatin1(DbusError::transportFailure),
+                    QStringLiteral("rds discovery returned an invalid device entry")};
         }
         const QJsonObject object = value.toObject();
         DeviceRecord device;
@@ -110,10 +147,14 @@ constexpr auto objectPath = "/io/github/josephur/RokuDeck1";
         device.address = object.value(QStringLiteral("ip")).toString().trimmed();
         if (!device.serial.isEmpty() && !device.address.isEmpty() && device.serial.size() <= 256 &&
             device.displayName.size() <= 256 && device.address.size() <= 256) {
-            devices.append(std::move(device));
+            discovery.devices.append(std::move(device));
+        } else {
+            return {{},
+                    QString::fromLatin1(DbusError::transportFailure),
+                    QStringLiteral("rds discovery returned incomplete device information")};
         }
     }
-    return devices;
+    return discovery;
 }
 
 } // namespace
@@ -163,6 +204,12 @@ DaemonService::~DaemonService() {
     m_pollTimer.stop();
     m_idleTimer.stop();
     m_commandQueues.clear();
+    for (const QDBusMessage& request : std::as_const(m_discoveryReplies)) {
+        m_connection.send(request.createErrorReply(
+            QString::fromLatin1(DbusError::transportFailure),
+            QStringLiteral("RokuDeck stopped before discovery completed")));
+    }
+    m_discoveryReplies.clear();
     if (m_registeredOnBus) {
         m_connection.unregisterService(QString::fromLatin1(serviceName));
         m_connection.unregisterObject(QString::fromLatin1(objectPath));
@@ -247,7 +294,7 @@ QString DaemonService::devicesJson(const QList<DeviceRecord>& devices) {
         QJsonObject{{QStringLiteral("schemaVersion"), 1}, {QStringLiteral("devices"), entries}});
 }
 
-QString DaemonService::snapshotJson(const DeviceSnapshot& snapshot) {
+QString DaemonService::snapshotJson(const DeviceSnapshot& snapshot, const QString& diagnostic) {
     QJsonObject object{{QStringLiteral("schemaVersion"), 1},
                        {QStringLiteral("serial"), snapshot.serial},
                        {QStringLiteral("displayName"), snapshot.displayName},
@@ -255,7 +302,8 @@ QString DaemonService::snapshotJson(const DeviceSnapshot& snapshot) {
                        {QStringLiteral("power"), powerName(snapshot.power)},
                        {QStringLiteral("screensaver"), triStateName(snapshot.screensaver)},
                        {QStringLiteral("media"), mediaName(snapshot.media)},
-                       {QStringLiteral("health"), healthName(snapshot.health)}};
+                       {QStringLiteral("health"), healthName(snapshot.health)},
+                       {QStringLiteral("partialFailure"), snapshot.partialFailure}};
     if (snapshot.activeApp) {
         object.insert(QStringLiteral("activeApp"),
                       QJsonObject{{QStringLiteral("id"), snapshot.activeApp->id},
@@ -281,6 +329,9 @@ QString DaemonService::snapshotJson(const DeviceSnapshot& snapshot) {
         object.insert(QStringLiteral("capturedAt"),
                       snapshot.capturedAt.toString(Qt::ISODateWithMs));
     }
+    if (!diagnostic.isEmpty()) {
+        object.insert(QStringLiteral("diagnostic"), diagnostic);
+    }
     return compactJson(object);
 }
 
@@ -291,19 +342,22 @@ QString DaemonService::ListDevices() const {
 QString DaemonService::GetSnapshot(const QString& serial) const {
     const auto snapshotIt = m_snapshots.constFind(serial);
     if (snapshotIt != m_snapshots.cend()) {
-        return snapshotJson(snapshotIt.value());
+        return snapshotJson(snapshotIt.value(), m_pollingDiagnostic);
     }
 
     const auto device = findDevice(serial);
     if (!device) {
-        return compactJson(QJsonObject{{QStringLiteral("schemaVersion"), 1},
-                                       {QStringLiteral("error"), QStringLiteral("unknownDevice")}});
+        if (calledFromDBus()) {
+            sendErrorReply(QString::fromLatin1(DbusError::unknownDevice),
+                           QStringLiteral("unknown Roku device serial"));
+        }
+        return {};
     }
     DeviceSnapshot snapshot;
     snapshot.serial = device->serial;
     snapshot.displayName = device->displayName;
     snapshot.address = device->address;
-    return snapshotJson(snapshot);
+    return snapshotJson(snapshot, m_pollingDiagnostic);
 }
 
 QString DaemonService::callerOwner() const {
@@ -390,8 +444,12 @@ void DaemonService::UnregisterClient(const QString& clientId) {
 }
 
 QString DaemonService::DiscoverDevices() {
+    if (calledFromDBus()) {
+        setDelayedReply(true);
+        m_discoveryReplies.append(message());
+    }
     if (m_discoveryActive) {
-        return ListDevices();
+        return {};
     }
 
     m_discoveryActive = true;
@@ -401,24 +459,33 @@ QString DaemonService::DiscoverDevices() {
     request.arguments = {QStringLiteral("--json"), QStringLiteral("--quiet"),
                          QStringLiteral("--timeout"), QStringLiteral("3000"),
                          QStringLiteral("discover")};
-    request.timeout = std::chrono::milliseconds(3000);
+    request.timeout = std::chrono::milliseconds(7000);
     QPointer<DaemonService> service(this);
     m_processRunner->start(request, [service](ProcessResult result) {
         if (!service || service->m_shuttingDown) {
             return;
         }
         service->m_discoveryActive = false;
+        const DiscoveryResult discovery = parseDiscoveredDevices(result);
         bool changed = false;
-        for (const DeviceRecord& device : parseDiscoveredDevices(result)) {
+        for (const DeviceRecord& device : discovery.devices) {
             changed = service->mergeDevice(device) || changed;
         }
         if (changed) {
             service->m_configStore->saveDevices(service->m_deviceRegistry.devices());
             Q_EMIT service->DeviceListChanged(service->ListDevices());
         }
+        const QList<QDBusMessage> replies = std::exchange(service->m_discoveryReplies, {});
+        for (const QDBusMessage& pendingReply : replies) {
+            const QDBusMessage reply =
+                discovery.errorName.isEmpty()
+                    ? pendingReply.createReply(service->ListDevices())
+                    : pendingReply.createErrorReply(discovery.errorName, discovery.errorMessage);
+            service->m_connection.send(reply);
+        }
         service->updateIdleTimer();
     });
-    return ListDevices();
+    return {};
 }
 
 DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& serial,
@@ -449,6 +516,13 @@ DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& se
             QStringLiteral("Select"),    QStringLiteral("Play"), QStringLiteral("Pause"),
             QStringLiteral("Rev"),       QStringLiteral("Fwd"),  QStringLiteral("InstantReplay"),
             QStringLiteral("FindRemote")};
+        if (key == QStringLiteral("VolumeUp")) {
+            const auto snapshotIt = m_snapshots.constFind(serial);
+            if (snapshotIt == m_snapshots.cend() || !snapshotIt->volume.has_value()) {
+                return {{}, QStringLiteral("safetyRejected")};
+            }
+            return {{QStringLiteral("keypress"), key}, {}};
+        }
         if (key.isEmpty() || key.size() > 32 || key.startsWith(QChar(u'-')) ||
             !allowedKeys.contains(key)) {
             return {{}, QStringLiteral("unsupportedCommand")};
@@ -481,31 +555,33 @@ DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& se
 }
 
 QString DaemonService::SendCommand(const QString& serial, const QString& commandJson) {
-    const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     const auto device = findDevice(serial);
     if (!device) {
-        QTimer::singleShot(0, this, [this, requestId, serial] {
-            finishCommandWithError(requestId, serial, QStringLiteral("unknownDevice"));
-        });
-        return requestId;
+        if (calledFromDBus()) {
+            sendErrorReply(QString::fromLatin1(DbusError::unknownDevice),
+                           QStringLiteral("unknown Roku device serial"));
+        }
+        return {};
     }
 
     const ValidatedCommand validated = validateCommand(serial, commandJson);
     if (!validated.errorCode.isEmpty()) {
-        QTimer::singleShot(0, this, [this, requestId, serial, errorCode = validated.errorCode] {
-            finishCommandWithError(requestId, serial, errorCode);
-        });
-        return requestId;
+        if (calledFromDBus()) {
+            sendErrorReply(commandErrorName(validated.errorCode), validated.errorCode);
+        }
+        return {};
     }
 
     QQueue<QueuedCommand>& queue = m_commandQueues[serial];
     if (queue.size() >= CommandContract::maximumOutstandingPerDevice) {
-        QTimer::singleShot(0, this, [this, requestId, serial] {
-            finishCommandWithError(requestId, serial, QStringLiteral("queueFull"));
-        });
-        return requestId;
+        if (calledFromDBus()) {
+            sendErrorReply(QString::fromLatin1(DbusError::transportFailure),
+                           QStringLiteral("the per-device command queue is full"));
+        }
+        return {};
     }
 
+    const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     queue.enqueue({requestId, serial, validated.arguments,
                    QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs, Qt::PreciseTimer)});
     updateIdleTimer();
@@ -521,7 +597,7 @@ void DaemonService::processNextCommand(const QString& serial) {
     }
     while (!queueIt->isEmpty() && m_deadlineRemaining(queueIt->head().deadline) <= 0) {
         const QueuedCommand expired = queueIt->dequeue();
-        finishCommandWithError(expired.requestId, serial, QStringLiteral("timedOut"));
+        finishCommandWithError(expired.requestId, serial, QStringLiteral("timeout"));
     }
     if (queueIt->isEmpty()) {
         m_commandQueues.erase(queueIt);
@@ -553,7 +629,7 @@ void DaemonService::processNextCommand(const QString& serial) {
         if (queueIt->isEmpty()) {
             m_commandQueues.erase(queueIt);
         }
-        finishCommandWithError(command.requestId, serial, QStringLiteral("timedOut"));
+        finishCommandWithError(command.requestId, serial, QStringLiteral("timeout"));
         updateIdleTimer();
         processNextCommand(serial);
         return;
@@ -588,8 +664,9 @@ void DaemonService::finishCommand(const QueuedCommand& command, const ProcessRes
                         {QStringLiteral("serial"), command.serial},
                         {QStringLiteral("success"), succeeded}};
     if (!succeeded) {
-        payload.insert(QStringLiteral("error"), result.timedOut ? QStringLiteral("timedOut")
-                                                                : QStringLiteral("commandFailed"));
+        payload.insert(QStringLiteral("error"), result.timedOut
+                                                    ? QStringLiteral("timeout")
+                                                    : QStringLiteral("transportFailure"));
     }
     Q_EMIT CommandFinished(command.requestId, compactJson(payload));
 }
@@ -635,7 +712,17 @@ void DaemonService::pollDueDevices() {
                     static_cast<void>(service->m_pollScheduler.recordResult(claim, true));
                     return;
                 }
-                if (!result || result.value().serial != claim.serial) {
+                if (!result) {
+                    static_cast<void>(service->m_pollScheduler.recordResult(claim, false));
+                    if (result.error().code == RdsError::Code::IncompatibleCli ||
+                        result.error().code == RdsError::Code::DependencyUnavailable) {
+                        service->m_pollingEnabled = false;
+                        service->m_pollingDiagnostic = result.error().message;
+                        service->m_pollTimer.stop();
+                    }
+                    return;
+                }
+                if (result.value().serial != claim.serial) {
                     static_cast<void>(service->m_pollScheduler.recordResult(claim, false));
                     return;
                 }
@@ -716,6 +803,14 @@ qsizetype DaemonService::watchedClientOwnerCount() const {
 
 QString DaemonService::lastRegistrationError() const {
     return m_lastRegistrationError;
+}
+
+bool DaemonService::pollingEnabled() const {
+    return m_pollingEnabled;
+}
+
+QString DaemonService::pollingDiagnostic() const {
+    return m_pollingDiagnostic;
 }
 
 } // namespace RokuDeck

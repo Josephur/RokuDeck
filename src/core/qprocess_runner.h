@@ -10,18 +10,23 @@
 namespace RokuDeck {
 
 class QProcessRunner final : public ProcessRunner {
-public:
+  public:
     using ProcessRunner::ProcessRunner;
     ~QProcessRunner() override;
 
-    static constexpr qsizetype maximumCapturedBytes() { return 4096; }
-    void start(const ProcessRequest &request, ProcessCallback callback) override;
+    static constexpr qsizetype maximumCapturedBytes() {
+        return 4096;
+    }
+    static constexpr std::chrono::milliseconds terminationGracePeriod() {
+        return std::chrono::milliseconds(100);
+    }
+    void start(const ProcessRequest& request, ProcessCallback callback) override;
 
-private:
+  private:
     struct RunState;
 
-    void drain(const std::shared_ptr<RunState> &state);
-    void complete(const std::shared_ptr<RunState> &state, int exitCode);
+    void drain(const std::shared_ptr<RunState>& state);
+    void complete(const std::shared_ptr<RunState>& state, int exitCode);
 
     QList<std::shared_ptr<RunState>> m_activeStates;
 };

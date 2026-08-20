@@ -10,20 +10,24 @@
 namespace RokuDeck::Test {
 
 class FakeProcessRunner final : public ProcessRunner {
-public:
+  public:
     using ProcessRunner::ProcessRunner;
 
-    void start(const ProcessRequest &request, ProcessCallback callback) override
-    {
+    void start(const ProcessRequest& request, ProcessCallback callback) override {
         lastRequest = request;
         requests.append(request);
         callbacks.append(std::move(callback));
     }
 
-    void complete(ProcessResult result)
-    {
+    void complete(ProcessResult result) {
         Q_ASSERT(!callbacks.isEmpty());
         ProcessCallback callback = callbacks.takeFirst();
+        callback(std::move(result));
+    }
+
+    void completeAt(qsizetype index, ProcessResult result) {
+        Q_ASSERT(index >= 0 && index < callbacks.size());
+        ProcessCallback callback = callbacks.takeAt(index);
         callback(std::move(result));
     }
 

@@ -11,6 +11,7 @@
 
 #include <QDBusConnection>
 #include <QDBusContext>
+#include <QDBusMessage>
 #include <QDBusServiceWatcher>
 #include <QDeadlineTimer>
 #include <QHash>
@@ -52,6 +53,8 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] int idleGracePeriodMs() const;
     [[nodiscard]] qsizetype watchedClientOwnerCount() const;
     [[nodiscard]] QString lastRegistrationError() const;
+    [[nodiscard]] bool pollingEnabled() const;
+    [[nodiscard]] QString pollingDiagnostic() const;
 
   public Q_SLOTS:
     [[nodiscard]] QString ListDevices() const;
@@ -102,7 +105,8 @@ class DaemonService final : public QObject, protected QDBusContext {
                                 const QString& errorCode);
 
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
-    [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot);
+    [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,
+                                              const QString& diagnostic = {});
 
     QDBusConnection m_connection;
     std::function<bool()> m_hasEnabledAutomations;
@@ -119,12 +123,15 @@ class DaemonService final : public QObject, protected QDBusContext {
     QTimer m_pollTimer;
     QHash<QString, DeviceSnapshot> m_snapshots;
     QHash<QString, quint64> m_addressGenerations;
+    QList<QDBusMessage> m_discoveryReplies;
     QHash<QString, QQueue<QueuedCommand>> m_commandQueues;
     QSet<QString> m_activeCommandSerials;
     bool m_registeredOnBus = false;
     bool m_discoveryActive = false;
+    bool m_pollingEnabled = true;
     bool m_shuttingDown = false;
     QString m_lastRegistrationError;
+    QString m_pollingDiagnostic;
 };
 
 } // namespace RokuDeck
