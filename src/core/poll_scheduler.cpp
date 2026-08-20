@@ -14,12 +14,21 @@ namespace {
     if (delay <= std::chrono::milliseconds::zero()) {
         return start;
     }
-    const auto remaining = PollScheduler::TimePoint::max() - start;
-    const auto remainingMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
-    if (delay >= remainingMilliseconds) {
+
+    using ClockDuration = PollScheduler::TimePoint::duration;
+    using ClockRep = ClockDuration::rep;
+    const std::chrono::duration<long double, ClockDuration::period> convertedDelay = delay;
+    constexpr ClockRep maximumCount = std::numeric_limits<ClockRep>::max();
+    if (convertedDelay.count() >= static_cast<long double>(maximumCount)) {
         return PollScheduler::TimePoint::max();
     }
-    return start + std::chrono::duration_cast<PollScheduler::TimePoint::duration>(delay);
+
+    const ClockRep delayCount = std::chrono::duration_cast<ClockDuration>(delay).count();
+    const ClockRep startCount = start.time_since_epoch().count();
+    if (startCount > maximumCount - delayCount) {
+        return PollScheduler::TimePoint::max();
+    }
+    return PollScheduler::TimePoint(ClockDuration(startCount + delayCount));
 }
 
 } // namespace
@@ -95,12 +104,12 @@ void PollScheduler::rebuildSchedule(const QString &serial)
 
 void PollScheduler::recordResult(const QString &serial, bool succeeded)
 {
+    m_inFlightSerials.remove(serial);
     auto scheduleIt = m_schedules.find(serial);
     if (scheduleIt == m_schedules.end()) {
         return;
     }
     Schedule &schedule = scheduleIt.value();
-    schedule.inFlight = false;
     if (succeeded) {
         schedule.failures = 0;
         schedule.delay = schedule.interval;
@@ -123,9 +132,9 @@ QStringList PollScheduler::dueDevices()
     QStringList due;
     const TimePoint now = m_clock();
     for (auto it = m_schedules.begin(); it != m_schedules.end(); ++it) {
-        if (!it->inFlight && it->nextDue <= now) {
+        if (!m_inFlightSerials.contains(it.key()) && it->nextDue <= now) {
             due.append(it.key());
-            it->inFlight = true;
+            m_inFlightSerials.insert(it.key());
         }
     }
     due.sort();

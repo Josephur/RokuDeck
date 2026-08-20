@@ -48,7 +48,6 @@ private:
         TimePoint nextDue{};
         QSet<QString> fields;
         unsigned int failures = 0;
-        bool inFlight = false;
     };
 
     void rebuildSchedule(const QString &serial);
@@ -57,6 +56,7 @@ private:
     JitterSource m_jitter;
     QHash<QString, QHash<QString, PollInterest>> m_interestsByClient;
     QHash<QString, Schedule> m_schedules;
+    QSet<QString> m_inFlightSerials;
 };
 
 } // namespace RokuDeck
