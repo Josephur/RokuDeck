@@ -70,6 +70,12 @@ QVariant DevicesModel::data(const QModelIndex& index, int role) const {
         return device.capabilities;
     case StaleRole:
         return device.stale;
+    case AllowAutomationsRole:
+        return device.allowAutomations;
+    case WakeOnWlanRole:
+        return device.wakeOnWlan;
+    case RefreshPolicyRole:
+        return device.refreshPolicy;
     case PendingCommandRole:
         return !device.pendingRequests.isEmpty();
     default:
@@ -89,6 +95,9 @@ QHash<int, QByteArray> DevicesModel::roleNames() const {
             {MutedRole, "muted"},
             {CapabilitiesRole, "capabilities"},
             {StaleRole, "stale"},
+            {AllowAutomationsRole, "allowAutomations"},
+            {WakeOnWlanRole, "wakeOnWlan"},
+            {RefreshPolicyRole, "refreshPolicy"},
             {PendingCommandRole, "pendingCommand"}};
 }
 
@@ -104,6 +113,9 @@ void DevicesModel::replaceDevices(const QList<DeviceDescription>& devices) {
             item.serial = description.serial;
             item.name = description.name;
             item.address = description.address;
+            item.allowAutomations = description.allowAutomations;
+            item.wakeOnWlan = description.wakeOnWlan;
+            item.refreshPolicy = description.refreshPolicy;
             m_devices.insert(destination, item);
             endInsertRows();
             source = destination;
@@ -122,6 +134,11 @@ void DevicesModel::replaceDevices(const QList<DeviceDescription>& devices) {
         QList<int> changedRoles;
         updateRole(current.name, description.name, NameRole, changedRoles);
         updateRole(current.address, description.address, AddressRole, changedRoles);
+        updateRole(current.allowAutomations, description.allowAutomations, AllowAutomationsRole,
+                   changedRoles);
+        updateRole(current.wakeOnWlan, description.wakeOnWlan, WakeOnWlanRole, changedRoles);
+        updateRole(current.refreshPolicy, description.refreshPolicy, RefreshPolicyRole,
+                   changedRoles);
         if (!changedRoles.isEmpty()) {
             const QModelIndex changedIndex = index(static_cast<int>(source));
             Q_EMIT dataChanged(changedIndex, changedIndex, changedRoles);

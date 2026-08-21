@@ -8,6 +8,7 @@
 #include <KLocalizedString>
 
 #include <QDBusConnection>
+#include <QDBusError>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusServiceWatcher>
@@ -46,6 +47,10 @@ std::optional<QJsonObject> parseEnvelope(const QString& json) {
     return object;
 }
 
+[[nodiscard]] QString compactJson(const QJsonObject& object) {
+    return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+}
+
 std::optional<QList<DeviceDescription>> parseDevices(const QString& json) {
     const std::optional<QJsonObject> envelope = parseEnvelope(json);
     if (!envelope || !envelope->value(QStringLiteral("devices")).isArray()) {
@@ -68,7 +73,20 @@ std::optional<QList<DeviceDescription>> parseDevices(const QString& json) {
             !address.isString() || serials.contains(serial.toString())) {
             return std::nullopt;
         }
+        const QJsonValue allowAutomations = object.value(QStringLiteral("allowAutomations"));
+        const QJsonValue wakeOnWlan = object.value(QStringLiteral("wakeOnWlan"));
+        const QJsonValue refreshPolicy = object.value(QStringLiteral("refreshPolicy"));
+        if ((!allowAutomations.isUndefined() && !allowAutomations.isBool()) ||
+            (!wakeOnWlan.isUndefined() && !wakeOnWlan.isBool()) ||
+            (!refreshPolicy.isUndefined() && !refreshPolicy.isString())) {
+            return std::nullopt;
+        }
         DeviceDescription device{serial.toString(), name.toString(), address.toString()};
+        // An older daemon omits these keys entirely; its devices behave as they
+        // did before the preferences existed rather than being rejected.
+        device.allowAutomations = allowAutomations.toBool(true);
+        device.wakeOnWlan = wakeOnWlan.toBool(false);
+        device.refreshPolicy = refreshPolicy.toString(QStringLiteral("balanced"));
         devices.append(device);
         serials.insert(device.serial);
     }
@@ -305,6 +323,153 @@ void DaemonProxy::sendCommand(const QString& serial, const QString& action, cons
                 const QString requestId = reply.value();
                 m_requestSerials.insert(requestId, serial);
                 m_devices->markCommandPending(serial, requestId);
+            });
+}
+
+bool DaemonProxy::isBusy() const {
+    return m_busyCount > 0;
+}
+
+void DaemonProxy::setBusyCount(int count) {
+    const bool wasBusy = isBusy();
+    m_busyCount = std::max(0, count);
+    if (wasBusy != isBusy()) {
+        Q_EMIT busyChanged();
+    }
+}
+
+void DaemonProxy::watchDeviceCall(const QString& operation, const QDBusPendingCall& call) {
+    const quint64 generation = m_generation;
+    setBusyCount(m_busyCount + 1);
+    auto* watcher = new QDBusPendingCallWatcher(call, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, watcher, generation, operation]() {
+                const QDBusPendingReply<void> reply = *watcher;
+                watcher->deleteLater();
+                if (!m_active || generation != m_generation) {
+                    setBusyCount(m_busyCount - 1);
+                    return;
+                }
+                setBusyCount(m_busyCount - 1);
+                if (reply.isError()) {
+                    Q_EMIT deviceOperationFailed(operation, reply.error().message());
+                    return;
+                }
+                Q_EMIT deviceOperationSucceeded(operation);
+                // The daemon announces its own list change, but refreshing here
+                // keeps a widget correct even if that signal is missed.
+                refresh();
+            });
+}
+
+void DaemonProxy::addDevice(const QVariantMap& device) {
+    if (!m_active) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("addDevice"),
+                    m_interface->AddDevice(compactJson(QJsonObject::fromVariantMap(device))));
+}
+
+void DaemonProxy::updateDevice(const QString& serial, const QVariantMap& changes) {
+    if (!m_active || serial.isEmpty()) {
+        return;
+    }
+    watchDeviceCall(
+        QStringLiteral("updateDevice"),
+        m_interface->UpdateDevice(serial, compactJson(QJsonObject::fromVariantMap(changes))));
+}
+
+void DaemonProxy::removeDevice(const QString& serial) {
+    if (!m_active || serial.isEmpty()) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("removeDevice"), m_interface->RemoveDevice(serial));
+}
+
+void DaemonProxy::setDeviceOrder(const QStringList& serials) {
+    if (!m_active || serials.isEmpty()) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("setDeviceOrder"), m_interface->SetDeviceOrder(serials));
+}
+
+void DaemonProxy::testDevice(const QString& address) {
+    if (!m_active || address.isEmpty()) {
+        return;
+    }
+    const quint64 generation = m_generation;
+    setBusyCount(m_busyCount + 1);
+    auto* watcher = new QDBusPendingCallWatcher(m_interface->TestDevice(address), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, watcher, generation, address]() {
+                const QDBusPendingReply<QString> reply = *watcher;
+                watcher->deleteLater();
+                setBusyCount(m_busyCount - 1);
+                if (!m_active || generation != m_generation) {
+                    return;
+                }
+                if (reply.isError()) {
+                    Q_EMIT deviceTestFinished(address, {}, reply.error().message());
+                    return;
+                }
+                const std::optional<DeviceStateSnapshot> snapshot = parseSnapshot(reply.value());
+                if (!snapshot) {
+                    Q_EMIT deviceTestFinished(
+                        address, {},
+                        i18nc("@info", "The Roku device answered with an unreadable status"));
+                    return;
+                }
+                QVariantMap result{{QStringLiteral("serial"), snapshot->serial},
+                                   {QStringLiteral("address"), address}};
+                if (snapshot->name) {
+                    result.insert(QStringLiteral("displayName"), *snapshot->name);
+                }
+                if (snapshot->health) {
+                    result.insert(QStringLiteral("health"), *snapshot->health);
+                }
+                if (snapshot->power) {
+                    result.insert(QStringLiteral("power"), *snapshot->power);
+                }
+                if (snapshot->screensaver) {
+                    result.insert(QStringLiteral("screensaver"), *snapshot->screensaver);
+                }
+                if (snapshot->activeLabel) {
+                    result.insert(QStringLiteral("activeLabel"), *snapshot->activeLabel);
+                }
+                if (snapshot->volume && snapshot->volume->has_value()) {
+                    result.insert(QStringLiteral("volume"), **snapshot->volume);
+                }
+                if (snapshot->muted && snapshot->muted->has_value()) {
+                    result.insert(QStringLiteral("muted"), **snapshot->muted);
+                }
+                if (snapshot->capabilities) {
+                    result.insert(QStringLiteral("capabilities"), *snapshot->capabilities);
+                }
+                Q_EMIT deviceTestFinished(address, result, {});
+            });
+}
+
+void DaemonProxy::discoverDevices() {
+    if (!m_active) {
+        return;
+    }
+    const quint64 generation = m_generation;
+    setBusyCount(m_busyCount + 1);
+    auto* watcher = new QDBusPendingCallWatcher(m_interface->DiscoverDevices(), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, watcher, generation]() {
+                const QDBusPendingReply<QString> reply = *watcher;
+                watcher->deleteLater();
+                setBusyCount(m_busyCount - 1);
+                if (!m_active || generation != m_generation) {
+                    return;
+                }
+                if (reply.isError()) {
+                    Q_EMIT discoveryFinished(reply.error().message());
+                    return;
+                }
+                applyDeviceListJson(reply.value());
+                Q_EMIT discoveryFinished({});
             });
 }
 

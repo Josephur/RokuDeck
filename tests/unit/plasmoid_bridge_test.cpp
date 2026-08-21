@@ -8,6 +8,7 @@
 
 #include <QDBusConnection>
 #include <QDBusContext>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -34,10 +35,10 @@ QString devicesJson(bool includeSecond = true) {
     const QString second =
         includeSecond
             ? QStringLiteral(
-                  R"json(,{"serial":"SERIAL-B","displayName":"Office","address":"198.51.100.20"})json")
+                  R"json(,{"serial":"SERIAL-B","displayName":"Office","address":"198.51.100.20","allowAutomations":true,"wakeOnWlan":false,"refreshPolicy":"balanced"})json")
             : QString();
     return QStringLiteral(
-               R"json({"schemaVersion":1,"devices":[{"serial":"SERIAL-A","displayName":"Living Room","address":"192.0.2.10"}%1]})json")
+               R"json({"schemaVersion":1,"devices":[{"serial":"SERIAL-A","displayName":"Living Room","address":"192.0.2.10","allowAutomations":false,"wakeOnWlan":true,"refreshPolicy":"battery"}%1]})json")
         .arg(second);
 }
 
@@ -96,7 +97,13 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     QStringList registrationAttempts;
     QStringList unregistrationAttempts;
     QSet<QString> activeClients;
+    QStringList addedDevices;
+    QStringList updatedDevices;
+    QStringList removedDevices;
+    QStringList testedAddresses;
+    QStringList orderedSerials;
     bool delayNextRegistration = false;
+    bool rejectNextCall = false;
 
     bool registerOnBus() {
         const bool objectRegistered = m_connection.registerObject(
@@ -173,6 +180,44 @@ class FakeDaemon final : public QObject, protected QDBusContext {
         return QStringLiteral("REQUEST-ONE");
     }
 
+    QString AddDevice(const QString& deviceJson) {
+        addedDevices.append(deviceJson);
+        if (rejectNextCall) {
+            rejectNextCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("fixture rejection"));
+            return {};
+        }
+        return deviceJson;
+    }
+
+    QString UpdateDevice(const QString& serial, const QString& changesJson) {
+        updatedDevices.append(serial + QChar(u'|') + changesJson);
+        if (rejectNextCall) {
+            rejectNextCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("fixture rejection"));
+            return {};
+        }
+        return changesJson;
+    }
+
+    void RemoveDevice(const QString& serial) {
+        removedDevices.append(serial);
+    }
+
+    void SetDeviceOrder(const QStringList& serials) {
+        orderedSerials = serials;
+    }
+
+    QString TestDevice(const QString& address) {
+        testedAddresses.append(address);
+        if (rejectNextCall) {
+            rejectNextCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("fixture rejection"));
+            return {};
+        }
+        return fullSnapshot(QStringLiteral("SERIAL-A"));
+    }
+
   Q_SIGNALS:
     void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
     void DeviceListChanged(const QString& devicesJson);
@@ -201,6 +246,9 @@ class PlasmoidBridgeTest : public QObject {
     void malformedSnapshotsAreRejectedAtomically();
     void successfulCommandRemainsPendingUntilFreshSnapshot();
     void staleRegistrationReplyCannotUnregisterReplacementOwner();
+    void deviceListExposesDaemonOwnedPreferences();
+    void deviceManagementReachesTheDaemonAndReportsRejection();
+    void testDeviceReportsTheProbedSnapshot();
 
   private:
     [[nodiscard]] QModelIndex firstIndex(const DevicesModel& model) const;
@@ -445,6 +493,100 @@ void PlasmoidBridgeTest::staleRegistrationReplyCannotUnregisterReplacementOwner(
 
 QModelIndex PlasmoidBridgeTest::firstIndex(const DevicesModel& model) const {
     return model.index(0);
+}
+
+void PlasmoidBridgeTest::deviceListExposesDaemonOwnedPreferences() {
+    auto applet = createApplet<RokuDeckApplet>();
+    DevicesModel* model = applet->devices();
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(), 2, 2000);
+
+    const QModelIndex first = firstIndex(*model);
+    QCOMPARE(model->data(first, DevicesModel::SerialRole).toString(), QStringLiteral("SERIAL-A"));
+    QVERIFY2(!model->data(first, DevicesModel::AllowAutomationsRole).toBool(),
+             "the widget must show the automation choice the daemon stored");
+    QVERIFY(model->data(first, DevicesModel::WakeOnWlanRole).toBool());
+    QCOMPARE(model->data(first, DevicesModel::RefreshPolicyRole).toString(),
+             QStringLiteral("battery"));
+
+    const QModelIndex second = model->index(1);
+    QVERIFY(model->data(second, DevicesModel::AllowAutomationsRole).toBool());
+    QVERIFY(!model->data(second, DevicesModel::WakeOnWlanRole).toBool());
+    QCOMPARE(model->data(second, DevicesModel::RefreshPolicyRole).toString(),
+             QStringLiteral("balanced"));
+
+    const QHash<int, QByteArray> roles = model->roleNames();
+    QCOMPARE(roles.value(DevicesModel::AllowAutomationsRole), QByteArrayLiteral("allowAutomations"));
+    QCOMPARE(roles.value(DevicesModel::WakeOnWlanRole), QByteArrayLiteral("wakeOnWlan"));
+    QCOMPARE(roles.value(DevicesModel::RefreshPolicyRole), QByteArrayLiteral("refreshPolicy"));
+}
+
+void PlasmoidBridgeTest::deviceManagementReachesTheDaemonAndReportsRejection() {
+    auto applet = createApplet<RokuDeckApplet>();
+    QTRY_COMPARE_WITH_TIMEOUT(applet->devices()->rowCount(), 2, 2000);
+    QSignalSpy failed(applet.get(), &RokuDeckApplet::deviceOperationFailed);
+
+    applet->addDevice(QVariantMap{{QStringLiteral("serial"), QStringLiteral("SERIAL-C")},
+                                  {QStringLiteral("displayName"), QStringLiteral("Kitchen")},
+                                  {QStringLiteral("address"), QStringLiteral("198.51.100.30")}});
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->addedDevices.size(), 1, 2000);
+    const QJsonObject added =
+        QJsonDocument::fromJson(m_fake->addedDevices.first().toUtf8()).object();
+    QCOMPARE(added.value(QStringLiteral("serial")).toString(), QStringLiteral("SERIAL-C"));
+    QCOMPARE(added.value(QStringLiteral("address")).toString(), QStringLiteral("198.51.100.30"));
+
+    applet->updateDevice(QStringLiteral("SERIAL-A"),
+                         QVariantMap{{QStringLiteral("refreshPolicy"),
+                                      QStringLiteral("responsive")}});
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->updatedDevices.size(), 1, 2000);
+    QVERIFY(m_fake->updatedDevices.first().startsWith(QStringLiteral("SERIAL-A|")));
+    QVERIFY(m_fake->updatedDevices.first().contains(QStringLiteral("responsive")));
+
+    applet->removeDevice(QStringLiteral("SERIAL-B"));
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->removedDevices.size(), 1, 2000);
+    QCOMPARE(m_fake->removedDevices.first(), QStringLiteral("SERIAL-B"));
+
+    applet->setDeviceOrder(QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-A")}));
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->orderedSerials.size(), 2, 2000);
+    QCOMPARE(m_fake->orderedSerials.first(), QStringLiteral("SERIAL-B"));
+
+    QCOMPARE(failed.size(), 0);
+    m_fake->rejectNextCall = true;
+    applet->addDevice(QVariantMap{{QStringLiteral("serial"), QStringLiteral("SERIAL-D")},
+                                  {QStringLiteral("address"), QStringLiteral("198.51.100.31")}});
+    QTRY_COMPARE_WITH_TIMEOUT(failed.size(), 1, 2000);
+    QCOMPARE(failed.first().at(0).toString(), QStringLiteral("addDevice"));
+    QVERIFY2(!failed.first().at(1).toString().isEmpty(),
+             "a rejected device change must explain itself to the user");
+}
+
+void PlasmoidBridgeTest::testDeviceReportsTheProbedSnapshot() {
+    auto applet = createApplet<RokuDeckApplet>();
+    QTRY_COMPARE_WITH_TIMEOUT(applet->devices()->rowCount(), 2, 2000);
+    QSignalSpy finished(applet.get(), &RokuDeckApplet::deviceTestFinished);
+
+    applet->testDevice(QStringLiteral("198.51.100.30"));
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 2000);
+    QCOMPARE(m_fake->testedAddresses.first(), QStringLiteral("198.51.100.30"));
+    QCOMPARE(finished.first().at(0).toString(), QStringLiteral("198.51.100.30"));
+    const QVariantMap probed = finished.first().at(1).toMap();
+    QCOMPARE(probed.value(QStringLiteral("serial")).toString(), QStringLiteral("SERIAL-A"));
+    QCOMPARE(probed.value(QStringLiteral("displayName")).toString(),
+             QStringLiteral("Living Room"));
+    QCOMPARE(probed.value(QStringLiteral("volume")).toInt(), 45);
+    QCOMPARE(probed.value(QStringLiteral("capabilities")).toStringList(),
+             QStringList({QStringLiteral("power"), QStringLiteral("volume")}));
+    QVERIFY2(finished.first().at(2).toString().isEmpty(),
+             "a successful probe must not report an error");
+
+    QVERIFY2(applet->devices()->rowCount() == 2,
+             "probing an address must not add it to the widget's device list");
+
+    m_fake->rejectNextCall = true;
+    applet->testDevice(QStringLiteral("198.51.100.31"));
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 2000);
+    QVERIFY2(!finished.at(1).at(2).toString().isEmpty(),
+             "a failed probe must say why it failed");
+    QVERIFY(finished.at(1).at(1).toMap().isEmpty());
 }
 
 QTEST_MAIN(PlasmoidBridgeTest)

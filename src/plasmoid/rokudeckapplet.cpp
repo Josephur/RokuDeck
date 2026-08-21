@@ -24,6 +24,17 @@ RokuDeckApplet::RokuDeckApplet(QObject* parent, const KPluginMetaData& data,
     connect(&m_daemon, &DaemonProxy::availableChanged, this,
             [this](bool) { Q_EMIT availableChanged(); });
     connect(&m_daemon, &DaemonProxy::errorOccurred, this, &RokuDeckApplet::setLastError);
+    connect(&m_daemon, &DaemonProxy::busyChanged, this, &RokuDeckApplet::busyChanged);
+    connect(&m_daemon, &DaemonProxy::deviceOperationFailed, this,
+            [this](const QString& operation, const QString& message) {
+                setLastError(message);
+                Q_EMIT deviceOperationFailed(operation, message);
+            });
+    connect(&m_daemon, &DaemonProxy::deviceOperationSucceeded, this,
+            &RokuDeckApplet::deviceOperationSucceeded);
+    connect(&m_daemon, &DaemonProxy::deviceTestFinished, this,
+            &RokuDeckApplet::deviceTestFinished);
+    connect(&m_daemon, &DaemonProxy::discoveryFinished, this, &RokuDeckApplet::discoveryFinished);
     connect(this, &Plasma::Applet::destroyedChanged, this, [this](bool destroyed) {
         if (destroyed) {
             m_daemon.stop();
@@ -71,6 +82,40 @@ void RokuDeckApplet::sendCommand(const QString& serial, const QString& action,
                                  const QVariant& value) {
     setLastError({});
     m_daemon.sendCommand(serial, action, value);
+}
+
+bool RokuDeckApplet::isBusy() const {
+    return m_daemon.isBusy();
+}
+
+void RokuDeckApplet::addDevice(const QVariantMap& device) {
+    setLastError({});
+    m_daemon.addDevice(device);
+}
+
+void RokuDeckApplet::updateDevice(const QString& serial, const QVariantMap& changes) {
+    setLastError({});
+    m_daemon.updateDevice(serial, changes);
+}
+
+void RokuDeckApplet::removeDevice(const QString& serial) {
+    setLastError({});
+    m_daemon.removeDevice(serial);
+}
+
+void RokuDeckApplet::setDeviceOrder(const QStringList& serials) {
+    setLastError({});
+    m_daemon.setDeviceOrder(serials);
+}
+
+void RokuDeckApplet::testDevice(const QString& address) {
+    setLastError({});
+    m_daemon.testDevice(address);
+}
+
+void RokuDeckApplet::discoverDevices() {
+    setLastError({});
+    m_daemon.discoverDevices();
 }
 
 void RokuDeckApplet::ensureSelectedSerial() {

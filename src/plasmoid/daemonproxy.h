@@ -7,10 +7,12 @@
 #include <QSet>
 #include <QString>
 #include <QVariant>
+#include <QVariantMap>
 
 #include <memory>
 
 class IoGithubJosephurRokuDeck1Interface;
+class QDBusPendingCall;
 class QDBusServiceWatcher;
 
 namespace RokuDeck {
@@ -30,10 +32,22 @@ class DaemonProxy final : public QObject {
     void stop();
     void refresh();
     void sendCommand(const QString& serial, const QString& action, const QVariant& value);
+    void addDevice(const QVariantMap& device);
+    void updateDevice(const QString& serial, const QVariantMap& changes);
+    void removeDevice(const QString& serial);
+    void setDeviceOrder(const QStringList& serials);
+    void testDevice(const QString& address);
+    void discoverDevices();
 
   Q_SIGNALS:
     void availableChanged(bool available);
     void errorOccurred(const QString& message);
+    void deviceOperationFailed(const QString& operation, const QString& message);
+    void deviceOperationSucceeded(const QString& operation);
+    void deviceTestFinished(const QString& address, const QVariantMap& snapshot,
+                            const QString& error);
+    void discoveryFinished(const QString& error);
+    void busyChanged();
 
   private:
     void handleServiceOwnerChanged(const QString& service, const QString& oldOwner,
@@ -45,6 +59,13 @@ class DaemonProxy final : public QObject {
     void setAvailable(bool available);
     void clearPendingCommands();
     void handleCommandFinished(const QString& requestId, const QString& resultJson);
+    void watchDeviceCall(const QString& operation, const QDBusPendingCall& call);
+    void setBusyCount(int count);
+
+  public:
+    [[nodiscard]] bool isBusy() const;
+
+  private:
 
     DevicesModel* const m_devices;
     const QString m_clientId;
@@ -54,6 +75,7 @@ class DaemonProxy final : public QObject {
     QHash<QString, QSet<QString>> m_awaitingSnapshot;
     QStringList m_registeredSerials;
     quint64 m_generation = 0;
+    int m_busyCount = 0;
     bool m_active = false;
     bool m_available = false;
     bool m_registered = false;

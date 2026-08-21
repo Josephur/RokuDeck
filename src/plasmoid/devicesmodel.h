@@ -15,6 +15,11 @@ struct DeviceDescription {
     QString serial;
     QString name;
     QString address;
+    // Daemon-owned preferences shown on the configuration pages. They are not
+    // per-widget settings: every widget sees the same choice for a device.
+    bool allowAutomations = true;
+    bool wakeOnWlan = false;
+    QString refreshPolicy = QStringLiteral("balanced");
 };
 
 struct DeviceStateSnapshot {
@@ -48,6 +53,9 @@ class DevicesModel final : public QAbstractListModel {
         CapabilitiesRole,
         StaleRole,
         PendingCommandRole,
+        AllowAutomationsRole,
+        WakeOnWlanRole,
+        RefreshPolicyRole,
     };
     Q_ENUM(Role)
 
@@ -80,6 +88,9 @@ class DevicesModel final : public QAbstractListModel {
         std::optional<bool> muted;
         QStringList capabilities;
         bool stale = true;
+        bool allowAutomations = true;
+        bool wakeOnWlan = false;
+        QString refreshPolicy = QStringLiteral("balanced");
         QSet<QString> pendingRequests;
     };
 
