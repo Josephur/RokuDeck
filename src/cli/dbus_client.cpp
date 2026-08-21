@@ -22,6 +22,11 @@ constexpr auto serviceName = "io.github.josephur.RokuDeck1";
 constexpr auto objectPath = "/io/github/josephur/RokuDeck1";
 constexpr int schemaVersion = 1;
 
+// The daemon is D-Bus activated and exits when it goes idle, so it is normally
+// not on the bus when a command runs. Making the call is what starts it; a
+// proxy validity check here would instead refuse every command until something
+// else happened to start the daemon first. A service that genuinely cannot
+// start still comes back as one of the errors isUnavailableError() names.
 [[nodiscard]] IoGithubJosephurRokuDeck1Interface makeProxy() {
     return {QString::fromLatin1(serviceName), QString::fromLatin1(objectPath),
             QDBusConnection::sessionBus()};
@@ -124,38 +129,22 @@ ExitCode exitCodeForError(const QString& errorCode) {
 
 ClientResult DbusClient::devices() const {
     auto proxy = makeProxy();
-    if (!proxy.isValid()) {
-        return failure(ExitCode::ServiceUnavailable,
-                       QStringLiteral("io.github.josephur.RokuDeck1 is unavailable"));
-    }
     return stringReply(proxy.ListDevices(), true);
 }
 
 ClientResult DbusClient::status(const QString& device) const {
     auto proxy = makeProxy();
-    if (!proxy.isValid()) {
-        return failure(ExitCode::ServiceUnavailable,
-                       QStringLiteral("io.github.josephur.RokuDeck1 is unavailable"));
-    }
     return stringReply(proxy.GetSnapshot(device), false);
 }
 
 ClientResult DbusClient::discover() const {
     auto proxy = makeProxy();
-    if (!proxy.isValid()) {
-        return failure(ExitCode::ServiceUnavailable,
-                       QStringLiteral("io.github.josephur.RokuDeck1 is unavailable"));
-    }
     return stringReply(proxy.DiscoverDevices(), true);
 }
 
 ClientResult DbusClient::sendCommand(const QString& device, const QString& action) const {
     auto proxy = makeProxy();
     proxy.setTimeout(CommandContract::clientCompletionTimeoutMs);
-    if (!proxy.isValid()) {
-        return failure(ExitCode::ServiceUnavailable,
-                       QStringLiteral("io.github.josephur.RokuDeck1 is unavailable"));
-    }
 
     std::optional<ClientResult> completed;
     QHash<QString, QString> earlyCompletions;

@@ -64,6 +64,17 @@ target_link_libraries(daemon-dbus-test
 find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session REQUIRED)
 add_test(NAME daemon-dbus COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:daemon-dbus-test>)
 
+# A private session bus still reads D-Bus service files from XDG_DATA_DIRS, so
+# without this a developer who has RokuDeck installed would have their real
+# daemon activated into the test bus and silently take over the service name.
+set(ROKUDECK_ISOLATED_XDG "${CMAKE_CURRENT_BINARY_DIR}/xdg-isolated")
+file(MAKE_DIRECTORY "${ROKUDECK_ISOLATED_XDG}")
+set(ROKUDECK_ISOLATED_ENVIRONMENT
+  "XDG_DATA_DIRS=${ROKUDECK_ISOLATED_XDG}"
+  "XDG_DATA_HOME=${ROKUDECK_ISOLATED_XDG}"
+)
+set_tests_properties(daemon-dbus PROPERTIES ENVIRONMENT "${ROKUDECK_ISOLATED_ENVIRONMENT}")
+
 add_executable(plasmoid-bridge-test
   unit/plasmoid_bridge_test.cpp
   ${PROJECT_SOURCE_DIR}/src/plasmoid/rokudeckapplet.cpp
@@ -92,7 +103,6 @@ target_link_libraries(plasmoid-bridge-test
 add_test(NAME plasmoid-bridge
   COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:plasmoid-bridge-test>
 )
-set_tests_properties(plasmoid-bridge PROPERTIES ENVIRONMENT QT_QPA_PLATFORM=offscreen)
 
 add_executable(plasmoid-qml-test qml/qmltest.cpp)
 target_link_libraries(plasmoid-qml-test
@@ -128,5 +138,9 @@ target_link_libraries(rokudeckctl-test
 )
 add_test(NAME rokudeckctl
   COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:rokudeckctl-test>
+)
+set_tests_properties(rokudeckctl PROPERTIES ENVIRONMENT "${ROKUDECK_ISOLATED_ENVIRONMENT}")
+set_tests_properties(plasmoid-bridge PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen;${ROKUDECK_ISOLATED_ENVIRONMENT}"
 )
 add_dependencies(rokudeckctl-test rokudeckctl)

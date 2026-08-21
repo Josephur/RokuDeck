@@ -83,7 +83,7 @@ TestCase {
 
     function test_addressValidationMatchesTheDaemonContract_data() {
         return [
-            { tag: "typical", address: "192.168.1.20", valid: true },
+            { tag: "typical", address: "192.0.2.20", valid: true },
             { tag: "documentation", address: "198.51.100.10", valid: true },
             { tag: "short", address: "10.1.2", valid: false },
             { tag: "out-of-range", address: "999.1.1.1", valid: false },
@@ -93,7 +93,7 @@ TestCase {
             { tag: "unspecified", address: "0.0.0.0", valid: false },
             { tag: "broadcast", address: "255.255.255.255", valid: false },
             { tag: "ipv6", address: "::1", valid: false },
-            { tag: "hostname", address: "roku.local", valid: false },
+            { tag: "hostname", address: "roku-on-the-lan", valid: false },
             { tag: "empty", address: "", valid: false }
         ];
     }

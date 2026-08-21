@@ -140,7 +140,7 @@ KCM.SimpleKCM {
 
                 objectName: "candidateAddress"
                 Kirigami.FormData.label: KI18n.i18nc("@label:textbox", "Network address:")
-                placeholderText: KI18n.i18nc("@info:placeholder", "For example 192.168.1.20")
+                placeholderText: KI18n.i18nc("@info:placeholder", "For example 192.0.2.10")
                 inputMethodHints: Qt.ImhPreferNumbers
                 onTextChanged: {
                     root.probeError = "";
