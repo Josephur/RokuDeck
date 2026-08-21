@@ -334,6 +334,12 @@ bool DaemonService::mergeDevice(const DeviceRecord& device, MergeMode mode) {
     DeviceRecord merged = device;
     if (mode == MergeMode::PreserveSettings) {
         if (previous) {
+            // Discovery and polling report the name the Roku advertises. Once
+            // the user has named the device themselves, that name wins.
+            merged.nameIsUserChosen = previous->nameIsUserChosen;
+            if (previous->nameIsUserChosen) {
+                merged.displayName = previous->displayName;
+            }
             merged.allowAutomations = previous->allowAutomations;
             merged.wakeOnWlan = previous->wakeOnWlan;
             merged.refreshPolicy = previous->refreshPolicy;
@@ -345,6 +351,7 @@ bool DaemonService::mergeDevice(const DeviceRecord& device, MergeMode mode) {
 
     const bool changed = !previous || previous->displayName != merged.displayName ||
                          previous->address != merged.address ||
+                         previous->nameIsUserChosen != merged.nameIsUserChosen ||
                          previous->allowAutomations != merged.allowAutomations ||
                          previous->wakeOnWlan != merged.wakeOnWlan ||
                          previous->refreshPolicy != merged.refreshPolicy ||
@@ -621,6 +628,9 @@ DaemonService::validateDeviceJson(const QString& deviceJson,
             return {{}, QStringLiteral("displayName is too long or contains control characters")};
         }
         device.displayName = displayName;
+        if (base) {
+            device.nameIsUserChosen = !displayName.isEmpty();
+        }
     }
 
     if (object.contains(QStringLiteral("address"))) {

@@ -23,6 +23,7 @@ QList<DeviceRecord> ConfigStore::loadDevices() const {
         device.serial = deviceGroup.readEntry("Serial", QString());
         device.displayName = deviceGroup.readEntry("DisplayName", QString());
         device.address = deviceGroup.readEntry("Address", QString());
+        device.nameIsUserChosen = deviceGroup.readEntry("NameIsUserChosen", false);
         device.allowAutomations = deviceGroup.readEntry("AllowAutomations", true);
         device.wakeOnWlan = deviceGroup.readEntry("WakeOnWlan", false);
         device.refreshPolicy =
@@ -52,6 +53,7 @@ void ConfigStore::saveDevices(const QList<DeviceRecord>& devices) {
         deviceGroup.writeEntry("Serial", device.serial);
         deviceGroup.writeEntry("DisplayName", device.displayName);
         deviceGroup.writeEntry("Address", device.address);
+        deviceGroup.writeEntry("NameIsUserChosen", device.nameIsUserChosen);
         deviceGroup.writeEntry("AllowAutomations", device.allowAutomations);
         deviceGroup.writeEntry("WakeOnWlan", device.wakeOnWlan);
         deviceGroup.writeEntry("RefreshPolicy", device.refreshPolicy);
