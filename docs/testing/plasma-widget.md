@@ -82,7 +82,7 @@ widget merely starting.
 
 | # | State | What to look for | Result |
 |---|-------|------------------|--------|
-| 1 | Horizontal panel | Icon, name and status fit the panel height without clipping | not yet checked |
+| 1 | Horizontal panel | Icon, name and status fit the panel height without clipping | pass 2026-08-21 |
 | 2 | Vertical panel | Labels drop out, the icon stays legible and square | not yet checked |
 | 3 | Desktop (planar) | Compact form is readable at the default widget size | not yet checked |
 | 4 | Expanded, wide | Device list and detail pane sit side by side | not yet checked |
