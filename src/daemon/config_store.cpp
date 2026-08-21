@@ -23,11 +23,23 @@ QList<DeviceRecord> ConfigStore::loadDevices() const {
         device.serial = deviceGroup.readEntry("Serial", QString());
         device.displayName = deviceGroup.readEntry("DisplayName", QString());
         device.address = deviceGroup.readEntry("Address", QString());
+        device.allowAutomations = deviceGroup.readEntry("AllowAutomations", true);
+        device.wakeOnWlan = deviceGroup.readEntry("WakeOnWlan", false);
+        device.refreshPolicy =
+            deviceGroup.readEntry("RefreshPolicy", QStringLiteral("balanced"));
+        // A file written before ordering existed has no SortIndex; falling back
+        // to the group position keeps those devices in their recorded order.
+        device.sortIndex = deviceGroup.readEntry("SortIndex", static_cast<int>(devices.size()));
         if (!device.serial.isEmpty()) {
             devices.append(std::move(device));
         }
     }
-    std::ranges::sort(devices, {}, &DeviceRecord::serial);
+    std::ranges::stable_sort(devices, [](const DeviceRecord& left, const DeviceRecord& right) {
+        if (left.sortIndex != right.sortIndex) {
+            return left.sortIndex < right.sortIndex;
+        }
+        return left.serial < right.serial;
+    });
     return devices;
 }
 
@@ -40,6 +52,10 @@ void ConfigStore::saveDevices(const QList<DeviceRecord>& devices) {
         deviceGroup.writeEntry("Serial", device.serial);
         deviceGroup.writeEntry("DisplayName", device.displayName);
         deviceGroup.writeEntry("Address", device.address);
+        deviceGroup.writeEntry("AllowAutomations", device.allowAutomations);
+        deviceGroup.writeEntry("WakeOnWlan", device.wakeOnWlan);
+        deviceGroup.writeEntry("RefreshPolicy", device.refreshPolicy);
+        deviceGroup.writeEntry("SortIndex", device.sortIndex);
     }
     m_config->sync();
 }

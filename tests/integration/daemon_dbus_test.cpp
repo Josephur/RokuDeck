@@ -62,6 +62,12 @@ class DaemonDbusTest final : public QObject {
     void commandsSerializePerDevice();
     void commandsOnDifferentDevicesRunIndependently();
     void pendingCommandDefersActualIdleExpiry();
+    void deviceManagementAddsRenamesAndRemovesDevices();
+    void deviceManagementRejectsInvalidInput();
+    void deviceOrderIsUserControlledAndPersisted();
+    void discoveryPreservesConfiguredDeviceSettings();
+    void testDeviceProbesAnAddressWithoutRegisteringIt();
+    void refreshPolicyBoundsHowOftenTheDaemonPollsADevice();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -236,7 +242,7 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
         }
     }
     QVERIFY2(!xml.hasError(), qPrintable(xml.errorString()));
-    QCOMPARE(methods.size(), 7);
+    QCOMPARE(methods.size(), 12);
     QCOMPARE(methods.value(QStringLiteral("ListDevices")), QStringList{QStringLiteral("out:s")});
     QCOMPARE(methods.value(QStringLiteral("GetSnapshot")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
@@ -253,6 +259,17 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
     QCOMPARE(
         methods.value(QStringLiteral("SendCommand")),
         QStringList({QStringLiteral("in:s"), QStringLiteral("in:s"), QStringLiteral("out:s")}));
+    QCOMPARE(methods.value(QStringLiteral("AddDevice")),
+             QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
+    QCOMPARE(
+        methods.value(QStringLiteral("UpdateDevice")),
+        QStringList({QStringLiteral("in:s"), QStringLiteral("in:s"), QStringLiteral("out:s")}));
+    QCOMPARE(methods.value(QStringLiteral("RemoveDevice")),
+             QStringList{QStringLiteral("in:s")});
+    QCOMPARE(methods.value(QStringLiteral("SetDeviceOrder")),
+             QStringList{QStringLiteral("in:as")});
+    QCOMPARE(methods.value(QStringLiteral("TestDevice")),
+             QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
     QCOMPARE(signals.size(), 3);
     QCOMPARE(signals.value(QStringLiteral("DeviceSnapshotChanged")),
              QStringList({QStringLiteral("s"), QStringLiteral("s")}));
@@ -943,6 +960,349 @@ void DaemonDbusTest::pendingCommandDefersActualIdleExpiry() {
     QCOMPARE(commandFinished.size(), 1);
     QVERIFY(m_daemon->idleTimerActive());
     QTRY_COMPARE_WITH_TIMEOUT(idleExit.size(), 1, 500);
+}
+
+namespace {
+
+[[nodiscard]] QString deviceJson(const QString& serial, const QString& displayName,
+                                 const QString& address) {
+    return QStringLiteral(R"json({"serial":"%1","displayName":"%2","address":"%3"})json")
+        .arg(serial, displayName, address);
+}
+
+[[nodiscard]] QJsonObject deviceEntry(const QJsonObject& listing, const QString& serial) {
+    const QJsonArray devices = listing.value(QStringLiteral("devices")).toArray();
+    for (const QJsonValue& entry : devices) {
+        if (entry.toObject().value(QStringLiteral("serial")).toString() == serial) {
+            return entry.toObject();
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] QStringList listedSerials(const QJsonObject& listing) {
+    QStringList serials;
+    const QJsonArray devices = listing.value(QStringLiteral("devices")).toArray();
+    for (const QJsonValue& entry : devices) {
+        serials.append(entry.toObject().value(QStringLiteral("serial")).toString());
+    }
+    return serials;
+}
+
+} // namespace
+
+void DaemonDbusTest::deviceManagementAddsRenamesAndRemovesDevices() {
+    QSignalSpy changed(m_daemon.get(), &DaemonService::DeviceListChanged);
+
+    const QDBusMessage added =
+        call(QStringLiteral("AddDevice"),
+             {deviceJson(QStringLiteral("SERIAL-A"), QStringLiteral("Living Room"),
+                         QStringLiteral("198.51.100.10"))});
+    QVERIFY2(added.type() != QDBusMessage::ErrorMessage, qPrintable(added.errorMessage()));
+    QJsonObject record = jsonResult(added);
+    QCOMPARE(record.value(QStringLiteral("serial")).toString(), QStringLiteral("SERIAL-A"));
+    QCOMPARE(record.value(QStringLiteral("displayName")).toString(), QStringLiteral("Living Room"));
+    QCOMPARE(record.value(QStringLiteral("address")).toString(), QStringLiteral("198.51.100.10"));
+    QVERIFY2(record.value(QStringLiteral("allowAutomations")).toBool(),
+             "automations must be allowed until the user opts out");
+    QVERIFY2(!record.value(QStringLiteral("wakeOnWlan")).toBool(),
+             "waking a sleeping TV must stay opt-in");
+    QCOMPARE(record.value(QStringLiteral("refreshPolicy")).toString(), QStringLiteral("balanced"));
+    QCOMPARE(changed.size(), 1);
+
+    const QDBusMessage duplicate =
+        call(QStringLiteral("AddDevice"),
+             {deviceJson(QStringLiteral("SERIAL-A"), QStringLiteral("Second Try"),
+                         QStringLiteral("198.51.100.11"))});
+    QCOMPARE(duplicate.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
+            .value(QStringLiteral("address"))
+            .toString(),
+        QStringLiteral("198.51.100.10"));
+
+    const QDBusMessage updated = call(
+        QStringLiteral("UpdateDevice"),
+        {QStringLiteral("SERIAL-A"),
+         QStringLiteral(
+             R"json({"displayName":"Den","refreshPolicy":"responsive","allowAutomations":false})json")});
+    QVERIFY2(updated.type() != QDBusMessage::ErrorMessage, qPrintable(updated.errorMessage()));
+    record = jsonResult(updated);
+    QCOMPARE(record.value(QStringLiteral("displayName")).toString(), QStringLiteral("Den"));
+    QCOMPARE(record.value(QStringLiteral("refreshPolicy")).toString(),
+             QStringLiteral("responsive"));
+    QVERIFY(!record.value(QStringLiteral("allowAutomations")).toBool());
+    QVERIFY2(record.value(QStringLiteral("address")).toString() ==
+                 QStringLiteral("198.51.100.10"),
+             "an unnamed key must keep its stored value");
+
+    recreateDaemon();
+    record =
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"));
+    QCOMPARE(record.value(QStringLiteral("displayName")).toString(), QStringLiteral("Den"));
+    QCOMPARE(record.value(QStringLiteral("refreshPolicy")).toString(),
+             QStringLiteral("responsive"));
+    QVERIFY(!record.value(QStringLiteral("allowAutomations")).toBool());
+
+    const QDBusMessage removed = call(QStringLiteral("RemoveDevice"), {QStringLiteral("SERIAL-A")});
+    QVERIFY2(removed.type() != QDBusMessage::ErrorMessage, qPrintable(removed.errorMessage()));
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))).size(), 0);
+
+    const QDBusMessage removedAgain =
+        call(QStringLiteral("RemoveDevice"), {QStringLiteral("SERIAL-A")});
+    QCOMPARE(removedAgain.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(removedAgain.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.UnknownDevice"));
+
+    recreateDaemon();
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))).size(), 0);
+}
+
+void DaemonDbusTest::deviceManagementRejectsInvalidInput() {
+    const QStringList rejectedAdds{
+        QStringLiteral(R"json({"displayName":"No Serial","address":"198.51.100.10"})json"),
+        QStringLiteral(R"json({"serial":"SERIAL-A","address":"198.51.100"})json"),
+        QStringLiteral(R"json({"serial":"SERIAL-A","address":"999.1.1.1"})json"),
+        QStringLiteral(R"json({"serial":"SERIAL-A","address":"not-an-address"})json"),
+        QStringLiteral(R"json({"serial":"SERIAL-A","address":"127.0.0.1"})json"),
+        QStringLiteral(R"json({"serial":"SERIAL-A","address":"224.0.0.1"})json"),
+        QStringLiteral(R"json({"serial":"SERIAL-A","address":"0.0.0.0"})json"),
+        QStringLiteral(R"json({"serial":"SERIAL-A","address":"::1"})json"),
+        QStringLiteral(
+            R"json({"serial":"SERIAL-A","address":"198.51.100.10","refreshPolicy":"turbo"})json"),
+        QStringLiteral(R"json({"serial":"  ","address":"198.51.100.10"})json"),
+        QStringLiteral(R"json(["not","an","object"])json"),
+        QStringLiteral(R"json(not json at all)json"),
+    };
+    for (const QString& payload : rejectedAdds) {
+        const QDBusMessage reply = call(QStringLiteral("AddDevice"), {payload});
+        QVERIFY2(reply.type() == QDBusMessage::ErrorMessage,
+                 qPrintable(QStringLiteral("AddDevice accepted %1").arg(payload)));
+    }
+
+    const QString controlCharacterName =
+        QStringLiteral(R"json({"serial":"SERIAL-A","address":"198.51.100.10","displayName":"a%1b"})json")
+            .arg(QChar(u'\u0007'));
+    QCOMPARE(call(QStringLiteral("AddDevice"), {controlCharacterName}).type(),
+             QDBusMessage::ErrorMessage);
+
+    const QString oversized =
+        QStringLiteral(
+            R"json({"serial":"SERIAL-A","address":"198.51.100.10","displayName":"%1"})json")
+            .arg(QString(8192, QChar(u'x')));
+    QCOMPARE(call(QStringLiteral("AddDevice"), {oversized}).type(), QDBusMessage::ErrorMessage);
+
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))).size(), 0);
+
+    const QDBusMessage unknownUpdate =
+        call(QStringLiteral("UpdateDevice"),
+             {QStringLiteral("SERIAL-MISSING"), QStringLiteral(R"json({"displayName":"X"})json")});
+    QCOMPARE(unknownUpdate.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(unknownUpdate.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.UnknownDevice"));
+
+    const QDBusMessage accepted =
+        call(QStringLiteral("AddDevice"),
+             {deviceJson(QStringLiteral("SERIAL-A"), QStringLiteral("Living Room"),
+                         QStringLiteral("198.51.100.10"))});
+    QVERIFY2(accepted.type() != QDBusMessage::ErrorMessage, qPrintable(accepted.errorMessage()));
+
+    const QDBusMessage badUpdate =
+        call(QStringLiteral("UpdateDevice"),
+             {QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"address":"10.0.0"})json")});
+    QCOMPARE(badUpdate.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
+            .value(QStringLiteral("address"))
+            .toString(),
+        QStringLiteral("198.51.100.10"));
+
+    const QDBusMessage serialChange =
+        call(QStringLiteral("UpdateDevice"),
+             {QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"serial":"SERIAL-B"})json")});
+    QVERIFY2(serialChange.type() == QDBusMessage::ErrorMessage,
+             "a device identity must not be rewritten through UpdateDevice");
+}
+
+void DaemonDbusTest::deviceOrderIsUserControlledAndPersisted() {
+    const QList<std::pair<QString, QString>> fixtures{
+        {QStringLiteral("SERIAL-A"), QStringLiteral("198.51.100.10")},
+        {QStringLiteral("SERIAL-B"), QStringLiteral("198.51.100.11")},
+        {QStringLiteral("SERIAL-C"), QStringLiteral("198.51.100.12")}};
+    for (const auto& [serial, address] : fixtures) {
+        const QDBusMessage added =
+            call(QStringLiteral("AddDevice"),
+                 {deviceJson(serial, QStringLiteral("Fixture"), address)});
+        QVERIFY2(added.type() != QDBusMessage::ErrorMessage, qPrintable(added.errorMessage()));
+    }
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
+             QStringList({QStringLiteral("SERIAL-A"), QStringLiteral("SERIAL-B"),
+                          QStringLiteral("SERIAL-C")}));
+
+    QSignalSpy changed(m_daemon.get(), &DaemonService::DeviceListChanged);
+    const QDBusMessage reordered =
+        call(QStringLiteral("SetDeviceOrder"),
+             {QStringList({QStringLiteral("SERIAL-C"), QStringLiteral("SERIAL-A"),
+                           QStringLiteral("SERIAL-B")})});
+    QVERIFY2(reordered.type() != QDBusMessage::ErrorMessage, qPrintable(reordered.errorMessage()));
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
+             QStringList({QStringLiteral("SERIAL-C"), QStringLiteral("SERIAL-A"),
+                          QStringLiteral("SERIAL-B")}));
+
+    const QDBusMessage unknown =
+        call(QStringLiteral("SetDeviceOrder"),
+             {QStringList({QStringLiteral("SERIAL-C"), QStringLiteral("SERIAL-MISSING")})});
+    QCOMPARE(unknown.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
+             QStringList({QStringLiteral("SERIAL-C"), QStringLiteral("SERIAL-A"),
+                          QStringLiteral("SERIAL-B")}));
+
+    const QDBusMessage duplicated =
+        call(QStringLiteral("SetDeviceOrder"),
+             {QStringList({QStringLiteral("SERIAL-C"), QStringLiteral("SERIAL-C")})});
+    QCOMPARE(duplicated.type(), QDBusMessage::ErrorMessage);
+
+    const QDBusMessage partial =
+        call(QStringLiteral("SetDeviceOrder"), {QStringList{QStringLiteral("SERIAL-B")}});
+    QVERIFY2(partial.type() != QDBusMessage::ErrorMessage, qPrintable(partial.errorMessage()));
+    QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))) ==
+                 QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-C"),
+                              QStringLiteral("SERIAL-A")}),
+             "devices the caller omitted must keep their relative order behind the named ones");
+
+    recreateDaemon();
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
+             QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-C"),
+                          QStringLiteral("SERIAL-A")}));
+}
+
+void DaemonDbusTest::discoveryPreservesConfiguredDeviceSettings() {
+    QDBusMessage reply =
+        call(QStringLiteral("AddDevice"),
+             {deviceJson(QStringLiteral("SERIAL-A"), QStringLiteral("Living Room"),
+                         QStringLiteral("198.51.100.10"))});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+    reply = call(QStringLiteral("AddDevice"),
+                 {deviceJson(QStringLiteral("SERIAL-B"), QStringLiteral("Bedroom"),
+                             QStringLiteral("198.51.100.11"))});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+    reply = call(
+        QStringLiteral("UpdateDevice"),
+        {QStringLiteral("SERIAL-A"),
+         QStringLiteral(
+             R"json({"displayName":"Renamed By User","allowAutomations":false,"wakeOnWlan":true,"refreshPolicy":"battery"})json")});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+    reply = call(QStringLiteral("SetDeviceOrder"),
+                 {QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-A")})});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+
+    const QDBusPendingReply<QString> discovery = m_proxy->DiscoverDevices();
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 500);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json([{"serialNumber":"SERIAL-A","deviceName":"Roku Advertised Name","ip":"198.51.100.42"}])json"),
+         {},
+         false});
+    const QDBusMessage discovered = waitForReply(discovery);
+    QVERIFY2(discovered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(discovered.errorMessage()));
+
+    const QJsonObject record =
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"));
+    QVERIFY2(record.value(QStringLiteral("address")).toString() ==
+                 QStringLiteral("198.51.100.42"),
+             "discovery must still follow a device that moved");
+    QVERIFY2(!record.value(QStringLiteral("allowAutomations")).toBool(),
+             "discovery must not re-enable automations the user turned off");
+    QVERIFY2(record.value(QStringLiteral("wakeOnWlan")).toBool(),
+             "discovery must not discard the wake preference");
+    QCOMPARE(record.value(QStringLiteral("refreshPolicy")).toString(), QStringLiteral("battery"));
+    QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))) ==
+                 QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-A")}),
+             "discovery must not reshuffle the order the user chose");
+}
+
+void DaemonDbusTest::testDeviceProbesAnAddressWithoutRegisteringIt() {
+    const QDBusMessage rejected = call(QStringLiteral("TestDevice"), {QStringLiteral("10.0.0")});
+    QCOMPARE(rejected.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(m_runner->requests.size(), 0);
+
+    const QDBusPendingReply<QString> probe = m_proxy->TestDevice(QStringLiteral("198.51.100.55"));
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 500);
+    QCOMPARE(m_runner->lastRequest.arguments, QStringList{QStringLiteral("--version")});
+    m_runner->complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 2, 500);
+    QVERIFY2(m_runner->lastRequest.arguments.contains(QStringLiteral("198.51.100.55")),
+             "the probe must target the address the caller asked about");
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"deviceName":"Probed Fixture","serialNumber":"SERIAL-PROBE","powerMode":"PowerOn"})json"),
+         {},
+         false});
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 5, 500);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<active-app><app id=\"home\" type=\"home\">Roku</app></active-app>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<player state=\"idle\"/>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<audio-device><volume>27</volume><mute-status>false</mute-status></audio-device>","status":200,"headers":{}})json"),
+         {},
+         false});
+
+    const QDBusMessage probed = waitForReply(probe);
+    QVERIFY2(probed.type() != QDBusMessage::ErrorMessage, qPrintable(probed.errorMessage()));
+    const QJsonObject snapshot = jsonResult(probed);
+    QCOMPARE(snapshot.value(QStringLiteral("serial")).toString(), QStringLiteral("SERIAL-PROBE"));
+    QCOMPARE(snapshot.value(QStringLiteral("displayName")).toString(),
+             QStringLiteral("Probed Fixture"));
+    QCOMPARE(snapshot.value(QStringLiteral("address")).toString(),
+             QStringLiteral("198.51.100.55"));
+    QCOMPARE(snapshot.value(QStringLiteral("power")).toString(), QStringLiteral("on"));
+    QCOMPARE(snapshot.value(QStringLiteral("volume")).toInt(), 27);
+
+    QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))).isEmpty(),
+             "testing an address must never register it behind the user's back");
+}
+
+void DaemonDbusTest::refreshPolicyBoundsHowOftenTheDaemonPollsADevice() {
+    QDBusMessage reply =
+        call(QStringLiteral("AddDevice"),
+             {deviceJson(QStringLiteral("SERIAL-A"), QStringLiteral("Living Room"),
+                         QStringLiteral("198.51.100.10"))});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+    reply = call(QStringLiteral("UpdateDevice"),
+                 {QStringLiteral("SERIAL-A"),
+                  QStringLiteral(R"json({"refreshPolicy":"battery"})json")});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("hungry-widget"), QStringList{QStringLiteral("SERIAL-A")}, 250u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    QVERIFY2(m_daemon->effectiveInterval(QStringLiteral("SERIAL-A")) >= 30000u,
+             "a battery-conscious device must not be polled at the rate a widget asked for");
+
+    reply = call(QStringLiteral("UpdateDevice"),
+                 {QStringLiteral("SERIAL-A"),
+                  QStringLiteral(R"json({"refreshPolicy":"responsive"})json")});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+    QVERIFY2(m_daemon->effectiveInterval(QStringLiteral("SERIAL-A")) < 30000u,
+             "relaxing the policy must take effect without re-registering the widget");
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

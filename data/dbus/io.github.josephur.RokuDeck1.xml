@@ -32,6 +32,25 @@
     <method name="DiscoverDevices">
       <arg direction="out" type="s" name="devicesJson"/>
     </method>
+    <method name="AddDevice">
+      <arg direction="in" type="s" name="deviceJson"/>
+      <arg direction="out" type="s" name="deviceJson"/>
+    </method>
+    <method name="UpdateDevice">
+      <arg direction="in" type="s" name="serial"/>
+      <arg direction="in" type="s" name="changesJson"/>
+      <arg direction="out" type="s" name="deviceJson"/>
+    </method>
+    <method name="RemoveDevice">
+      <arg direction="in" type="s" name="serial"/>
+    </method>
+    <method name="SetDeviceOrder">
+      <arg direction="in" type="as" name="serials"/>
+    </method>
+    <method name="TestDevice">
+      <arg direction="in" type="s" name="address"/>
+      <arg direction="out" type="s" name="snapshotJson"/>
+    </method>
     <method name="SendCommand">
       <arg direction="in" type="s" name="serial"/>
       <arg direction="in" type="s" name="commandJson"/>

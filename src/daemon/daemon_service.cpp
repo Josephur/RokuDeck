@@ -82,6 +82,74 @@ constexpr auto objectPath = "/io/github/josephur/RokuDeck1";
     return QStringLiteral("unknown");
 }
 
+constexpr qsizetype maximumDeviceJsonBytes = 4096;
+constexpr qsizetype maximumDisplayNameLength = 128;
+constexpr qsizetype maximumSerialLength = 64;
+
+// Deliberately parsed by hand rather than with QHostAddress: the daemon must
+// accept exactly one notation, and QHostAddress also resolves shorthand forms
+// such as "10.1" that would silently reach a different host than the user typed.
+[[nodiscard]] bool isRoutableIpv4(const QString& address) {
+    const QStringList octets = address.split(QChar(u'.'));
+    if (octets.size() != 4) {
+        return false;
+    }
+    quint32 raw = 0;
+    for (const QString& octet : octets) {
+        if (octet.isEmpty() || octet.size() > 3) {
+            return false;
+        }
+        if (octet.size() > 1 && octet.startsWith(QChar(u'0'))) {
+            return false;
+        }
+        for (const QChar character : octet) {
+            if (character < u'0' || character > u'9') {
+                return false;
+            }
+        }
+        const uint value = octet.toUInt();
+        if (value > 255) {
+            return false;
+        }
+        raw = (raw << 8) | value;
+    }
+    if (raw == 0 || raw == 0xFFFFFFFFu) {
+        return false;
+    }
+    const quint32 highOctet = raw >> 24;
+    // Loopback, multicast and reserved ranges can never name a Roku on the LAN.
+    return highOctet != 127 && highOctet < 224;
+}
+
+[[nodiscard]] bool isPrintableSingleLine(const QString& text) {
+    return std::ranges::none_of(text, [](QChar character) {
+        return character.category() == QChar::Other_Control ||
+               character.category() == QChar::Other_Format;
+    });
+}
+
+// The refresh policy reshapes what a widget asked for rather than replacing it,
+// so the default keeps today's behaviour while the other two are real choices:
+// "responsive" guarantees at least one update a second even for a widget that
+// asked for less, and "battery conscious" refuses to poll faster than every
+// thirty seconds no matter how eager the widget is.
+[[nodiscard]] std::chrono::milliseconds applyRefreshPolicy(const QString& policy,
+                                                           std::chrono::milliseconds requested) {
+    if (policy == QStringLiteral("responsive")) {
+        return std::min(requested, std::chrono::milliseconds(std::chrono::seconds(1)));
+    }
+    if (policy == QStringLiteral("battery")) {
+        return std::max(requested, std::chrono::milliseconds(std::chrono::seconds(30)));
+    }
+    return requested;
+}
+
+[[nodiscard]] bool isSupportedRefreshPolicy(const QString& policy) {
+    static const QSet<QString> supported{QStringLiteral("responsive"), QStringLiteral("balanced"),
+                                         QStringLiteral("battery")};
+    return supported.contains(policy);
+}
+
 [[nodiscard]] QString compactJson(const QJsonObject& object) {
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
@@ -250,45 +318,84 @@ void DaemonService::upsertDevice(const DeviceRecord& device) {
         return;
     }
     if (mergeDevice(device)) {
-        m_configStore->saveDevices(m_deviceRegistry.devices());
-        Q_EMIT DeviceListChanged(ListDevices());
+        persistAndAnnounceDevices();
     }
 }
 
-bool DaemonService::mergeDevice(const DeviceRecord& device) {
+bool DaemonService::mergeDevice(const DeviceRecord& device, MergeMode mode) {
     if (device.serial.isEmpty()) {
         return false;
     }
     const auto previous = findDevice(device.serial);
-    const bool changed = !previous || previous->displayName != device.displayName ||
-                         previous->address != device.address;
+
+    // Identity merges (discovery, polling) only carry serial, name and address.
+    // Copying the stored preferences forward keeps a rediscovered device from
+    // silently re-enabling automations or losing the order the user chose.
+    DeviceRecord merged = device;
+    if (mode == MergeMode::PreserveSettings) {
+        if (previous) {
+            merged.allowAutomations = previous->allowAutomations;
+            merged.wakeOnWlan = previous->wakeOnWlan;
+            merged.refreshPolicy = previous->refreshPolicy;
+            merged.sortIndex = previous->sortIndex;
+        } else {
+            merged.sortIndex = nextSortIndex();
+        }
+    }
+
+    const bool changed = !previous || previous->displayName != merged.displayName ||
+                         previous->address != merged.address ||
+                         previous->allowAutomations != merged.allowAutomations ||
+                         previous->wakeOnWlan != merged.wakeOnWlan ||
+                         previous->refreshPolicy != merged.refreshPolicy ||
+                         previous->sortIndex != merged.sortIndex;
     if (!changed) {
         return false;
     }
 
-    const bool addressChanged = previous && previous->address != device.address;
-    m_deviceRegistry.upsert(device);
+    const bool addressChanged = previous && previous->address != merged.address;
+    m_deviceRegistry.upsert(merged);
     if (!previous) {
-        m_addressGenerations.insert(device.serial, 1);
+        m_addressGenerations.insert(merged.serial, 1);
     } else if (addressChanged) {
-        m_addressGenerations[device.serial] = m_addressGenerations.value(device.serial, 1) + 1;
-        m_snapshots.remove(device.serial);
+        m_addressGenerations[merged.serial] = m_addressGenerations.value(merged.serial, 1) + 1;
+        m_snapshots.remove(merged.serial);
     } else {
-        auto snapshotIt = m_snapshots.find(device.serial);
+        auto snapshotIt = m_snapshots.find(merged.serial);
         if (snapshotIt != m_snapshots.end()) {
-            snapshotIt->displayName = device.displayName;
-            snapshotIt->address = device.address;
+            snapshotIt->displayName = merged.displayName;
+            snapshotIt->address = merged.address;
         }
     }
     return true;
 }
 
+int DaemonService::nextSortIndex() const {
+    int next = 0;
+    for (const DeviceRecord& device : m_deviceRegistry.devices()) {
+        next = std::max(next, device.sortIndex + 1);
+    }
+    return next;
+}
+
+void DaemonService::persistAndAnnounceDevices() {
+    m_configStore->saveDevices(m_deviceRegistry.devices());
+    Q_EMIT DeviceListChanged(ListDevices());
+}
+
+QJsonObject DaemonService::deviceObject(const DeviceRecord& device) {
+    return QJsonObject{{QStringLiteral("serial"), device.serial},
+                       {QStringLiteral("displayName"), device.displayName},
+                       {QStringLiteral("address"), device.address},
+                       {QStringLiteral("allowAutomations"), device.allowAutomations},
+                       {QStringLiteral("wakeOnWlan"), device.wakeOnWlan},
+                       {QStringLiteral("refreshPolicy"), device.refreshPolicy}};
+}
+
 QString DaemonService::devicesJson(const QList<DeviceRecord>& devices) {
     QJsonArray entries;
     for (const DeviceRecord& device : devices) {
-        entries.append(QJsonObject{{QStringLiteral("serial"), device.serial},
-                                   {QStringLiteral("displayName"), device.displayName},
-                                   {QStringLiteral("address"), device.address}});
+        entries.append(deviceObject(device));
     }
     return compactJson(
         QJsonObject{{QStringLiteral("schemaVersion"), 1}, {QStringLiteral("devices"), entries}});
@@ -374,6 +481,13 @@ void DaemonService::removePollInterests(const ClientRegistration& registration) 
     }
 }
 
+std::chrono::milliseconds DaemonService::policyAdjustedInterval(const QString& serial,
+                                                     std::chrono::milliseconds requested) const {
+    const auto device = findDevice(serial);
+    return applyRefreshPolicy(device ? device->refreshPolicy : QStringLiteral("balanced"),
+                              requested);
+}
+
 void DaemonService::applyPollInterests(const ClientRegistration& registration) {
     const QString schedulerClientId = registration.owner + QChar(u'\x1f') + registration.clientId;
     for (const QString& serial : registration.serials) {
@@ -382,7 +496,13 @@ void DaemonService::applyPollInterests(const ClientRegistration& registration) {
              serial,
              {QStringLiteral("power"), QStringLiteral("screensaver"), QStringLiteral("activeApp"),
               QStringLiteral("media"), QStringLiteral("volume"), QStringLiteral("muted")},
-             std::chrono::milliseconds(registration.intervalMs)});
+             policyAdjustedInterval(serial, std::chrono::milliseconds(registration.intervalMs))});
+    }
+}
+
+void DaemonService::reapplyPollInterests() {
+    for (const ClientRegistration& registration : m_clients.registrations()) {
+        applyPollInterests(registration);
     }
 }
 
@@ -443,6 +563,270 @@ void DaemonService::UnregisterClient(const QString& clientId) {
     updateIdleTimer();
 }
 
+DaemonService::ValidatedRecord
+DaemonService::validateDeviceJson(const QString& deviceJson,
+                                  const std::optional<DeviceRecord>& base) const {
+    const QByteArray encoded = deviceJson.toUtf8();
+    if (encoded.size() > maximumDeviceJsonBytes) {
+        return {{}, QStringLiteral("the device payload is too large")};
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(encoded, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return {{}, QStringLiteral("the device payload is not a JSON object")};
+    }
+    const QJsonObject object = document.object();
+
+    static const QSet<QString> allowedKeys{
+        QStringLiteral("serial"),           QStringLiteral("displayName"),
+        QStringLiteral("address"),          QStringLiteral("allowAutomations"),
+        QStringLiteral("wakeOnWlan"),       QStringLiteral("refreshPolicy")};
+    const QStringList keys = object.keys();
+    for (const QString& key : keys) {
+        if (!allowedKeys.contains(key)) {
+            return {{}, QStringLiteral("unsupported device key: %1").arg(key)};
+        }
+    }
+
+    DeviceRecord device = base.value_or(DeviceRecord{});
+
+    if (object.contains(QStringLiteral("serial"))) {
+        const QJsonValue value = object.value(QStringLiteral("serial"));
+        if (!value.isString()) {
+            return {{}, QStringLiteral("serial must be a string")};
+        }
+        const QString serial = value.toString().trimmed();
+        if (serial.isEmpty() || serial.size() > maximumSerialLength ||
+            !isPrintableSingleLine(serial)) {
+            return {{}, QStringLiteral("serial is empty or malformed")};
+        }
+        // A stored device's identity is its key; changing it would orphan its
+        // snapshots, poll claims and per-widget selections.
+        if (base && serial != base->serial) {
+            return {{}, QStringLiteral("a device serial cannot be changed")};
+        }
+        device.serial = serial;
+    }
+    if (device.serial.isEmpty()) {
+        return {{}, QStringLiteral("serial is required")};
+    }
+
+    if (object.contains(QStringLiteral("displayName"))) {
+        const QJsonValue value = object.value(QStringLiteral("displayName"));
+        if (!value.isString()) {
+            return {{}, QStringLiteral("displayName must be a string")};
+        }
+        const QString displayName = value.toString().trimmed();
+        if (displayName.size() > maximumDisplayNameLength || !isPrintableSingleLine(displayName)) {
+            return {{}, QStringLiteral("displayName is too long or contains control characters")};
+        }
+        device.displayName = displayName;
+    }
+
+    if (object.contains(QStringLiteral("address"))) {
+        const QJsonValue value = object.value(QStringLiteral("address"));
+        if (!value.isString() || !isRoutableIpv4(value.toString().trimmed())) {
+            return {{}, QStringLiteral("address must be a routable IPv4 address")};
+        }
+        device.address = value.toString().trimmed();
+    }
+    if (device.address.isEmpty()) {
+        return {{}, QStringLiteral("address is required")};
+    }
+
+    if (object.contains(QStringLiteral("allowAutomations"))) {
+        const QJsonValue value = object.value(QStringLiteral("allowAutomations"));
+        if (!value.isBool()) {
+            return {{}, QStringLiteral("allowAutomations must be a boolean")};
+        }
+        device.allowAutomations = value.toBool();
+    }
+
+    if (object.contains(QStringLiteral("wakeOnWlan"))) {
+        const QJsonValue value = object.value(QStringLiteral("wakeOnWlan"));
+        if (!value.isBool()) {
+            return {{}, QStringLiteral("wakeOnWlan must be a boolean")};
+        }
+        device.wakeOnWlan = value.toBool();
+    }
+
+    if (object.contains(QStringLiteral("refreshPolicy"))) {
+        const QJsonValue value = object.value(QStringLiteral("refreshPolicy"));
+        if (!value.isString() || !isSupportedRefreshPolicy(value.toString())) {
+            return {{}, QStringLiteral("refreshPolicy must be responsive, balanced or battery")};
+        }
+        device.refreshPolicy = value.toString();
+    }
+
+    return {device, {}};
+}
+
+QString DaemonService::AddDevice(const QString& deviceJson) {
+    const ValidatedRecord validated = validateDeviceJson(deviceJson, std::nullopt);
+    if (!validated.errorMessage.isEmpty()) {
+        if (calledFromDBus()) {
+            sendErrorReply(QDBusError::InvalidArgs, validated.errorMessage);
+        }
+        return {};
+    }
+    if (findDevice(validated.device.serial)) {
+        if (calledFromDBus()) {
+            sendErrorReply(QDBusError::InvalidArgs,
+                           QStringLiteral("device %1 is already configured")
+                               .arg(validated.device.serial));
+        }
+        return {};
+    }
+
+    DeviceRecord device = validated.device;
+    device.sortIndex = nextSortIndex();
+    if (mergeDevice(device, MergeMode::ApplySettings)) {
+        persistAndAnnounceDevices();
+    }
+    return compactJson(deviceObject(device));
+}
+
+QString DaemonService::UpdateDevice(const QString& serial, const QString& changesJson) {
+    const auto existing = findDevice(serial);
+    if (!existing) {
+        if (calledFromDBus()) {
+            sendErrorReply(QString::fromLatin1(DbusError::unknownDevice),
+                           QStringLiteral("unknown device %1").arg(serial));
+        }
+        return {};
+    }
+    const ValidatedRecord validated = validateDeviceJson(changesJson, existing);
+    if (!validated.errorMessage.isEmpty()) {
+        if (calledFromDBus()) {
+            sendErrorReply(QDBusError::InvalidArgs, validated.errorMessage);
+        }
+        return {};
+    }
+    if (mergeDevice(validated.device, MergeMode::ApplySettings)) {
+        if (validated.device.refreshPolicy != existing->refreshPolicy) {
+            reapplyPollInterests();
+        }
+        persistAndAnnounceDevices();
+    }
+    return compactJson(deviceObject(validated.device));
+}
+
+void DaemonService::RemoveDevice(const QString& serial) {
+    if (!m_deviceRegistry.remove(serial)) {
+        if (calledFromDBus()) {
+            sendErrorReply(QString::fromLatin1(DbusError::unknownDevice),
+                           QStringLiteral("unknown device %1").arg(serial));
+        }
+        return;
+    }
+    m_snapshots.remove(serial);
+    m_addressGenerations.remove(serial);
+    persistAndAnnounceDevices();
+}
+
+void DaemonService::SetDeviceOrder(const QStringList& serials) {
+    QSet<QString> seen;
+    for (const QString& serial : serials) {
+        if (seen.contains(serial)) {
+            if (calledFromDBus()) {
+                sendErrorReply(QDBusError::InvalidArgs,
+                               QStringLiteral("device %1 is listed twice").arg(serial));
+            }
+            return;
+        }
+        if (!findDevice(serial)) {
+            if (calledFromDBus()) {
+                sendErrorReply(QString::fromLatin1(DbusError::unknownDevice),
+                               QStringLiteral("unknown device %1").arg(serial));
+            }
+            return;
+        }
+        seen.insert(serial);
+    }
+
+    // Devices the caller left out keep their existing relative order behind the
+    // ones it named, so a stale widget can never drop a device off the list.
+    QStringList ordered = serials;
+    for (const DeviceRecord& device : m_deviceRegistry.devices()) {
+        if (!seen.contains(device.serial)) {
+            ordered.append(device.serial);
+        }
+    }
+
+    bool changed = false;
+    for (qsizetype index = 0; index < ordered.size(); ++index) {
+        const auto existing = findDevice(ordered.at(index));
+        if (!existing || existing->sortIndex == static_cast<int>(index)) {
+            continue;
+        }
+        DeviceRecord device = *existing;
+        device.sortIndex = static_cast<int>(index);
+        changed = mergeDevice(device, MergeMode::ApplySettings) || changed;
+    }
+    if (changed) {
+        persistAndAnnounceDevices();
+    }
+}
+
+QString DaemonService::TestDevice(const QString& address) {
+    const QString trimmed = address.trimmed();
+    if (!isRoutableIpv4(trimmed)) {
+        if (calledFromDBus()) {
+            sendErrorReply(QDBusError::InvalidArgs,
+                           QStringLiteral("address must be a routable IPv4 address"));
+        }
+        return {};
+    }
+
+    constexpr qsizetype maximumConcurrentTests = 4;
+    const bool alreadyProbing = m_deviceTestReplies.contains(trimmed);
+    if (!alreadyProbing && m_deviceTestReplies.size() >= maximumConcurrentTests) {
+        if (calledFromDBus()) {
+            sendErrorReply(QDBusError::LimitsExceeded,
+                           QStringLiteral("too many device tests are already running"));
+        }
+        return {};
+    }
+
+    if (calledFromDBus()) {
+        setDelayedReply(true);
+        m_deviceTestReplies[trimmed].append(message());
+    } else {
+        m_deviceTestReplies[trimmed];
+    }
+    if (alreadyProbing) {
+        // A probe for this address is already in flight; share its result.
+        return {};
+    }
+
+    updateIdleTimer();
+    QPointer<DaemonService> service(this);
+    m_rdsClient.queryDevice(trimmed, [service, trimmed](RdsQueryResult result) {
+        if (!service || service->m_shuttingDown) {
+            return;
+        }
+        const QList<QDBusMessage> replies = service->m_deviceTestReplies.take(trimmed);
+        for (const QDBusMessage& pendingReply : replies) {
+            if (result.has_value()) {
+                DeviceSnapshot snapshot = result.value();
+                snapshot.address = trimmed;
+                service->m_connection.send(
+                    pendingReply.createReply(DaemonService::snapshotJson(snapshot)));
+            } else {
+                const RdsError& error = result.error();
+                const QString errorName =
+                    error.code == RdsError::Code::TimedOut
+                        ? QString::fromLatin1(DbusError::timeout)
+                        : QString::fromLatin1(DbusError::transportFailure);
+                service->m_connection.send(
+                    pendingReply.createErrorReply(errorName, error.message));
+            }
+        }
+        service->updateIdleTimer();
+    });
+    return {};
+}
+
 QString DaemonService::DiscoverDevices() {
     if (calledFromDBus()) {
         setDelayedReply(true);
@@ -472,8 +856,7 @@ QString DaemonService::DiscoverDevices() {
             changed = service->mergeDevice(device) || changed;
         }
         if (changed) {
-            service->m_configStore->saveDevices(service->m_deviceRegistry.devices());
-            Q_EMIT service->DeviceListChanged(service->ListDevices());
+            service->persistAndAnnounceDevices();
         }
         const QList<QDBusMessage> replies = std::exchange(service->m_discoveryReplies, {});
         for (const QDBusMessage& pendingReply : replies) {
@@ -769,7 +1152,8 @@ void DaemonService::updateIdleTimer() {
 }
 
 bool DaemonService::hasAcceptedWork() const {
-    return m_discoveryActive || !m_activeCommandSerials.isEmpty() || !m_commandQueues.isEmpty();
+    return m_discoveryActive || !m_deviceTestReplies.isEmpty() ||
+           !m_activeCommandSerials.isEmpty() || !m_commandQueues.isEmpty();
 }
 
 void DaemonService::handleIdleTimeout() {

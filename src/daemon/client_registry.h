@@ -24,6 +24,7 @@ class ClientRegistry final {
     [[nodiscard]] bool containsOwner(const QString& owner) const;
     [[nodiscard]] std::optional<ClientRegistration> registration(const QString& owner,
                                                                  const QString& clientId) const;
+    [[nodiscard]] QList<ClientRegistration> registrations() const;
 
     bool registerClient(const QString& owner, const QString& clientId, const QStringList& serials,
                         quint32 intervalMs);
