@@ -65,14 +65,25 @@ plasmoidviewer -a io.github.josephur.rokudeck
 ```
 
 Expected: the applet opens, the daemon is activated over D-Bus, and the selected
-device renders with no QML warnings on the console. `plasmoidviewer` can also
-force a form factor, which is how the panel states below are reached:
+device renders without warnings.
 
-```bash
-plasmoidviewer -a io.github.josephur.rokudeck -l topedge -f horizontal
-plasmoidviewer -a io.github.josephur.rokudeck -l leftedge -f vertical
-plasmoidviewer -a io.github.josephur.rokudeck -f planar
-```
+Two things about `plasmoidviewer` are worth knowing before trusting what you see:
+
+- **It only ever shows the expanded representation.** It hosts the applet in a
+  desktop containment inside a window that is larger than the applet's
+  `switchWidth`/`switchHeight`, so the compact representation is never created —
+  passing `-f vertical` or `-l topedge` does not change that. Rows 1 to 3 below
+  therefore cannot be checked here; add the widget to a real panel instead.
+- **Its QML output goes to the journal, not the terminal.** Checking the console
+  will show nothing at all. Read it with:
+
+  ```bash
+  journalctl --user --since "5 minutes ago" | grep plasmoidviewer
+  ```
+
+For the panel states, add RokuDeck to a real panel or the desktop: right-click
+the panel, *Add Widgets…*, then search for RokuDeck. Move it between a
+horizontal panel, a vertical panel and the desktop to reach rows 1 to 3.
 
 ## What a human has to confirm
 
@@ -82,7 +93,7 @@ widget merely starting.
 
 | # | State | What to look for | Result |
 |---|-------|------------------|--------|
-| 1 | Horizontal panel | Icon, name and status fit the panel height without clipping | pass 2026-08-21 |
+| 1 | Horizontal panel | Icon, name and status fit the panel height without clipping | not yet checked |
 | 2 | Vertical panel | Labels drop out, the icon stays legible and square | not yet checked |
 | 3 | Desktop (planar) | Compact form is readable at the default widget size | not yet checked |
 | 4 | Expanded, wide | Device list and detail pane sit side by side | not yet checked |
