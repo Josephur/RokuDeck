@@ -22,6 +22,7 @@ ColumnLayout {
     required property var capabilities
     required property bool stale
     required property bool pendingCommand
+    property var visibleControls: ["power", "volume", "mute", "navigation", "playback"]
 
     readonly property bool deviceOnline: bridge
         && bridge.available
@@ -31,6 +32,12 @@ ColumnLayout {
     readonly property bool commandReady: deviceOnline && !pendingCommand
     readonly property bool poweredOn: power.toLowerCase() === "on"
     readonly property bool controlsEnabled: commandReady && poweredOn
+
+    // A control appears only when the user asked for it AND the Roku reports
+    // that it supports it, so nothing is ever offered that cannot work.
+    function offers(control) {
+        return (visibleControls ?? []).indexOf(control) >= 0 && hasCapability(control);
+    }
 
     function hasCapability(capability) {
         if (capabilities === undefined || capabilities === null) {
@@ -92,7 +99,7 @@ ColumnLayout {
             objectName: "powerControls"
             width: powerButton.implicitWidth
             height: powerButton.implicitHeight
-            visible: root.hasCapability("power")
+            visible: root.offers("power")
 
             PlasmaComponents.ToolButton {
                 id: powerButton
@@ -116,7 +123,7 @@ ColumnLayout {
             id: volumeControls
 
             objectName: "volumeControls"
-            visible: root.hasCapability("volume")
+            visible: root.offers("volume")
             spacing: 0
 
             PlasmaComponents.ToolButton {
@@ -147,7 +154,7 @@ ColumnLayout {
         PlasmaComponents.ToolButton {
             objectName: "muteButton"
             activeFocusOnTab: true
-            visible: root.hasCapability("mute")
+            visible: root.offers("mute")
             enabled: root.controlsEnabled
             display: QQC2.AbstractButton.IconOnly
             icon.name: root.muted ? "audio-volume-high" : "audio-volume-muted"
@@ -164,7 +171,7 @@ ColumnLayout {
     GridLayout {
         id: navigationControls
 
-        visible: root.hasCapability("navigation")
+        visible: root.offers("navigation")
         columns: 3
         rows: 3
         columnSpacing: 0
@@ -241,7 +248,7 @@ ColumnLayout {
         PlasmaComponents.ToolButton {
             objectName: "backButton"
             activeFocusOnTab: true
-            visible: root.hasCapability("navigation")
+            visible: root.offers("navigation")
             enabled: root.controlsEnabled
             display: QQC2.AbstractButton.IconOnly
             icon.name: "go-previous"
@@ -254,7 +261,7 @@ ColumnLayout {
         PlasmaComponents.ToolButton {
             objectName: "homeButton"
             activeFocusOnTab: true
-            visible: root.hasCapability("navigation")
+            visible: root.offers("navigation")
             enabled: root.controlsEnabled
             display: QQC2.AbstractButton.IconOnly
             icon.name: "go-home"
@@ -267,7 +274,7 @@ ColumnLayout {
         PlasmaComponents.ToolButton {
             objectName: "playPauseButton"
             activeFocusOnTab: true
-            visible: root.hasCapability("playback")
+            visible: root.offers("playback")
             enabled: root.controlsEnabled
             display: QQC2.AbstractButton.IconOnly
             icon.name: "media-playback-start"

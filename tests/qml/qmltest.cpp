@@ -27,6 +27,9 @@ class FixtureDevicesModel final : public QAbstractListModel {
         CapabilitiesRole,
         StaleRole,
         PendingCommandRole,
+        AllowAutomationsRole,
+        WakeOnWlanRole,
+        RefreshPolicyRole,
     };
 
     struct Device {
@@ -42,6 +45,9 @@ class FixtureDevicesModel final : public QAbstractListModel {
         QStringList capabilities;
         bool stale = false;
         bool pendingCommand = false;
+        bool allowAutomations = true;
+        bool wakeOnWlan = false;
+        QString refreshPolicy = QStringLiteral("balanced");
     };
 
     using QAbstractListModel::QAbstractListModel;
@@ -78,6 +84,12 @@ class FixtureDevicesModel final : public QAbstractListModel {
             return device.capabilities;
         case StaleRole:
             return device.stale;
+        case AllowAutomationsRole:
+            return device.allowAutomations;
+        case WakeOnWlanRole:
+            return device.wakeOnWlan;
+        case RefreshPolicyRole:
+            return device.refreshPolicy;
         case PendingCommandRole:
             return device.pendingCommand;
         default:
@@ -97,7 +109,10 @@ class FixtureDevicesModel final : public QAbstractListModel {
                 {MutedRole, "muted"},
                 {CapabilitiesRole, "capabilities"},
                 {StaleRole, "stale"},
-                {PendingCommandRole, "pendingCommand"}};
+                {PendingCommandRole, "pendingCommand"},
+                {AllowAutomationsRole, "allowAutomations"},
+                {WakeOnWlanRole, "wakeOnWlan"},
+                {RefreshPolicyRole, "refreshPolicy"}};
     }
 
     void replace(const QVariantList& entries) {
@@ -134,6 +149,13 @@ class FixtureDevicesModel final : public QAbstractListModel {
             device.stale = values.value(QStringLiteral("stale"), false).toBool();
             device.pendingCommand =
                 values.value(QStringLiteral("pendingCommand"), false).toBool();
+            device.allowAutomations =
+                values.value(QStringLiteral("allowAutomations"), true).toBool();
+            device.wakeOnWlan = values.value(QStringLiteral("wakeOnWlan"), false).toBool();
+            device.refreshPolicy = values
+                                       .value(QStringLiteral("refreshPolicy"),
+                                              QStringLiteral("balanced"))
+                                       .toString();
             m_devices.append(device);
         }
         endResetModel();
@@ -167,6 +189,15 @@ class FixtureDevicesModel final : public QAbstractListModel {
         } else if (roleName == QStringLiteral("muted")) {
             device.muted = value.toBool();
             role = MutedRole;
+        } else if (roleName == QStringLiteral("allowAutomations")) {
+            device.allowAutomations = value.toBool();
+            role = AllowAutomationsRole;
+        } else if (roleName == QStringLiteral("wakeOnWlan")) {
+            device.wakeOnWlan = value.toBool();
+            role = WakeOnWlanRole;
+        } else if (roleName == QStringLiteral("refreshPolicy")) {
+            device.refreshPolicy = value.toString();
+            role = RefreshPolicyRole;
         }
         if (role >= 0) {
             const QModelIndex changed = index(row, 0);
@@ -183,10 +214,17 @@ class BridgeFixture : public QObject {
     Q_PROPERTY(FixtureDevicesModel* devices READ devices CONSTANT)
     Q_PROPERTY(QString selectedSerial READ selectedSerial WRITE setSelectedSerial NOTIFY
                    selectedSerialChanged)
-    Q_PROPERTY(bool available READ available CONSTANT)
+    Q_PROPERTY(bool available READ available NOTIFY availableChanged)
+    Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString lastError READ lastError CONSTANT)
     Q_PROPERTY(int refreshCount READ refreshCount NOTIFY refreshCountChanged)
     Q_PROPERTY(QVariantList sentCommands READ sentCommands NOTIFY sentCommandsChanged)
+    Q_PROPERTY(QVariantList addedDevices READ addedDevices NOTIFY addedDevicesChanged)
+    Q_PROPERTY(QVariantList updatedDevices READ updatedDevices NOTIFY updatedDevicesChanged)
+    Q_PROPERTY(QStringList removedDevices READ removedDevices NOTIFY removedDevicesChanged)
+    Q_PROPERTY(QStringList testedAddresses READ testedAddresses NOTIFY testedAddressesChanged)
+    Q_PROPERTY(QStringList orderedSerials READ orderedSerials NOTIFY orderedSerialsChanged)
+    Q_PROPERTY(int discoveryCount READ discoveryCount CONSTANT)
 
   public:
     using QObject::QObject;
@@ -200,10 +238,17 @@ class BridgeFixture : public QObject {
         m_selectedSerial = serial;
         Q_EMIT selectedSerialChanged();
     }
-    [[nodiscard]] bool available() const { return true; }
+    [[nodiscard]] bool available() const { return m_available; }
+    [[nodiscard]] bool busy() const { return m_busy; }
     [[nodiscard]] QString lastError() const { return {}; }
     [[nodiscard]] int refreshCount() const { return m_refreshCount; }
     [[nodiscard]] QVariantList sentCommands() const { return m_sentCommands; }
+    [[nodiscard]] QVariantList addedDevices() const { return addedDevicesList; }
+    [[nodiscard]] QVariantList updatedDevices() const { return updatedDevicesList; }
+    [[nodiscard]] QStringList removedDevices() const { return removedDevicesList; }
+    [[nodiscard]] QStringList testedAddresses() const { return testedAddressesList; }
+    [[nodiscard]] QStringList orderedSerials() const { return orderedSerialsList; }
+    [[nodiscard]] int discoveryCount() const { return m_discoveryCount; }
 
     Q_INVOKABLE void refresh() {
         ++m_refreshCount;
@@ -218,6 +263,65 @@ class BridgeFixture : public QObject {
         Q_EMIT sentCommandsChanged();
     }
 
+    Q_INVOKABLE void addDevice(const QVariantMap& device) {
+        addedDevicesList.append(device);
+        Q_EMIT addedDevicesChanged();
+    }
+
+    Q_INVOKABLE void updateDevice(const QString& serial, const QVariantMap& changes) {
+        updatedDevicesList.append(QVariantMap{{QStringLiteral("serial"), serial},
+                                              {QStringLiteral("changes"), changes}});
+        Q_EMIT updatedDevicesChanged();
+    }
+
+    Q_INVOKABLE void removeDevice(const QString& serial) {
+        removedDevicesList.append(serial);
+        Q_EMIT removedDevicesChanged();
+    }
+
+    Q_INVOKABLE void setDeviceOrder(const QStringList& serials) {
+        orderedSerialsList = serials;
+        Q_EMIT orderedSerialsChanged();
+    }
+
+    Q_INVOKABLE void testDevice(const QString& address) {
+        testedAddressesList.append(address);
+        Q_EMIT testedAddressesChanged();
+    }
+
+    Q_INVOKABLE void discoverDevices() {
+        ++m_discoveryCount;
+    }
+
+    Q_INVOKABLE void finishDeviceTest(const QString& address, const QVariantMap& snapshot,
+                                      const QString& error) {
+        Q_EMIT deviceTestFinished(address, snapshot, error);
+    }
+
+    Q_INVOKABLE void failDeviceOperation(const QString& operation, const QString& message) {
+        Q_EMIT deviceOperationFailed(operation, message);
+    }
+
+    Q_INVOKABLE void succeedDeviceOperation(const QString& operation) {
+        Q_EMIT deviceOperationSucceeded(operation);
+    }
+
+    Q_INVOKABLE void setFixtureAvailable(bool available) {
+        if (m_available == available) {
+            return;
+        }
+        m_available = available;
+        Q_EMIT availableChanged();
+    }
+
+    Q_INVOKABLE void setFixtureBusy(bool busy) {
+        if (m_busy == busy) {
+            return;
+        }
+        m_busy = busy;
+        Q_EMIT busyChanged();
+    }
+
     Q_INVOKABLE void setFixtureDevices(const QVariantList& entries) {
         m_devices.replace(entries);
         setSelectedSerial(entries.isEmpty()
@@ -229,11 +333,31 @@ class BridgeFixture : public QObject {
     void selectedSerialChanged();
     void refreshCountChanged();
     void sentCommandsChanged();
+    void availableChanged();
+    void busyChanged();
+    void addedDevicesChanged();
+    void updatedDevicesChanged();
+    void removedDevicesChanged();
+    void testedAddressesChanged();
+    void orderedSerialsChanged();
+    void deviceOperationFailed(const QString& operation, const QString& message);
+    void deviceOperationSucceeded(const QString& operation);
+    void deviceTestFinished(const QString& address, const QVariantMap& snapshot,
+                            const QString& error);
+    void discoveryFinished(const QString& error);
 
   private:
+    QVariantList addedDevicesList;
+    QVariantList updatedDevicesList;
+    QStringList removedDevicesList;
+    QStringList testedAddressesList;
+    QStringList orderedSerialsList;
     FixtureDevicesModel m_devices;
     QString m_selectedSerial;
     int m_refreshCount = 0;
+    int m_discoveryCount = 0;
+    bool m_available = true;
+    bool m_busy = false;
     QVariantList m_sentCommands;
 };
 

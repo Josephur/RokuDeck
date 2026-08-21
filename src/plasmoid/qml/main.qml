@@ -17,6 +17,10 @@ PlasmoidItem {
     // that model exists.
     property bool automationActive: false
     readonly property var bridge: Plasmoid
+    readonly property var selectedSerials: Plasmoid.configuration.selectedSerials
+    readonly property var visibleInformation: Plasmoid.configuration.visibleInformation
+    readonly property var visibleControls: Plasmoid.configuration.visibleControls
+    readonly property string compactMode: Plasmoid.configuration.compactMode
 
     switchWidth: Kirigami.Units.gridUnit * 32
     switchHeight: Kirigami.Units.gridUnit * 22
@@ -35,6 +39,8 @@ PlasmoidItem {
         appletInterface: root
         automationActive: root.automationActive
         bridge: root.bridge
+        compactMode: root.compactMode
+        selectedSerials: root.selectedSerials
         formFactor: Plasmoid.formFactor
         location: Plasmoid.location
     }
@@ -42,6 +48,9 @@ PlasmoidItem {
     fullRepresentation: FullRepresentation {
         bridge: root.bridge
         narrow: width < Kirigami.Units.gridUnit * 32
+        selectedSerials: root.selectedSerials
+        visibleInformation: root.visibleInformation
+        visibleControls: root.visibleControls
     }
 
     PlasmaCore.Action {
@@ -68,4 +77,28 @@ PlasmoidItem {
     }
 
     Plasmoid.contextualActions: [refreshAction, settingsAction]
+
+    // The configured device is restored once the daemon has told us the device
+    // exists; the bridge rejects a serial it does not know, so applying this on
+    // every list change is what makes the choice survive a restart.
+    function applyDefaultSerial() {
+        const preferred = Plasmoid.configuration.defaultSerial;
+        if (preferred.length > 0) {
+            root.bridge.selectedSerial = preferred;
+        }
+    }
+
+    Connections {
+        target: root.bridge.devices
+
+        function onModelReset() {
+            root.applyDefaultSerial();
+        }
+
+        function onRowsInserted() {
+            root.applyDefaultSerial();
+        }
+    }
+
+    Component.onCompleted: root.applyDefaultSerial()
 }

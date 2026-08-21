@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+      http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <kcfgfile name=""/>
+
+  <!-- Per-widget presentation only. A device's address, safety limits and
+       discovery data are owned by the daemon so that every widget and every
+       automation sees one consistent device. -->
+  <group name="General">
+    <entry name="selectedSerials" type="StringList">
+      <default></default>
+    </entry>
+    <entry name="defaultSerial" type="String">
+      <default></default>
+    </entry>
+    <entry name="visibleInformation" type="StringList">
+      <default>status,activeApp,volume,screensaver</default>
+    </entry>
+    <entry name="visibleControls" type="StringList">
+      <default>power,volume,mute,navigation,playback</default>
+    </entry>
+    <entry name="compactMode" type="String">
+      <default>adaptive</default>
+    </entry>
+  </group>
+</kcfg>

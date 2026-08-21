@@ -45,7 +45,7 @@ TestCase {
         tryVerify(() => window.active);
         const bridge = createTemporaryObject(bridgeComponent, testCase);
         verify(bridge);
-        bridge.setFixtureDevices([device]);
+        bridge.setFixtureDevices(Array.isArray(device) ? device : [device]);
         const viewProperties = Object.assign({
             bridge: bridge,
             formFactor: PlasmaCore.Types.Horizontal,
@@ -137,5 +137,40 @@ TestCase {
         const nameLabel = findChild(compact, "deviceNameLabel");
         verify(nameLabel.text.length > 0);
         verify(!nameLabel.text.includes("SERIAL-A"));
+    }
+
+    function test_compactModeOverridesTheAdaptiveLayout() {
+        const compact = createCompact({ serial: "SERIAL-A", name: "Living Room" });
+        compact.location = PlasmaCore.Types.BottomEdge;
+        compact.formFactor = PlasmaCore.Types.Horizontal;
+        compare(compact.layoutMode, "horizontalPanel");
+        verify(findChild(compact, "deviceNameLabel").visible);
+
+        compact.compactMode = "iconOnly";
+        compare(compact.layoutMode, "verticalPanel");
+        verify(!findChild(compact, "deviceNameLabel").visible);
+
+        compact.compactMode = "iconAndName";
+        compact.formFactor = PlasmaCore.Types.Vertical;
+        verify(compact.layoutMode !== "verticalPanel",
+               "asking for the name must keep it even in a vertical panel");
+        verify(findChild(compact, "deviceNameLabel").visible);
+
+        compact.compactMode = "adaptive";
+        compare(compact.layoutMode, "verticalPanel");
+    }
+
+    function test_onlyTheChosenDeviceDrivesTheCompactWidget() {
+        const compact = createCompact([
+            { serial: "SERIAL-A", name: "Living Room" },
+            { serial: "SERIAL-B", name: "Bedroom" }
+        ]);
+        tryVerify(() => compact.selectedDevice !== null);
+        compare(compact.selectedName, "Living Room");
+
+        compact.selectedSerials = ["SERIAL-B"];
+        tryVerify(() => compact.selectedName === "Bedroom");
+        verify(compact.bridge.selectedSerial === "SERIAL-B",
+               "hiding the selected device must fall through to one still shown");
     }
 }

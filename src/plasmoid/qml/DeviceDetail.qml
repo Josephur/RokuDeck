@@ -20,11 +20,18 @@ Item {
     required property string power
     required property string screensaver
     required property string activeLabel
+    property string address: ""
     required property var volume
     required property bool muted
     required property var capabilities
     required property bool stale
     required property bool pendingCommand
+    property var visibleInformation: ["status", "activeApp", "volume", "screensaver"]
+    property var visibleControls: ["power", "volume", "mute", "navigation", "playback"]
+
+    function shows(key) {
+        return (visibleInformation ?? []).indexOf(key) >= 0;
+    }
 
     readonly property string friendlyName: displayName.length > 0
         ? displayName
@@ -63,6 +70,7 @@ Item {
             StatusBadge {
                 objectName: "detailStatusBadge"
 
+                visible: root.shows("status")
                 health: root.health
                 power: root.power
                 stale: root.stale
@@ -77,21 +85,29 @@ Item {
             rowSpacing: Kirigami.Units.smallSpacing
 
             PlasmaComponents.Label {
+                visible: root.shows("activeApp")
                 text: KI18n.i18n("Now showing")
                 opacity: 0.75
             }
             PlasmaComponents.Label {
+                objectName: "activeAppValue"
+
                 Layout.fillWidth: true
+                visible: root.shows("activeApp")
                 elide: Text.ElideRight
                 text: root.activeLabel.length > 0 ? root.activeLabel : KI18n.i18n("Nothing active")
             }
 
             PlasmaComponents.Label {
+                visible: root.shows("volume")
                 text: KI18n.i18n("Volume")
                 opacity: 0.75
             }
             PlasmaComponents.Label {
+                objectName: "volumeValue"
+
                 Layout.fillWidth: true
+                visible: root.shows("volume")
                 text: root.volume === undefined || root.volume === null
                     ? KI18n.i18n("Unavailable")
                     : (root.muted ? KI18n.i18n("Muted at %1", root.volume)
@@ -99,6 +115,7 @@ Item {
             }
 
             PlasmaComponents.Label {
+                visible: root.shows("screensaver")
                 text: KI18n.i18n("Screen saver")
                 opacity: 0.75
             }
@@ -106,13 +123,29 @@ Item {
                 objectName: "screensaverValue"
 
                 Layout.fillWidth: true
+                visible: root.shows("screensaver")
                 text: root.screensaverText
+            }
+
+            PlasmaComponents.Label {
+                visible: root.shows("address")
+                text: KI18n.i18n("Address")
+                opacity: 0.75
+            }
+            PlasmaComponents.Label {
+                objectName: "addressValue"
+
+                Layout.fillWidth: true
+                visible: root.shows("address")
+                elide: Text.ElideRight
+                text: root.address
             }
         }
 
         RemoteControls {
             Layout.fillWidth: true
             bridge: root.bridge
+            visibleControls: root.visibleControls
             serial: root.serial
             deviceName: root.friendlyName
             health: root.health

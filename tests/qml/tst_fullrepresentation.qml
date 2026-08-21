@@ -229,4 +229,61 @@ TestCase {
         tryCompare(deviceList, "currentIndex", 1);
         compare(fixture.bridge.selectedSerial, "SERIAL-B");
     }
+
+    function test_onlyTheChosenDevicesAppearInTheWidget() {
+        const fixture = createFull([
+            { serial: "SERIAL-A", name: "Living Room", capabilities: ["power"] },
+            { serial: "SERIAL-B", name: "Bedroom", capabilities: ["power"] },
+            { serial: "SERIAL-C", name: "Office", capabilities: ["power"] }
+        ]);
+        const deviceList = findChild(fixture.full, "deviceList");
+        compare(deviceList.count, 3, "an empty choice must show every configured device");
+
+        fixture.full.selectedSerials = ["SERIAL-B", "SERIAL-C"];
+        tryCompare(deviceList, "count", 2);
+
+        fixture.full.selectedSerials = ["SERIAL-C"];
+        tryCompare(deviceList, "count", 1);
+
+        fixture.full.selectedSerials = [];
+        tryCompare(deviceList, "count", 3);
+    }
+
+    function test_aHiddenControlStaysHiddenEvenWhenTheDeviceSupportsIt() {
+        const fixture = createFull([{
+            serial: "SERIAL-A",
+            name: "Living Room",
+            capabilities: ["power", "volume", "mute", "navigation", "playback"]
+        }]);
+        verify(findChild(fixture.full, "volumeControls").visible);
+        verify(findChild(fixture.full, "muteButton").visible);
+
+        fixture.full.visibleControls = ["power"];
+        tryVerify(() => !findChild(fixture.full, "volumeControls").visible);
+        verify(!findChild(fixture.full, "muteButton").visible);
+        verify(findChild(fixture.full, "powerControls").visible);
+
+        fixture.full.visibleControls = ["power", "volume", "mute", "navigation", "playback"];
+        tryVerify(() => findChild(fixture.full, "volumeControls").visible);
+    }
+
+    function test_hiddenInformationRowsDisappearFromTheDetailPane() {
+        const fixture = createFull([{
+            serial: "SERIAL-A",
+            name: "Living Room",
+            capabilities: ["power"]
+        }]);
+        verify(findChild(fixture.full, "screensaverValue").visible);
+        verify(findChild(fixture.full, "volumeValue").visible);
+        verify(findChild(fixture.full, "detailStatusBadge").visible);
+        verify(!findChild(fixture.full, "addressValue").visible,
+               "the address is off by default");
+
+        fixture.full.visibleInformation = ["address"];
+        tryVerify(() => findChild(fixture.full, "addressValue").visible);
+        verify(!findChild(fixture.full, "screensaverValue").visible);
+        verify(!findChild(fixture.full, "volumeValue").visible);
+        verify(!findChild(fixture.full, "activeAppValue").visible);
+        verify(!findChild(fixture.full, "detailStatusBadge").visible);
+    }
 }

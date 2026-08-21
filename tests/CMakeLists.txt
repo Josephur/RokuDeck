@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-find_package(KF6 6.0 REQUIRED COMPONENTS I18n)
+find_package(KF6 6.0 REQUIRED COMPONENTS I18n ItemModels)
 find_package(Plasma 6.0 REQUIRED)
 find_package(Qt6 6.7 REQUIRED COMPONENTS QuickTest)
 

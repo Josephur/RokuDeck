@@ -7,6 +7,7 @@ import QtQuick.Layouts
 
 import org.kde.ki18n
 import org.kde.kirigami as Kirigami
+import org.kde.kitemmodels as KItemModels
 import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.core as PlasmaCore
 
@@ -18,6 +19,69 @@ PlasmaComponents.ToolButton {
     required property int location
     property var appletInterface: null
     property bool automationActive: false
+    property string compactMode: "adaptive"
+    property var selectedSerials: []
+
+    KItemModels.KSortFilterProxyModel {
+        id: deviceFilter
+
+        filterRoleName: "serial"
+        filterRowCallback: (sourceRow, sourceParent) => {
+            if ((root.selectedSerials ?? []).length === 0) {
+                return true;
+            }
+            const serial = sourceModel.data(sourceModel.index(sourceRow, 0, sourceParent),
+                                            filterRole);
+            return root.selectedSerials.indexOf(serial) >= 0;
+        }
+
+        Component.onCompleted: sourceModel = root.bridge ? root.bridge.devices : null
+    }
+
+    onSelectedSerialsChanged: {
+        deviceFilter.invalidateFilter();
+        root.ensureVisibleSelection();
+    }
+
+    Connections {
+        target: deviceFilter
+
+        function onRowsInserted() {
+            root.ensureVisibleSelection();
+        }
+
+        function onRowsRemoved() {
+            root.ensureVisibleSelection();
+        }
+
+        function onModelReset() {
+            root.ensureVisibleSelection();
+        }
+    }
+
+    // Hiding the device that happened to be selected would otherwise leave the
+    // widget showing nothing, so the selection moves to the first device this
+    // widget still shows. The bridge is per-widget, so this cannot disturb
+    // another widget's choice.
+    function ensureVisibleSelection() {
+        if (!root.bridge) {
+            return;
+        }
+        const rows = deviceFilter.rowCount();
+        if (rows === 0) {
+            return;
+        }
+        const current = root.bridge.selectedSerial;
+        for (let row = 0; row < rows; ++row) {
+            const serial = deviceFilter.data(deviceFilter.index(row, 0), deviceFilter.filterRole);
+            if (serial === current) {
+                return;
+            }
+        }
+        root.bridge.selectedSerial =
+            deviceFilter.data(deviceFilter.index(0, 0), deviceFilter.filterRole);
+    }
+
 
     property var selectedDevice: null
 
@@ -27,9 +91,20 @@ PlasmaComponents.ToolButton {
         PlasmaCore.Types.BottomEdge,
         PlasmaCore.Types.LeftEdge
     ].includes(location)
-    readonly property string layoutMode: inPanel
+    readonly property string adaptiveLayoutMode: inPanel
         ? (formFactor === PlasmaCore.Types.Vertical ? "verticalPanel" : "horizontalPanel")
         : "desktop"
+    // "iconOnly" reuses the vertical-panel layout because that is the one that
+    // already drops every label; "iconAndName" keeps them in every form factor.
+    readonly property string layoutMode: {
+        if (compactMode === "iconOnly") {
+            return "verticalPanel";
+        }
+        if (compactMode === "iconAndName" && adaptiveLayoutMode === "verticalPanel") {
+            return "desktop";
+        }
+        return adaptiveLayoutMode;
+    }
     readonly property string selectedName: selectedDevice && selectedDevice.name.length > 0
         ? selectedDevice.name
         : KI18n.i18n("Unnamed Roku device")
@@ -71,7 +146,7 @@ PlasmaComponents.ToolButton {
     }
 
     Instantiator {
-        model: root.bridge ? root.bridge.devices : null
+        model: deviceFilter
 
         delegate: QtObject {
             required property string serial

@@ -7,6 +7,7 @@ import QtQuick.Layouts
 
 import org.kde.ki18n
 import org.kde.kirigami as Kirigami
+import org.kde.kitemmodels as KItemModels
 import org.kde.plasma.extras as PlasmaExtras
 
 Item {
@@ -15,12 +16,81 @@ Item {
     required property var bridge
     property bool narrow: width < Kirigami.Units.gridUnit * 32
     property var selectedDevice: null
+    property var visibleInformation: ["status", "activeApp", "volume", "screensaver"]
+    property var visibleControls: ["power", "volume", "mute", "navigation", "playback"]
+    // An empty list means the user has not narrowed the widget down yet, so it
+    // shows every configured device rather than none.
+    property var selectedSerials: []
+
+    readonly property var deviceModel: deviceFilter
+
+    KItemModels.KSortFilterProxyModel {
+        id: deviceFilter
+
+        filterRoleName: "serial"
+        filterRowCallback: (sourceRow, sourceParent) => {
+            if ((root.selectedSerials ?? []).length === 0) {
+                return true;
+            }
+            const serial = sourceModel.data(sourceModel.index(sourceRow, 0, sourceParent),
+                                            filterRole);
+            return root.selectedSerials.indexOf(serial) >= 0;
+        }
+
+        onFilterRowCallbackChanged: invalidateFilter()
+        Component.onCompleted: sourceModel = root.bridge ? root.bridge.devices : null
+    }
+
+    onSelectedSerialsChanged: {
+        deviceFilter.invalidateFilter();
+        root.ensureVisibleSelection();
+    }
+
+    Connections {
+        target: deviceFilter
+
+        function onRowsInserted() {
+            root.ensureVisibleSelection();
+        }
+
+        function onRowsRemoved() {
+            root.ensureVisibleSelection();
+        }
+
+        function onModelReset() {
+            root.ensureVisibleSelection();
+        }
+    }
+
+    // Hiding the device that happened to be selected would otherwise leave the
+    // widget showing nothing, so the selection moves to the first device this
+    // widget still shows. The bridge is per-widget, so this cannot disturb
+    // another widget's choice.
+    function ensureVisibleSelection() {
+        if (!root.bridge) {
+            return;
+        }
+        const rows = deviceFilter.rowCount();
+        if (rows === 0) {
+            return;
+        }
+        const current = root.bridge.selectedSerial;
+        for (let row = 0; row < rows; ++row) {
+            const serial = deviceFilter.data(deviceFilter.index(row, 0), deviceFilter.filterRole);
+            if (serial === current) {
+                return;
+            }
+        }
+        root.bridge.selectedSerial =
+            deviceFilter.data(deviceFilter.index(0, 0), deviceFilter.filterRole);
+    }
+
 
     implicitWidth: Kirigami.Units.gridUnit * 36
     implicitHeight: Kirigami.Units.gridUnit * 26
 
     Instantiator {
-        model: root.bridge ? root.bridge.devices : null
+        model: root.deviceModel
 
         delegate: QtObject {
             required property int index
@@ -104,7 +174,7 @@ Item {
                 activeFocusOnTab: true
                 clip: true
                 keyNavigationEnabled: true
-                model: root.bridge ? root.bridge.devices : null
+                model: root.deviceModel
                 currentIndex: -1
                 Accessible.name: KI18n.i18n("Roku devices")
                 Accessible.description: KI18n.i18n("Use the arrow keys to choose a Roku device")
@@ -172,12 +242,15 @@ Item {
                 anchors.fill: parent
                 visible: root.selectedDevice !== null
                 bridge: root.bridge
+                visibleInformation: root.visibleInformation
+                visibleControls: root.visibleControls
                 serial: root.selectedDevice?.serial ?? ""
                 displayName: root.selectedDevice?.name ?? ""
                 health: root.selectedDevice?.health ?? "offline"
                 power: root.selectedDevice?.power ?? "unknown"
                 screensaver: root.selectedDevice?.screensaver ?? "unknown"
                 activeLabel: root.selectedDevice?.activeLabel ?? ""
+                address: root.selectedDevice?.address ?? ""
                 volume: root.selectedDevice?.volume
                 muted: root.selectedDevice?.muted ?? false
                 capabilities: root.selectedDevice?.capabilities ?? []
