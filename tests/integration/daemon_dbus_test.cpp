@@ -68,6 +68,7 @@ class DaemonDbusTest final : public QObject {
     void discoveryPreservesConfiguredDeviceSettings();
     void testDeviceProbesAnAddressWithoutRegisteringIt();
     void refreshPolicyBoundsHowOftenTheDaemonPollsADevice();
+    void aUserChosenNameSurvivesDiscoveryAndPolling();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -1303,6 +1304,93 @@ void DaemonDbusTest::refreshPolicyBoundsHowOftenTheDaemonPollsADevice() {
     QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
     QVERIFY2(m_daemon->effectiveInterval(QStringLiteral("SERIAL-A")) < 30000u,
              "relaxing the policy must take effect without re-registering the widget");
+}
+
+void DaemonDbusTest::aUserChosenNameSurvivesDiscoveryAndPolling() {
+    QDBusMessage reply =
+        call(QStringLiteral("AddDevice"),
+             {deviceJson(QStringLiteral("SERIAL-A"), QStringLiteral("Advertised Name"),
+                         QStringLiteral("198.51.100.10"))});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+
+    // Before the user renames anything, the device still owns its own name.
+    QDBusPendingReply<QString> discovery = m_proxy->DiscoverDevices();
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 500);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json([{"serialNumber":"SERIAL-A","deviceName":"Renamed By Roku","ip":"198.51.100.10"}])json"),
+         {},
+         false});
+    QVERIFY2(waitForReply(discovery).type() != QDBusMessage::ErrorMessage, "discovery failed");
+    QCOMPARE(
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
+            .value(QStringLiteral("displayName"))
+            .toString(),
+        QStringLiteral("Renamed By Roku"));
+
+    reply = call(QStringLiteral("UpdateDevice"),
+                 {QStringLiteral("SERIAL-A"),
+                  QStringLiteral(R"json({"displayName":"Kitchen"})json")});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+
+    discovery = m_proxy->DiscoverDevices();
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 2, 500);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json([{"serialNumber":"SERIAL-A","deviceName":"Renamed By Roku","ip":"198.51.100.11"}])json"),
+         {},
+         false});
+    QVERIFY2(waitForReply(discovery).type() != QDBusMessage::ErrorMessage, "rediscovery failed");
+
+    QJsonObject record =
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"));
+    QVERIFY2(record.value(QStringLiteral("displayName")).toString() == QStringLiteral("Kitchen"),
+             "discovery must not undo the name the user typed");
+    QVERIFY2(record.value(QStringLiteral("address")).toString() ==
+                 QStringLiteral("198.51.100.11"),
+             "the address must still follow the device");
+
+    // A poll reports the advertised name too, and must not undo the rename
+    // either: polling is the path that runs continuously.
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("naming-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    QTRY_VERIFY_WITH_TIMEOUT(m_runner->requests.size() >= 3, 500);
+    m_runner->complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
+    QTRY_VERIFY_WITH_TIMEOUT(m_runner->requests.size() >= 4, 500);
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"deviceName":"Renamed By Roku","serialNumber":"SERIAL-A","powerMode":"PowerOn"})json"),
+         {},
+         false});
+    QTRY_VERIFY_WITH_TIMEOUT(m_runner->callbacks.size() >= 3, 500);
+    while (!m_runner->callbacks.isEmpty()) {
+        m_runner->complete({0, QByteArrayLiteral(R"json({"success":false})json"), {}, false});
+    }
+
+    QCOMPARE(
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
+            .value(QStringLiteral("displayName"))
+            .toString(),
+        QStringLiteral("Kitchen"));
+
+    // Clearing the name hands ownership back to the device, which is the only
+    // way a user could recover a name they cannot otherwise know.
+    reply = call(QStringLiteral("UpdateDevice"),
+                 {QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"displayName":""})json")});
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Renamed By Roku"),
+                            QStringLiteral("198.51.100.11")});
+    QCOMPARE(
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
+            .value(QStringLiteral("displayName"))
+            .toString(),
+        QStringLiteral("Renamed By Roku"));
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

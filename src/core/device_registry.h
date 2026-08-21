@@ -13,6 +13,10 @@ struct DeviceRecord {
     QString address;
     // Daemon-owned user preferences. They belong here rather than in per-widget
     // configuration because every widget and automation shares one device.
+    // Set once the user types a name of their own. Discovery and polling both
+    // report the name the Roku advertises, and would otherwise undo a rename
+    // on the next poll.
+    bool nameIsUserChosen = false;
     bool allowAutomations = true;
     bool wakeOnWlan = false;
     QString refreshPolicy = QStringLiteral("balanced");
