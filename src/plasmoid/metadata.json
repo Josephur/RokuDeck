@@ -10,7 +10,6 @@
         "Description": "Control registered Roku devices through the RokuDeck daemon",
         "EnabledByDefault": true,
         "Icon": "video-television",
-        "Id": "io.github.josephur.rokudeck",
         "License": "GPL-3.0-or-later",
         "Name": "RokuDeck",
         "Version": "0.1.0"

@@ -103,6 +103,7 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     QStringList testedAddresses;
     QStringList orderedSerials;
     bool delayNextRegistration = false;
+    bool delayNextDeviceCall = false;
     bool rejectNextCall = false;
 
     bool registerOnBus() {
@@ -202,6 +203,20 @@ class FakeDaemon final : public QObject, protected QDBusContext {
 
     void RemoveDevice(const QString& serial) {
         removedDevices.append(serial);
+        if (delayNextDeviceCall) {
+            delayNextDeviceCall = false;
+            m_hasDelayedDeviceCall = true;
+            m_delayedDeviceCall = message();
+            setDelayedReply(true);
+        }
+    }
+
+    bool completeDelayedDeviceCall() {
+        if (!m_hasDelayedDeviceCall) {
+            return false;
+        }
+        m_hasDelayedDeviceCall = false;
+        return m_connection.send(m_delayedDeviceCall.createReply());
     }
 
     void SetDeviceOrder(const QStringList& serials) {
@@ -227,7 +242,9 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     const QString m_connectionName;
     QDBusConnection m_connection;
     QDBusMessage m_delayedRegistration;
+    QDBusMessage m_delayedDeviceCall;
     bool m_hasDelayedRegistration = false;
+    bool m_hasDelayedDeviceCall = false;
 };
 
 class PlasmoidBridgeTest : public QObject {
@@ -249,6 +266,7 @@ class PlasmoidBridgeTest : public QObject {
     void deviceListExposesDaemonOwnedPreferences();
     void deviceManagementReachesTheDaemonAndReportsRejection();
     void testDeviceReportsTheProbedSnapshot();
+    void anInFlightOperationIsReportedThroughPlasmasBusyProperty();
 
   private:
     [[nodiscard]] QModelIndex firstIndex(const DevicesModel& model) const;
@@ -587,6 +605,33 @@ void PlasmoidBridgeTest::testDeviceReportsTheProbedSnapshot() {
     QVERIFY2(!finished.at(1).at(2).toString().isEmpty(),
              "a failed probe must say why it failed");
     QVERIFY(finished.at(1).at(1).toMap().isEmpty());
+}
+
+void PlasmoidBridgeTest::anInFlightOperationIsReportedThroughPlasmasBusyProperty() {
+    auto applet = createApplet<RokuDeckApplet>();
+    QTRY_COMPARE_WITH_TIMEOUT(applet->devices()->rowCount(), 2, 2000);
+    QTRY_VERIFY_WITH_TIMEOUT(!applet->isBusy(), 2000);
+
+    // Plasma::Applet::busy is FINAL: a shadowing Q_PROPERTY on the applet is
+    // dropped by moc, so every QML binding on "busy" would read the base
+    // class's value and never see an operation in flight.
+    const QMetaObject* metaObject = applet->metaObject();
+    const int busyIndex = metaObject->indexOfProperty("busy");
+    QVERIFY(busyIndex >= 0);
+    QCOMPARE(QString::fromLatin1(metaObject->property(busyIndex).typeName()),
+             QStringLiteral("bool"));
+
+    QSignalSpy busyChanged(applet.get(), &Plasma::Applet::busyChanged);
+    m_fake->delayNextDeviceCall = true;
+    applet->removeDevice(QStringLiteral("SERIAL-B"));
+    QTRY_VERIFY_WITH_TIMEOUT(applet->isBusy(), 2000);
+    QVERIFY(!busyChanged.isEmpty());
+    QVERIFY(applet->property("busy").toBool());
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->removedDevices.size(), 1, 2000);
+    QVERIFY(m_fake->completeDelayedDeviceCall());
+    QTRY_VERIFY_WITH_TIMEOUT(!applet->isBusy(), 2000);
+    QVERIFY(!applet->property("busy").toBool());
 }
 
 QTEST_MAIN(PlasmoidBridgeTest)

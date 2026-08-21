@@ -24,7 +24,11 @@ RokuDeckApplet::RokuDeckApplet(QObject* parent, const KPluginMetaData& data,
     connect(&m_daemon, &DaemonProxy::availableChanged, this,
             [this](bool) { Q_EMIT availableChanged(); });
     connect(&m_daemon, &DaemonProxy::errorOccurred, this, &RokuDeckApplet::setLastError);
-    connect(&m_daemon, &DaemonProxy::busyChanged, this, &RokuDeckApplet::busyChanged);
+    // Plasma::Applet::busy is FINAL and means exactly this, so feed it rather
+    // than shadowing it: a redeclared property here is silently ignored, which
+    // would leave every QML binding on "busy" reading the base class's value.
+    connect(&m_daemon, &DaemonProxy::busyChanged, this,
+            [this] { setBusy(m_daemon.isBusy()); });
     connect(&m_daemon, &DaemonProxy::deviceOperationFailed, this,
             [this](const QString& operation, const QString& message) {
                 setLastError(message);
@@ -82,10 +86,6 @@ void RokuDeckApplet::sendCommand(const QString& serial, const QString& action,
                                  const QVariant& value) {
     setLastError({});
     m_daemon.sendCommand(serial, action, value);
-}
-
-bool RokuDeckApplet::isBusy() const {
-    return m_daemon.isBusy();
 }
 
 void RokuDeckApplet::addDevice(const QVariantMap& device) {

@@ -24,7 +24,6 @@ class RokuDeckApplet final : public Plasma::Applet {
                    selectedSerialChanged)
     Q_PROPERTY(bool available READ isAvailable NOTIFY availableChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
-    Q_PROPERTY(bool busy READ isBusy NOTIFY busyChanged)
 
   public:
     explicit RokuDeckApplet(QObject* parent, const KPluginMetaData& data, const QVariantList& args);
@@ -35,7 +34,6 @@ class RokuDeckApplet final : public Plasma::Applet {
     void setSelectedSerial(const QString& serial);
     [[nodiscard]] bool isAvailable() const;
     [[nodiscard]] QString lastError() const;
-    [[nodiscard]] bool isBusy() const;
 
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void sendCommand(const QString& serial, const QString& action,
@@ -51,7 +49,6 @@ class RokuDeckApplet final : public Plasma::Applet {
     void selectedSerialChanged();
     void availableChanged();
     void lastErrorChanged();
-    void busyChanged();
     void deviceOperationFailed(const QString& operation, const QString& message);
     void deviceOperationSucceeded(const QString& operation);
     void deviceTestFinished(const QString& address, const QVariantMap& snapshot,
