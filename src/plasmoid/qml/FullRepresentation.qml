@@ -1,0 +1,262 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import QtQuick.Layouts
+
+import org.kde.ki18n
+import org.kde.kirigami as Kirigami
+import org.kde.kitemmodels as KItemModels
+import org.kde.plasma.extras as PlasmaExtras
+
+Item {
+    id: root
+
+    required property var bridge
+    property bool narrow: width < Kirigami.Units.gridUnit * 32
+    property var selectedDevice: null
+    property var visibleInformation: ["status", "activeApp", "volume", "screensaver"]
+    property var visibleControls: ["power", "volume", "mute", "navigation", "playback"]
+    // An empty list means the user has not narrowed the widget down yet, so it
+    // shows every configured device rather than none.
+    property var selectedSerials: []
+
+    readonly property var deviceModel: deviceFilter
+
+    KItemModels.KSortFilterProxyModel {
+        id: deviceFilter
+
+        filterRoleName: "serial"
+        filterRowCallback: (sourceRow, sourceParent) => {
+            if ((root.selectedSerials ?? []).length === 0) {
+                return true;
+            }
+            const serial = sourceModel.data(sourceModel.index(sourceRow, 0, sourceParent),
+                                            filterRole);
+            return root.selectedSerials.indexOf(serial) >= 0;
+        }
+
+        onFilterRowCallbackChanged: invalidateFilter()
+        Component.onCompleted: sourceModel = root.bridge ? root.bridge.devices : null
+    }
+
+    onSelectedSerialsChanged: {
+        deviceFilter.invalidateFilter();
+        root.ensureVisibleSelection();
+    }
+
+    Connections {
+        target: deviceFilter
+
+        function onRowsInserted() {
+            root.ensureVisibleSelection();
+        }
+
+        function onRowsRemoved() {
+            root.ensureVisibleSelection();
+        }
+
+        function onModelReset() {
+            root.ensureVisibleSelection();
+        }
+    }
+
+    // Hiding the device that happened to be selected would otherwise leave the
+    // widget showing nothing, so the selection moves to the first device this
+    // widget still shows. The bridge is per-widget, so this cannot disturb
+    // another widget's choice.
+    function ensureVisibleSelection() {
+        if (!root.bridge) {
+            return;
+        }
+        const rows = deviceFilter.rowCount();
+        if (rows === 0) {
+            return;
+        }
+        const current = root.bridge.selectedSerial;
+        for (let row = 0; row < rows; ++row) {
+            const serial = deviceFilter.data(deviceFilter.index(row, 0), deviceFilter.filterRole);
+            if (serial === current) {
+                return;
+            }
+        }
+        root.bridge.selectedSerial =
+            deviceFilter.data(deviceFilter.index(0, 0), deviceFilter.filterRole);
+    }
+
+
+    implicitWidth: Kirigami.Units.gridUnit * 36
+    implicitHeight: Kirigami.Units.gridUnit * 26
+
+    Instantiator {
+        model: root.deviceModel
+
+        delegate: QtObject {
+            required property int index
+            required property string serial
+            required property string name
+            required property string address
+            required property string health
+            required property string power
+            required property string screensaver
+            required property string activeLabel
+            required property var volume
+            required property var muted
+            required property var capabilities
+            required property bool stale
+            required property bool pendingCommand
+
+            readonly property bool selected: root.bridge
+                && serial === root.bridge.selectedSerial
+
+            onSelectedChanged: {
+                if (selected) {
+                    root.selectedDevice = this;
+                    deviceList.followBridgeSelection(index);
+                } else if (root.selectedDevice === this) {
+                    root.selectedDevice = null;
+                }
+            }
+            Component.onCompleted: {
+                if (selected) {
+                    root.selectedDevice = this;
+                    deviceList.followBridgeSelection(index);
+                }
+            }
+        }
+    }
+
+    GridLayout {
+        id: masterDetailLayout
+
+        objectName: "masterDetailLayout"
+        anchors.fill: parent
+        columns: root.narrow ? 1 : 2
+        rows: root.narrow ? 2 : 1
+        columnSpacing: Kirigami.Units.largeSpacing
+        rowSpacing: Kirigami.Units.largeSpacing
+
+        Item {
+            id: devicesPane
+
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.minimumWidth: Kirigami.Units.gridUnit * 10
+            Layout.preferredWidth: root.narrow ? -1 : Kirigami.Units.gridUnit * 12
+            Layout.minimumHeight: root.narrow ? Kirigami.Units.gridUnit * 7
+                                               : Kirigami.Units.gridUnit * 14
+            Layout.preferredHeight: root.narrow ? Kirigami.Units.gridUnit * 9 : -1
+
+            PlasmaExtras.Heading {
+                id: devicesHeading
+
+                anchors {
+                    top: parent.top
+                    left: parent.left
+                    right: parent.right
+                }
+                level: 2
+                text: KI18n.i18n("Devices")
+            }
+
+            ListView {
+                id: deviceList
+
+                objectName: "deviceList"
+                anchors {
+                    top: devicesHeading.bottom
+                    topMargin: Kirigami.Units.smallSpacing
+                    left: parent.left
+                    right: parent.right
+                    bottom: parent.bottom
+                }
+                activeFocusOnTab: true
+                clip: true
+                keyNavigationEnabled: true
+                model: root.deviceModel
+                currentIndex: -1
+                Accessible.name: KI18n.i18n("Roku devices")
+                Accessible.description: KI18n.i18n("Use the arrow keys to choose a Roku device")
+
+                // The bridge owns the selection: it restores the configured
+                // device and guarantees a valid one whenever devices exist.
+                // The list therefore only writes back changes the user drove
+                // from the keyboard, so repopulating the model can never
+                // silently reselect the first row.
+                property bool followingBridge: false
+
+                function followBridgeSelection(index) {
+                    followingBridge = true;
+                    currentIndex = index;
+                    followingBridge = false;
+                }
+
+                onCurrentItemChanged: {
+                    if (followingBridge || !activeFocus) {
+                        return;
+                    }
+                    const item = currentItem as DeviceListItem;
+                    if (item && item.serial !== root.bridge.selectedSerial) {
+                        root.bridge.selectedSerial = item.serial;
+                    }
+                }
+
+                delegate: DeviceListItem {
+                    required property int index
+                    required property var model
+
+                    width: ListView.view.width
+                    current: ListView.isCurrentItem
+                    serial: model.serial
+                    displayName: model.name
+                    health: model.health
+                    power: model.power
+                    stale: model.stale
+                    onSelected: {
+                        deviceList.currentIndex = index;
+                        root.bridge.selectedSerial = model.serial;
+                    }
+                }
+            }
+        }
+
+        Item {
+            id: detailPane
+
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.minimumWidth: Kirigami.Units.gridUnit * 16
+            Layout.minimumHeight: Kirigami.Units.gridUnit * 14
+
+            PlasmaExtras.PlaceholderMessage {
+                anchors.centerIn: parent
+                visible: root.selectedDevice === null
+                iconName: "video-television-off"
+                text: KI18n.i18n("No Roku device selected")
+                explanation: KI18n.i18n("Add or select a Roku device to show its controls.")
+            }
+
+            DeviceDetail {
+                objectName: root.selectedDevice ? "selectedDeviceDetail" : ""
+                anchors.fill: parent
+                visible: root.selectedDevice !== null
+                bridge: root.bridge
+                visibleInformation: root.visibleInformation
+                visibleControls: root.visibleControls
+                serial: root.selectedDevice?.serial ?? ""
+                displayName: root.selectedDevice?.name ?? ""
+                health: root.selectedDevice?.health ?? "offline"
+                power: root.selectedDevice?.power ?? "unknown"
+                screensaver: root.selectedDevice?.screensaver ?? "unknown"
+                activeLabel: root.selectedDevice?.activeLabel ?? ""
+                address: root.selectedDevice?.address ?? ""
+                volume: root.selectedDevice?.volume
+                muted: root.selectedDevice?.muted ?? false
+                capabilities: root.selectedDevice?.capabilities ?? []
+                stale: root.selectedDevice?.stale ?? true
+                pendingCommand: root.selectedDevice?.pendingCommand ?? false
+            }
+        }
+    }
+}

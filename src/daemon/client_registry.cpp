@@ -44,6 +44,16 @@ std::optional<ClientRegistration> ClientRegistry::normalized(const QString& owne
     return registration;
 }
 
+QList<ClientRegistration> ClientRegistry::registrations() const {
+    QList<ClientRegistration> all;
+    for (const auto& byClientId : m_clientsByOwner) {
+        for (const ClientRegistration& registration : byClientId) {
+            all.append(registration);
+        }
+    }
+    return all;
+}
+
 bool ClientRegistry::registerClient(const QString& owner, const QString& clientId,
                                     const QStringList& serials, quint32 intervalMs) {
     const auto value = normalized(owner, clientId, serials, intervalMs);

@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+find_package(KF6 6.0 REQUIRED COMPONENTS I18n ItemModels)
+find_package(Plasma 6.0 REQUIRED)
+find_package(Qt6 6.7 REQUIRED COMPONENTS QuickTest)
+
 add_executable(project-smoke smoke/project_smoke.cpp)
 target_link_libraries(project-smoke PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME project-smoke COMMAND project-smoke)
@@ -38,6 +42,14 @@ target_include_directories(poll-scheduler-test PRIVATE ${PROJECT_SOURCE_DIR}/src
 target_link_libraries(poll-scheduler-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
 add_test(NAME poll-scheduler COMMAND poll-scheduler-test)
 
+add_executable(devices-model-test
+  unit/devices_model_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/plasmoid/devicesmodel.cpp
+)
+target_include_directories(devices-model-test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(devices-model-test PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME devices-model COMMAND devices-model-test)
+
 add_executable(daemon-dbus-test integration/daemon_dbus_test.cpp)
 target_include_directories(daemon-dbus-test PRIVATE ${PROJECT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(daemon-dbus-test
@@ -51,6 +63,60 @@ target_link_libraries(daemon-dbus-test
 )
 find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session REQUIRED)
 add_test(NAME daemon-dbus COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:daemon-dbus-test>)
+
+# A private session bus still reads D-Bus service files from XDG_DATA_DIRS, so
+# without this a developer who has RokuDeck installed would have their real
+# daemon activated into the test bus and silently take over the service name.
+set(ROKUDECK_ISOLATED_XDG "${CMAKE_CURRENT_BINARY_DIR}/xdg-isolated")
+file(MAKE_DIRECTORY "${ROKUDECK_ISOLATED_XDG}")
+set(ROKUDECK_ISOLATED_ENVIRONMENT
+  "XDG_DATA_DIRS=${ROKUDECK_ISOLATED_XDG}"
+  "XDG_DATA_HOME=${ROKUDECK_ISOLATED_XDG}"
+)
+set_tests_properties(daemon-dbus PROPERTIES ENVIRONMENT "${ROKUDECK_ISOLATED_ENVIRONMENT}")
+
+add_executable(plasmoid-bridge-test
+  unit/plasmoid_bridge_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/plasmoid/rokudeckapplet.cpp
+  ${PROJECT_SOURCE_DIR}/src/plasmoid/daemonproxy.cpp
+  ${PROJECT_SOURCE_DIR}/src/plasmoid/devicesmodel.cpp
+)
+target_include_directories(plasmoid-bridge-test
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/plasmoid
+)
+target_compile_definitions(plasmoid-bridge-test
+  PRIVATE TRANSLATION_DOMAIN="plasma_applet_io.github.josephur.rokudeck"
+)
+target_link_libraries(plasmoid-bridge-test
+  PRIVATE
+    RokuDeck::DBusInterface
+    KF6::ConfigCore
+    KF6::I18n
+    Plasma::Plasma
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Qml
+    Qt6::Test
+)
+add_test(NAME plasmoid-bridge
+  COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:plasmoid-bridge-test>
+)
+
+add_executable(plasmoid-qml-test qml/qmltest.cpp)
+target_link_libraries(plasmoid-qml-test
+  PRIVATE
+    KF6::I18n
+    KF6::I18nQml
+    Plasma::Plasma
+    Qt6::Qml
+    Qt6::QuickTest
+)
+add_test(NAME plasmoid-qml
+  COMMAND plasmoid-qml-test -input ${CMAKE_CURRENT_SOURCE_DIR}/qml
+)
+set_tests_properties(plasmoid-qml PROPERTIES ENVIRONMENT QT_QPA_PLATFORM=offscreen)
 
 add_executable(daemon-client-helper support/daemon_client_helper.cpp)
 target_link_libraries(daemon-client-helper PRIVATE Qt6::Core Qt6::DBus)
@@ -72,5 +138,9 @@ target_link_libraries(rokudeckctl-test
 )
 add_test(NAME rokudeckctl
   COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:rokudeckctl-test>
+)
+set_tests_properties(rokudeckctl PROPERTIES ENVIRONMENT "${ROKUDECK_ISOLATED_ENVIRONMENT}")
+set_tests_properties(plasmoid-bridge PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen;${ROKUDECK_ISOLATED_ENVIRONMENT}"
 )
 add_dependencies(rokudeckctl-test rokudeckctl)

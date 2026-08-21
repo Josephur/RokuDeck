@@ -87,6 +87,30 @@ The install includes `rokudeckctl`, the D-Bus-activated daemon, and the versione
 and service files. Packagers may set `CMAKE_INSTALL_PREFIX` when configuring; changing only the
 install-time `--prefix` does not rewrite the generated activation paths.
 
+## Plasma widget
+
+To run the widget without installing system-wide, use the development install, which builds and
+installs into `~/.local`:
+
+```sh
+bash scripts/install-dev.sh
+plasmoidviewer -a io.github.josephur.rokudeck
+```
+
+A home-directory prefix is not on Plasma's or Qt's default search paths, so export the
+`XDG_DATA_DIRS` and `QT_PLUGIN_PATH` lines the script prints before running Plasma tools in that
+shell. `bash scripts/uninstall-dev.sh` removes exactly the paths CMake recorded and leaves your
+settings in `~/.config/rokudeckrc` alone.
+
+The widget renders only what the daemon reports; it never runs `rds`, opens sockets, or polls on
+its own. Each widget keeps its own device selection, visible information, visible controls, and
+compact layout, while a device's address, automation permission, wake preference, and refresh
+policy belong to the daemon so that every widget and automation sees the same device.
+
+Automated tests cannot tell you whether the widget looks right. See
+[`docs/testing/plasma-widget.md`](docs/testing/plasma-widget.md) for the states a human still has
+to confirm.
+
 ## Usage
 
 The CLI talks only to `io.github.josephur.RokuDeck1`:

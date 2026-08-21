@@ -15,6 +15,7 @@
 #include <QDBusServiceWatcher>
 #include <QDeadlineTimer>
 #include <QHash>
+#include <QJsonObject>
 #include <QObject>
 #include <QQueue>
 #include <QSet>
@@ -63,6 +64,11 @@ class DaemonService final : public QObject, protected QDBusContext {
     void UpdateClientInterest(const QString& clientId, const QStringList& serials, uint intervalMs);
     void UnregisterClient(const QString& clientId);
     [[nodiscard]] QString DiscoverDevices();
+    [[nodiscard]] QString AddDevice(const QString& deviceJson);
+    [[nodiscard]] QString UpdateDevice(const QString& serial, const QString& changesJson);
+    void RemoveDevice(const QString& serial);
+    void SetDeviceOrder(const QStringList& serials);
+    [[nodiscard]] QString TestDevice(const QString& address);
     [[nodiscard]] QString SendCommand(const QString& serial, const QString& commandJson);
 
   Q_SIGNALS:
@@ -89,6 +95,15 @@ class DaemonService final : public QObject, protected QDBusContext {
         QString errorCode;
     };
 
+    // Settings written by the user through the device-management API. Discovery
+    // and polling only know a device's identity, so they must never supply one.
+    enum class MergeMode { PreserveSettings, ApplySettings };
+
+    struct ValidatedRecord {
+        DeviceRecord device;
+        QString errorMessage;
+    };
+
     [[nodiscard]] QString callerOwner() const;
     [[nodiscard]] std::optional<DeviceRecord> findDevice(const QString& serial) const;
     void removePollInterests(const ClientRegistration& registration);
@@ -96,7 +111,16 @@ class DaemonService final : public QObject, protected QDBusContext {
     void watchOwner(const QString& owner);
     void updateIdleTimer();
     [[nodiscard]] bool hasAcceptedWork() const;
-    [[nodiscard]] bool mergeDevice(const DeviceRecord& device);
+    [[nodiscard]] bool mergeDevice(const DeviceRecord& device,
+                                   MergeMode mode = MergeMode::PreserveSettings);
+    [[nodiscard]] ValidatedRecord validateDeviceJson(const QString& deviceJson,
+                                                     const std::optional<DeviceRecord>& base) const;
+    [[nodiscard]] int nextSortIndex() const;
+    [[nodiscard]] std::chrono::milliseconds policyAdjustedInterval(const QString& serial,
+                                                         std::chrono::milliseconds requested) const;
+    void reapplyPollInterests();
+    void persistAndAnnounceDevices();
+    void finishDeviceTest(const QString& address, const QDBusMessage& reply);
     [[nodiscard]] ValidatedCommand validateCommand(const QString& serial,
                                                    const QString& commandJson) const;
     void processNextCommand(const QString& serial);
@@ -105,6 +129,7 @@ class DaemonService final : public QObject, protected QDBusContext {
                                 const QString& errorCode);
 
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
+    [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,
                                               const QString& diagnostic = {});
 
@@ -124,6 +149,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     QHash<QString, DeviceSnapshot> m_snapshots;
     QHash<QString, quint64> m_addressGenerations;
     QList<QDBusMessage> m_discoveryReplies;
+    QHash<QString, QList<QDBusMessage>> m_deviceTestReplies;
     QHash<QString, QQueue<QueuedCommand>> m_commandQueues;
     QSet<QString> m_activeCommandSerials;
     bool m_registeredOnBus = false;
