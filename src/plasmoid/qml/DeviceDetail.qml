@@ -29,6 +29,18 @@ Item {
     readonly property string friendlyName: displayName.length > 0
         ? displayName
         : KI18n.i18n("Unnamed Roku device")
+    // The daemon reports "unknown" whenever it could not determine the screen
+    // saver state, so never collapse that into a definite "Inactive" claim.
+    readonly property string screensaverText: {
+        switch (screensaver.toLowerCase()) {
+        case "active":
+            return KI18n.i18n("Active");
+        case "inactive":
+            return KI18n.i18n("Inactive");
+        default:
+            return KI18n.i18n("Unknown");
+        }
+    }
 
     Accessible.name: friendlyName
     Accessible.description: KI18n.i18n("Controls and status for %1", friendlyName)
@@ -49,6 +61,8 @@ Item {
             }
 
             StatusBadge {
+                objectName: "detailStatusBadge"
+
                 health: root.health
                 power: root.power
                 stale: root.stale
@@ -89,9 +103,10 @@ Item {
                 opacity: 0.75
             }
             PlasmaComponents.Label {
+                objectName: "screensaverValue"
+
                 Layout.fillWidth: true
-                text: root.screensaver === "active" ? KI18n.i18n("Active")
-                                                    : KI18n.i18n("Inactive")
+                text: root.screensaverText
             }
         }
 

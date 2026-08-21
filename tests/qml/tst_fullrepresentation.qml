@@ -36,7 +36,7 @@ TestCase {
         }
     }
 
-    function createFull(entries, properties) {
+    function createFull(entries, properties, selectedSerial) {
         const window = createTemporaryObject(windowComponent, testCase);
         verify(window);
         window.requestActivate();
@@ -44,6 +44,9 @@ TestCase {
         const bridge = createTemporaryObject(bridgeComponent, testCase);
         verify(bridge);
         bridge.setFixtureDevices(entries);
+        if (selectedSerial !== undefined) {
+            bridge.selectedSerial = selectedSerial;
+        }
         const full = createTemporaryObject(fullComponent, window.contentItem, Object.assign({
             bridge: bridge,
             narrow: false,
@@ -186,5 +189,44 @@ TestCase {
             verify(button.Accessible.description.length > 0,
                    `${name} has no accessible description`);
         }
+    }
+
+    function test_unknownScreensaverIsNotReportedAsInactive() {
+        const fixture = createFull([{
+            serial: "SERIAL-A",
+            name: "Living Room",
+            screensaver: "unknown",
+            capabilities: ["power"]
+        }]);
+        const label = findChild(fixture.full, "screensaverValue");
+        verify(label !== null);
+        verify(label.text !== "Inactive", `unknown screensaver rendered as ${label.text}`);
+        verify(label.text.length > 0);
+
+        fixture.bridge.devices.setFixtureProperty(0, "screensaver", "active");
+        tryVerify(() => label.text === "Active");
+
+        fixture.bridge.devices.setFixtureProperty(0, "screensaver", "inactive");
+        tryVerify(() => label.text === "Inactive");
+    }
+
+    function test_deviceListFollowsTheExistingSelectionInsteadOfTheFirstRow() {
+        const fixture = createFull([
+            {
+                serial: "SERIAL-A",
+                name: "Living Room",
+                capabilities: ["power"]
+            },
+            {
+                serial: "SERIAL-B",
+                name: "Bedroom",
+                capabilities: ["power"]
+            }
+        ], {}, "SERIAL-B");
+
+        const deviceList = findChild(fixture.full, "deviceList");
+        compare(fixture.bridge.selectedSerial, "SERIAL-B");
+        tryCompare(deviceList, "currentIndex", 1);
+        compare(fixture.bridge.selectedSerial, "SERIAL-B");
     }
 }

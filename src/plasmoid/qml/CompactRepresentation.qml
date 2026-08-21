@@ -93,6 +93,8 @@ PlasmaComponents.ToolButton {
             onSelectedChanged: {
                 if (selected) {
                     root.selectedDevice = this;
+                } else if (root.selectedDevice === this) {
+                    root.selectedDevice = null;
                 }
             }
             Component.onCompleted: {

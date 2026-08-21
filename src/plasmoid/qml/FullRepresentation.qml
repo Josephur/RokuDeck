@@ -43,13 +43,15 @@ Item {
             onSelectedChanged: {
                 if (selected) {
                     root.selectedDevice = this;
-                    deviceList.currentIndex = index;
+                    deviceList.followBridgeSelection(index);
+                } else if (root.selectedDevice === this) {
+                    root.selectedDevice = null;
                 }
             }
             Component.onCompleted: {
                 if (selected) {
                     root.selectedDevice = this;
-                    deviceList.currentIndex = index;
+                    deviceList.followBridgeSelection(index);
                 }
             }
         }
@@ -106,15 +108,27 @@ Item {
                 currentIndex: -1
                 Accessible.name: KI18n.i18n("Roku devices")
                 Accessible.description: KI18n.i18n("Use the arrow keys to choose a Roku device")
+
+                // The bridge owns the selection: it restores the configured
+                // device and guarantees a valid one whenever devices exist.
+                // The list therefore only writes back changes the user drove
+                // from the keyboard, so repopulating the model can never
+                // silently reselect the first row.
+                property bool followingBridge: false
+
+                function followBridgeSelection(index) {
+                    followingBridge = true;
+                    currentIndex = index;
+                    followingBridge = false;
+                }
+
                 onCurrentItemChanged: {
+                    if (followingBridge || !activeFocus) {
+                        return;
+                    }
                     const item = currentItem as DeviceListItem;
                     if (item && item.serial !== root.bridge.selectedSerial) {
                         root.bridge.selectedSerial = item.serial;
-                    }
-                }
-                onCountChanged: {
-                    if (count > 0 && currentIndex < 0) {
-                        currentIndex = 0;
                     }
                 }
 

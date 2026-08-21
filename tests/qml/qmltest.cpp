@@ -152,6 +152,21 @@ class FixtureDevicesModel final : public QAbstractListModel {
         } else if (roleName == QStringLiteral("pendingCommand")) {
             device.pendingCommand = value.toBool();
             role = PendingCommandRole;
+        } else if (roleName == QStringLiteral("health")) {
+            device.health = value.toString();
+            role = HealthRole;
+        } else if (roleName == QStringLiteral("power")) {
+            device.power = value.toString();
+            role = PowerRole;
+        } else if (roleName == QStringLiteral("screensaver")) {
+            device.screensaver = value.toString();
+            role = ScreensaverRole;
+        } else if (roleName == QStringLiteral("stale")) {
+            device.stale = value.toBool();
+            role = StaleRole;
+        } else if (roleName == QStringLiteral("muted")) {
+            device.muted = value.toBool();
+            role = MutedRole;
         }
         if (role >= 0) {
             const QModelIndex changed = index(row, 0);
