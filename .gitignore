@@ -13,3 +13,6 @@ compile_commands.json
 .vscode/
 .idea/
 .clangd/
+
+# Local study checkouts of upstream projects (design reference only)
+references/
