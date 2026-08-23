@@ -29,7 +29,9 @@ ColumnLayout {
         && !stale
         && health.toLowerCase() !== "offline"
         && serial.length > 0
-    readonly property bool commandReady: deviceOnline && !pendingCommand
+    // Deliberately independent of pendingCommand: a command in flight must
+    // never lock the panel. Only refreshed device state may disable controls.
+    readonly property bool commandReady: deviceOnline
     readonly property bool poweredOn: power.toLowerCase() === "on"
     readonly property bool controlsEnabled: commandReady && poweredOn
 
@@ -66,6 +68,48 @@ ColumnLayout {
 
     spacing: Kirigami.Units.smallSpacing
 
+    // Icon buttons get a fixed theme-sized footprint: their implicit size
+    // otherwise starts at zero until the icon loads, collapsing every row
+    // that measures them and bouncing the panel on the first relayout.
+    component IconButton: PlasmaComponents.ToolButton {
+        id: button
+
+        implicitWidth: root.cell
+        implicitHeight: implicitWidth
+        activeFocusOnTab: true
+        display: QQC2.AbstractButton.IconOnly
+
+        property string keypress: ""
+        property bool allowStandby: false
+
+        readonly property bool flash: flashTimer.running
+
+        onClicked: {
+            flashTimer.restart();
+            root.dispatch("keypress", keypress, allowStandby);
+        }
+
+        // Press feedback lives on the pressed control only: a brief spinner
+        // fades in over the glyph and everything returns as it was.
+        PlasmaComponents.BusyIndicator {
+            anchors.centerIn: parent
+            width: parent.width * 0.55
+            height: width
+            visible: opacity > 0
+            opacity: parent.flash ? 1 : 0
+            running: parent.flash
+            Behavior on opacity {
+                NumberAnimation { duration: Kirigami.Units.shortDuration }
+            }
+        }
+
+        Timer {
+            id: flashTimer
+            interval: 900
+        }
+    }
+    readonly property real cell: Kirigami.Units.iconSizes.medium
+
     RowLayout {
         Layout.fillWidth: true
 
@@ -78,16 +122,25 @@ ColumnLayout {
         PlasmaComponents.BusyIndicator {
             objectName: "pendingIndicator"
 
+            // The slot is always reserved: toggling visibility would reflow
+            // every control below each time a command is sent, so activity
+            // fades into the fixed space instead.
             Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
             Layout.preferredHeight: width
-            visible: root.pendingCommand
-            running: visible
+            opacity: root.pendingCommand ? 1 : 0
+            running: root.pendingCommand
+            Behavior on opacity {
+                NumberAnimation { duration: Kirigami.Units.shortDuration }
+            }
             Accessible.name: KI18n.i18n("Sending command")
             Accessible.description: KI18n.i18n("Waiting for %1 to confirm the command", root.deviceName)
         }
     }
 
-    Flow {
+    // Rows use RowLayout rather than Flow: a Flow measures itself before the
+    // buttons' icons resolve, caches a zero implicit height, and then snaps
+    // the whole panel around on the first relayout.
+    RowLayout {
         id: primaryControls
 
         Layout.fillWidth: true
@@ -101,21 +154,23 @@ ColumnLayout {
             height: powerButton.implicitHeight
             visible: root.offers("power")
 
-            PlasmaComponents.ToolButton {
+            IconButton {
                 id: powerButton
 
                 objectName: "powerButton"
                 anchors.fill: parent
-                activeFocusOnTab: true
                 enabled: root.commandReady
-                display: QQC2.AbstractButton.IconOnly
-                icon.name: root.power.toLowerCase() === "on" ? "system-shutdown" : "system-wake-up"
+                // One power glyph for both directions, like a physical remote:
+                // themes ship no wake icon, and an unknown name would render
+                // as an anonymous file placeholder.
+                icon.name: "system-shutdown"
                 text: root.power.toLowerCase() === "on"
                     ? KI18n.i18n("Put %1 in standby", root.deviceName)
                     : KI18n.i18n("Turn on %1", root.deviceName)
                 Accessible.name: text
                 Accessible.description: KI18n.i18n("Send a power command to %1", root.deviceName)
-                onClicked: root.dispatch("power", root.power.toLowerCase() !== "on", true)
+                allowStandby: true
+                keypress: root.power.toLowerCase() === "on" ? "Power" : "PowerOn"
             }
         }
 
@@ -126,45 +181,41 @@ ColumnLayout {
             visible: root.offers("volume")
             spacing: 0
 
-            PlasmaComponents.ToolButton {
+            IconButton {
                 objectName: "volumeDownButton"
-                activeFocusOnTab: true
                 enabled: root.controlsEnabled
-                display: QQC2.AbstractButton.IconOnly
                 icon.name: "audio-volume-low"
                 text: KI18n.i18n("Lower volume on %1", root.deviceName)
                 Accessible.name: text
                 Accessible.description: KI18n.i18n("Lower the volume by one step")
-                onClicked: root.dispatch("volume", -1)
+                keypress: "VolumeDown"
             }
 
-            PlasmaComponents.ToolButton {
+            IconButton {
                 objectName: "volumeUpButton"
-                activeFocusOnTab: true
                 enabled: root.controlsEnabled
-                display: QQC2.AbstractButton.IconOnly
                 icon.name: "audio-volume-high"
                 text: KI18n.i18n("Raise volume on %1", root.deviceName)
                 Accessible.name: text
                 Accessible.description: KI18n.i18n("Raise the volume by one step")
-                onClicked: root.dispatch("volume", 1)
+                keypress: "VolumeUp"
             }
         }
 
-        PlasmaComponents.ToolButton {
+        IconButton {
             objectName: "muteButton"
-            activeFocusOnTab: true
             visible: root.offers("mute")
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
-            icon.name: root.muted ? "audio-volume-high" : "audio-volume-muted"
+            // The glyph mirrors the television's current state, like the
+            // system volume applet: struck-through while muted.
+            icon.name: root.muted ? "audio-volume-muted" : "audio-volume-high"
             text: root.muted ? KI18n.i18n("Unmute %1", root.deviceName)
                              : KI18n.i18n("Mute %1", root.deviceName)
             Accessible.name: text
             Accessible.description: root.muted
                 ? KI18n.i18n("Restore audio on %1", root.deviceName)
                 : KI18n.i18n("Silence audio on %1", root.deviceName)
-            onClicked: root.dispatch("mute", !root.muted)
+            keypress: "VolumeMute"
         }
     }
 
@@ -178,110 +229,94 @@ ColumnLayout {
         rowSpacing: 0
 
         Item { Layout.preferredWidth: upButton.implicitWidth; Layout.preferredHeight: upButton.implicitHeight }
-        PlasmaComponents.ToolButton {
+        IconButton {
             id: upButton
             objectName: "upButton"
-            activeFocusOnTab: true
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
             icon.name: "arrow-up"
             text: KI18n.i18n("Navigate up on %1", root.deviceName)
             Accessible.name: text
             Accessible.description: KI18n.i18n("Move the selection up")
-            onClicked: root.dispatch("keypress", "Up")
+            keypress: "Up"
         }
         Item { Layout.preferredWidth: upButton.implicitWidth; Layout.preferredHeight: upButton.implicitHeight }
 
-        PlasmaComponents.ToolButton {
+        IconButton {
             objectName: "leftButton"
-            activeFocusOnTab: true
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
             icon.name: "arrow-left"
             text: KI18n.i18n("Navigate left on %1", root.deviceName)
             Accessible.name: text
             Accessible.description: KI18n.i18n("Move the selection left")
-            onClicked: root.dispatch("keypress", "Left")
+            keypress: "Left"
         }
-        PlasmaComponents.ToolButton {
+        IconButton {
             objectName: "selectButton"
-            activeFocusOnTab: true
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
             icon.name: "dialog-ok-apply"
             text: KI18n.i18n("Select on %1", root.deviceName)
             Accessible.name: text
             Accessible.description: KI18n.i18n("Activate the current selection")
-            onClicked: root.dispatch("keypress", "Select")
+            keypress: "Select"
         }
-        PlasmaComponents.ToolButton {
+        IconButton {
             objectName: "rightButton"
-            activeFocusOnTab: true
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
             icon.name: "arrow-right"
             text: KI18n.i18n("Navigate right on %1", root.deviceName)
             Accessible.name: text
             Accessible.description: KI18n.i18n("Move the selection right")
-            onClicked: root.dispatch("keypress", "Right")
+            keypress: "Right"
         }
 
         Item { Layout.preferredWidth: upButton.implicitWidth; Layout.preferredHeight: upButton.implicitHeight }
-        PlasmaComponents.ToolButton {
+        IconButton {
             objectName: "downButton"
-            activeFocusOnTab: true
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
             icon.name: "arrow-down"
             text: KI18n.i18n("Navigate down on %1", root.deviceName)
             Accessible.name: text
             Accessible.description: KI18n.i18n("Move the selection down")
-            onClicked: root.dispatch("keypress", "Down")
+            keypress: "Down"
         }
         Item { Layout.preferredWidth: upButton.implicitWidth; Layout.preferredHeight: upButton.implicitHeight }
     }
 
-    Flow {
+    RowLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        PlasmaComponents.ToolButton {
+        IconButton {
             objectName: "backButton"
-            activeFocusOnTab: true
             visible: root.offers("navigation")
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
             icon.name: "go-previous"
             text: KI18n.i18n("Go back on %1", root.deviceName)
             Accessible.name: text
             Accessible.description: KI18n.i18n("Return to the previous Roku screen")
-            onClicked: root.dispatch("keypress", "Back")
+            keypress: "Back"
         }
 
-        PlasmaComponents.ToolButton {
+        IconButton {
             objectName: "homeButton"
-            activeFocusOnTab: true
             visible: root.offers("navigation")
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
             icon.name: "go-home"
             text: KI18n.i18n("Go home on %1", root.deviceName)
             Accessible.name: text
             Accessible.description: KI18n.i18n("Open the Roku home screen")
-            onClicked: root.dispatch("keypress", "Home")
+            keypress: "Home"
         }
 
-        PlasmaComponents.ToolButton {
+        IconButton {
             objectName: "playPauseButton"
-            activeFocusOnTab: true
             visible: root.offers("playback")
             enabled: root.controlsEnabled
-            display: QQC2.AbstractButton.IconOnly
             icon.name: "media-playback-start"
             text: KI18n.i18n("Play or pause on %1", root.deviceName)
             Accessible.name: text
             Accessible.description: KI18n.i18n("Toggle media playback")
-            onClicked: root.dispatch("keypress", "Play")
+            keypress: "Play"
         }
     }
 }

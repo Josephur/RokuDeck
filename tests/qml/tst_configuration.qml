@@ -4,8 +4,8 @@ import QtQuick
 import QtQuick.Window
 import QtTest
 
-import "../../src/plasmoid/qml/config" as RokuDeckConfig
-import "../../src/plasmoid/qml/config/address.js" as RokuDeckAddress
+import "../../src/plasmoid/qml" as RokuDeckConfig
+import "../../src/plasmoid/qml/address.js" as RokuDeckAddress
 
 TestCase {
     id: testCase
@@ -290,6 +290,30 @@ TestCase {
 
         mouseClick(findChild(page, "showStatusBox"));
         compare(page.cfg_visibleInformation.indexOf("status"), -1);
+    }
+
+    function test_panelTextIsASimpleOnOffChoice() {
+        const page = createPage(displayComponent, {
+            cfg_compactMode: "adaptive"
+        });
+        const nameBox = findChild(page, "showPanelNameBox");
+        verify(nameBox !== null, "Display must offer an on/off switch for the panel text");
+        verify(nameBox.checked);
+
+        mouseClick(nameBox);
+        compare(page.cfg_compactMode, "iconOnly",
+                "turning the text off must store the icon-only mode");
+
+        const legacy = createPage(displayComponent, { cfg_compactMode: "iconAndName" });
+        verify(findChild(legacy, "showPanelNameBox").checked,
+               "the older icon-and-name choice counts as text shown");
+
+        const hidden = createPage(displayComponent, { cfg_compactMode: "iconOnly" });
+        verify(!findChild(hidden, "showPanelNameBox").checked);
+
+        mouseClick(findChild(page, "showPanelNameBox"));
+        compare(page.cfg_compactMode, "adaptive",
+                "turning the text back on must restore showing it");
     }
 
     function test_controlChoicesArePersistedPerWidget() {

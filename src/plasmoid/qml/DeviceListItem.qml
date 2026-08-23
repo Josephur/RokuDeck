@@ -31,31 +31,26 @@ PlasmaComponents.ItemDelegate {
     hoverEnabled: true
     text: friendlyName
     Accessible.name: friendlyName
-    Accessible.description: KI18n.i18n("%1, %2", friendlyName, statusBadge.Accessible.description)
+    Accessible.description: KI18n.i18n("%1, %2", friendlyName, tvStatus.Accessible.description)
     onClicked: selected()
 
     contentItem: RowLayout {
         spacing: Kirigami.Units.smallSpacing
 
-        Kirigami.Icon {
-            Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+        TvStatusIcon {
+            id: tvStatus
+
+            Layout.preferredWidth: Kirigami.Units.iconSizes.small
             Layout.preferredHeight: width
-            source: "video-television"
+            health: root.health
+            power: root.power
+            stale: root.stale
         }
 
         PlasmaComponents.Label {
             Layout.fillWidth: true
             elide: Text.ElideRight
             text: root.friendlyName
-        }
-
-        StatusBadge {
-            id: statusBadge
-
-            health: root.health
-            power: root.power
-            stale: root.stale
-            showText: false
         }
     }
 }

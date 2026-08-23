@@ -12,6 +12,9 @@ import org.kde.kirigami as Kirigami
 KCM.SimpleKCM {
     id: root
 
+    // See ConfigDisplay: force the Apply button on every mutation.
+    signal configurationChanged
+
     property var cfg_visibleControls: []
 
     function offers(key) {
@@ -24,6 +27,7 @@ KCM.SimpleKCM {
             next.push(key);
         }
         cfg_visibleControls = next;
+        configurationChanged();
     }
 
     Kirigami.FormLayout {

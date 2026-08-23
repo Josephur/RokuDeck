@@ -112,37 +112,82 @@ TestCase {
         const homeButton = findChild(fixture.full, "homeButton");
         verify(powerButton.visible);
         verify(powerButton.enabled);
+        // The wake action reuses the one power glyph every theme ships; a
+        // missing themed icon would render as an anonymous file placeholder.
+        compare(powerButton.icon.name, "system-shutdown");
         verify(homeButton.visible);
         verify(!homeButton.enabled);
+
+        // Waking a standby device is a plain ECP keypress too.
+        powerButton.forceActiveFocus();
+        tryVerify(() => powerButton.activeFocus);
+        keyClick(Qt.Key_Space);
+        compare(fixture.bridge.sentCommands.length, 1);
+        compare(fixture.bridge.sentCommands[0].serial, "SERIAL-A");
+        compare(fixture.bridge.sentCommands[0].action, "keypress");
+        compare(fixture.bridge.sentCommands[0].value, "PowerOn");
     }
 
-    function test_controlDispatchAndPendingConfirmationState() {
+    function test_pendingCommandKeepsControlsUsableAndFlashesThePressedButton() {
         const fixture = createFull([{
             serial: "SERIAL-A",
             name: "Living Room",
             health: "online",
             power: "on",
-            capabilities: ["power", "volume"]
+            capabilities: ["power", "volume", "mute"]
         }]);
         const powerButton = findChild(fixture.full, "powerButton");
         verify(powerButton.enabled);
+        compare(powerButton.icon.name, "system-shutdown");
         verify(powerButton.Accessible.name.length > 0);
         powerButton.forceActiveFocus();
         tryVerify(() => powerButton.activeFocus);
         keyClick(Qt.Key_Space);
         compare(fixture.bridge.sentCommands.length, 1);
         compare(fixture.bridge.sentCommands[0].serial, "SERIAL-A");
-        compare(fixture.bridge.sentCommands[0].action, "power");
-        compare(fixture.bridge.sentCommands[0].value, false);
+        compare(fixture.bridge.sentCommands[0].action, "keypress");
+        compare(fixture.bridge.sentCommands[0].value, "Power");
 
+        function press(buttonName) {
+            const button = findChild(fixture.full, buttonName);
+            verify(button !== null, `Missing ${buttonName}`);
+            verify(button.enabled, `${buttonName} is disabled`);
+            button.forceActiveFocus();
+            tryVerify(() => button.activeFocus);
+            keyClick(Qt.Key_Space);
+        }
+
+        press("volumeUpButton");
+        compare(fixture.bridge.sentCommands.length, 2);
+        compare(fixture.bridge.sentCommands[1].action, "keypress");
+        compare(fixture.bridge.sentCommands[1].value, "VolumeUp");
+
+        // Only the pressed control shows activity feedback.
+        const volumeUp = findChild(fixture.full, "volumeUpButton");
+        const volumeDown = findChild(fixture.full, "volumeDownButton");
+        verify(volumeUp.flash);
+        verify(!volumeDown.flash);
+
+        press("volumeDownButton");
+        compare(fixture.bridge.sentCommands.length, 3);
+        compare(fixture.bridge.sentCommands[2].action, "keypress");
+        compare(fixture.bridge.sentCommands[2].value, "VolumeDown");
+
+        press("muteButton");
+        compare(fixture.bridge.sentCommands.length, 4);
+        compare(fixture.bridge.sentCommands[3].action, "keypress");
+        compare(fixture.bridge.sentCommands[3].value, "VolumeMute");
+
+        // A command in flight must not lock the panel; only a refreshed
+        // snapshot that reports an unusable device may do that.
         fixture.bridge.devices.setFixtureProperty(0, "pendingCommand", true);
-        const pending = findChild(fixture.full, "pendingIndicator");
-        tryVerify(() => pending.running);
-        verify(!powerButton.enabled);
-
-        fixture.bridge.devices.setFixtureProperty(0, "pendingCommand", false);
-        tryVerify(() => !pending.running);
         verify(powerButton.enabled);
+        verify(volumeUp.enabled);
+        fixture.bridge.devices.setFixtureProperty(0, "pendingCommand", false);
+        verify(powerButton.enabled);
+
+        // The press animation is transient.
+        tryVerify(() => !findChild(fixture.full, "muteButton").flash);
     }
 
     function test_keyboardSelectsDeviceThenReachesPrimaryControl() {
@@ -189,6 +234,64 @@ TestCase {
             verify(button.Accessible.description.length > 0,
                    `${name} has no accessible description`);
         }
+    }
+
+    function test_pendingCommandDoesNotShiftSiblingControls() {
+        const fixture = createFull([{
+            serial: "SERIAL-A",
+            name: "Living Room",
+            health: "online",
+            power: "on",
+            capabilities: ["power", "volume", "navigation", "playback"]
+        }]);
+        const down = findChild(fixture.full, "downButton");
+        verify(down !== null);
+        const indicator = findChild(fixture.full, "pendingIndicator");
+        verify(indicator !== null);
+        const headerRow = indicator.parent;
+
+        const yOf = (item) => item.mapToItem(fixture.full, 0, 0).y;
+        const controls = indicator.parent.parent;
+        // Give the initial polish a moment, then require the settled layout:
+        // a collapsed start that snaps into place later reads as bouncing.
+        wait(100);
+        const restY = yOf(down);
+        const headerHeight = headerRow.height;
+        verify(headerHeight > 0);
+        compare(controls.height, controls.implicitHeight);
+
+        fixture.bridge.devices.setFixtureProperty(0, "pendingCommand", true);
+        tryVerify(() => indicator.running);
+        // Let the layout settle so a real reflow is measured, not a stale frame.
+        wait(100);
+
+        compare(yOf(down), restY);
+        compare(headerRow.height, headerHeight);
+
+        fixture.bridge.devices.setFixtureProperty(0, "pendingCommand", false);
+        tryVerify(() => !indicator.running);
+        wait(100);
+
+        compare(yOf(down), restY);
+        compare(headerRow.height, headerHeight);
+    }
+
+    function test_muteButtonIconShowsTheCurrentState() {
+        const fixture = createFull([{
+            serial: "SERIAL-A",
+            name: "Living Room",
+            health: "online",
+            power: "on",
+            muted: true,
+            capabilities: ["power", "volume", "mute"]
+        }]);
+        const muteButton = findChild(fixture.full, "muteButton");
+        compare(muteButton.icon.name, "audio-volume-muted",
+                "a muted television must show the struck-through speaker");
+
+        fixture.bridge.devices.setFixtureProperty(0, "muted", false);
+        tryVerify(() => muteButton.icon.name === "audio-volume-high",
+                  5000, "an unmuted television must show the plain speaker");
     }
 
     function test_unknownScreensaverIsNotReportedAsInactive() {
@@ -275,7 +378,7 @@ TestCase {
         }]);
         verify(findChild(fixture.full, "screensaverValue").visible);
         verify(findChild(fixture.full, "volumeValue").visible);
-        verify(findChild(fixture.full, "detailStatusBadge").visible);
+        verify(findChild(fixture.full, "detailStatusTv").visible);
         verify(!findChild(fixture.full, "addressValue").visible,
                "the address is off by default");
 
@@ -284,6 +387,6 @@ TestCase {
         verify(!findChild(fixture.full, "screensaverValue").visible);
         verify(!findChild(fixture.full, "volumeValue").visible);
         verify(!findChild(fixture.full, "activeAppValue").visible);
-        verify(!findChild(fixture.full, "detailStatusBadge").visible);
+        verify(!findChild(fixture.full, "detailStatusTv").visible);
     }
 }

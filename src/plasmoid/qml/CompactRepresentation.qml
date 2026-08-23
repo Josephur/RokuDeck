@@ -94,23 +94,16 @@ PlasmaComponents.ToolButton {
     readonly property string adaptiveLayoutMode: inPanel
         ? (formFactor === PlasmaCore.Types.Vertical ? "verticalPanel" : "horizontalPanel")
         : "desktop"
-    // "iconOnly" reuses the vertical-panel layout because that is the one that
-    // already drops every label; "iconAndName" keeps them in every form factor.
-    readonly property string layoutMode: {
-        if (compactMode === "iconOnly") {
-            return "verticalPanel";
-        }
-        if (compactMode === "iconAndName" && adaptiveLayoutMode === "verticalPanel") {
-            return "desktop";
-        }
-        return adaptiveLayoutMode;
-    }
+    readonly property string layoutMode: adaptiveLayoutMode
+    // "Icon only" is the user's explicit request to hide the device name;
+    // every other mode names the device in all form factors.
+    readonly property bool showName: compactMode !== "iconOnly"
     readonly property string selectedName: selectedDevice && selectedDevice.name.length > 0
         ? selectedDevice.name
         : KI18n.i18n("Unnamed Roku device")
-    readonly property string primaryStatus: statusBadge.statusText
+    readonly property string primaryStatus: tvStatus.statusText
     readonly property string stateDescription: {
-        const parts = [statusBadge.Accessible.description];
+        const parts = [tvStatus.Accessible.description];
         if (selectedDevice?.muted ?? false) {
             parts.push(KI18n.i18n("Muted"));
         }
@@ -183,37 +176,38 @@ PlasmaComponents.ToolButton {
     contentItem: GridLayout {
         id: contentLayout
 
-        columns: root.layoutMode === "horizontalPanel" ? 5 : 1
+        columns: root.layoutMode === "horizontalPanel" ? 4 : 1
         columnSpacing: Kirigami.Units.smallSpacing
         rowSpacing: Kirigami.Units.smallSpacing
 
-        Kirigami.Icon {
+        TvStatusIcon {
+            id: tvStatus
+
+            objectName: "tvStatusIcon"
+
             Layout.alignment: Qt.AlignCenter
             Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
             Layout.preferredHeight: width
-            source: root.selectedDevice ? "video-television" : "video-television-off"
+            health: root.selectedDevice?.health ?? "offline"
+            power: root.selectedDevice?.power ?? "unknown"
+            stale: root.selectedDevice?.stale ?? true
         }
 
         PlasmaComponents.Label {
             objectName: "deviceNameLabel"
 
-            Layout.alignment: Qt.AlignVCenter
-            Layout.fillWidth: root.layoutMode !== "verticalPanel"
+            Layout.alignment: root.layoutMode === "verticalPanel"
+                ? Qt.AlignHCenter : Qt.AlignVCenter
+            Layout.fillWidth: true
             Layout.maximumWidth: Kirigami.Units.gridUnit * 9
-            visible: root.layoutMode !== "verticalPanel"
+            visible: root.showName
             elide: Text.ElideRight
+            wrapMode: root.layoutMode === "verticalPanel" ? Text.Wrap : Text.NoWrap
+            horizontalAlignment: root.layoutMode === "verticalPanel"
+                ? Text.AlignHCenter : Text.AlignLeft
+            font.pointSize: root.layoutMode === "verticalPanel"
+                ? Qt.application.font.pointSize * 0.85 : -1
             text: root.selectedDevice ? root.selectedName : KI18n.i18n("No device")
-        }
-
-        StatusBadge {
-            id: statusBadge
-
-            objectName: "statusBadge"
-            Layout.alignment: Qt.AlignCenter
-            health: root.selectedDevice?.health ?? "offline"
-            power: root.selectedDevice?.power ?? "unknown"
-            stale: root.selectedDevice?.stale ?? true
-            showText: root.layoutMode !== "verticalPanel"
         }
 
         Kirigami.Icon {

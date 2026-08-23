@@ -69,6 +69,7 @@ class DaemonDbusTest final : public QObject {
     void testDeviceProbesAnAddressWithoutRegisteringIt();
     void refreshPolicyBoundsHowOftenTheDaemonPollsADevice();
     void aUserChosenNameSurvivesDiscoveryAndPolling();
+    void powerAndAudioKeypressesHonourObservedDeviceState();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -1354,6 +1355,7 @@ void DaemonDbusTest::aUserChosenNameSurvivesDiscoveryAndPolling() {
 
     // A poll reports the advertised name too, and must not undo the rename
     // either: polling is the path that runs continuously.
+    QSignalSpy snapshots(m_daemon.get(), &DaemonService::DeviceSnapshotChanged);
     const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
         QStringLiteral("naming-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
     QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
@@ -1371,6 +1373,18 @@ void DaemonDbusTest::aUserChosenNameSurvivesDiscoveryAndPolling() {
     while (!m_runner->callbacks.isEmpty()) {
         m_runner->complete({0, QByteArrayLiteral(R"json({"success":false})json"), {}, false});
     }
+
+    // The snapshot is what widgets actually display, so the rename has to
+    // survive there as well, not only in the device registry.
+    QCOMPARE(snapshots.size(), 1);
+    const QJsonObject emitted =
+        QJsonDocument::fromJson(snapshots.at(0).at(1).toString().toUtf8()).object();
+    QVERIFY2(emitted.value(QStringLiteral("displayName")).toString() == QStringLiteral("Kitchen"),
+             "the snapshot signal must carry the name the user typed");
+    const QJsonObject stored =
+        jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("SERIAL-A")}));
+    QVERIFY2(stored.value(QStringLiteral("displayName")).toString() == QStringLiteral("Kitchen"),
+             "GetSnapshot must carry the name the user typed");
 
     QCOMPARE(
         deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
@@ -1391,6 +1405,68 @@ void DaemonDbusTest::aUserChosenNameSurvivesDiscoveryAndPolling() {
             .value(QStringLiteral("displayName"))
             .toString(),
         QStringLiteral("Renamed By Roku"));
+}
+
+void DaemonDbusTest::powerAndAudioKeypressesHonourObservedDeviceState() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.30")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("keypad-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 1000);
+    m_runner->complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"deviceName":"Fixture Room","serialNumber":"SERIAL-A","powerMode":"PowerOn"})json"),
+         {},
+         false});
+    QCOMPARE(m_runner->requests.size(), 5);
+    m_runner->complete({1, {}, QByteArrayLiteral("fixture app failure"), false});
+    m_runner->complete({1, {}, QByteArrayLiteral("fixture media failure"), false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<audio-device><volume>12</volume><mute-status>false</mute-status></audio-device>","status":200,"headers":{}})json"),
+         {},
+         false});
+
+    // Power toggling and, once an audio reading exists, the audio keys are all
+    // plain ECP keypresses; the widget relies on that contract.
+    const QStringList accepted{QStringLiteral("Power"),    QStringLiteral("PowerOn"),
+                               QStringLiteral("VolumeUp"), QStringLiteral("VolumeDown"),
+                               QStringLiteral("VolumeMute")};
+    for (const QString& key : accepted) {
+        const QString command =
+            QStringLiteral(R"json({"operation":"keypress","key":"%1"})json").arg(key);
+        const QDBusMessage reply =
+            waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), command));
+        QVERIFY2(reply.type() != QDBusMessage::ErrorMessage,
+                 qPrintable(QStringLiteral("%1 was rejected: %2").arg(key, reply.errorMessage())));
+        QCOMPARE(m_runner->lastRequest.arguments.last(2),
+                 QStringList({QStringLiteral("keypress"), key}));
+        m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
+    }
+
+    // Losing the observed state (here: the device moved, invalidating the
+    // snapshot) must re-arm the audio safety gate, while power stays available.
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.31")});
+    const QDBusMessage volume =
+        waitForReply(m_proxy->SendCommand(
+            QStringLiteral("SERIAL-A"),
+            QStringLiteral(R"json({"operation":"keypress","key":"VolumeUp"})json")));
+    QCOMPARE(volume.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(volume.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.SafetyRejected"));
+
+    const QDBusMessage power = waitForReply(m_proxy->SendCommand(
+        QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"operation":"keypress","key":"Power"})json")));
+    QVERIFY2(power.type() != QDBusMessage::ErrorMessage, qPrintable(power.errorMessage()));
+    QCOMPARE(m_runner->lastRequest.arguments.last(2),
+             QStringList({QStringLiteral("keypress"), QStringLiteral("Power")}));
+    m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

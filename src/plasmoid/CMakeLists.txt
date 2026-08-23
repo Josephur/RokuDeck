@@ -12,14 +12,14 @@ plasma_add_applet(io.github.josephur.rokudeck
     qml/DeviceListItem.qml
     qml/DeviceDetail.qml
     qml/RemoteControls.qml
-    qml/StatusBadge.qml
-    qml/config/config.qml
-    qml/config/ConfigDevices.qml
-    qml/config/ConfigDeviceEntry.qml
-    qml/config/ConfigDisplay.qml
-    qml/config/ConfigControls.qml
-    qml/config/ConfigAdvanced.qml
-    qml/config/address.js
+    qml/TvStatusIcon.qml
+    qml/config.qml
+    qml/ConfigDevices.qml
+    qml/ConfigDeviceEntry.qml
+    qml/ConfigDisplay.qml
+    qml/ConfigControls.qml
+    qml/ConfigAdvanced.qml
+    qml/address.js
   CPP_SOURCES
     rokudeckapplet.cpp
     daemonproxy.cpp

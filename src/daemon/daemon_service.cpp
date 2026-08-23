@@ -908,8 +908,13 @@ DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& se
             QStringLiteral("Down"),      QStringLiteral("Left"), QStringLiteral("Right"),
             QStringLiteral("Select"),    QStringLiteral("Play"), QStringLiteral("Pause"),
             QStringLiteral("Rev"),       QStringLiteral("Fwd"),  QStringLiteral("InstantReplay"),
-            QStringLiteral("FindRemote")};
-        if (key == QStringLiteral("VolumeUp")) {
+            QStringLiteral("FindRemote"), QStringLiteral("Power"), QStringLiteral("PowerOn")};
+        // Audio keys are only safe once a reading was observed: they would
+        // otherwise act on a device state nobody has measured.
+        static const QSet<QString> volumeGatedKeys{QStringLiteral("VolumeUp"),
+                                                   QStringLiteral("VolumeDown"),
+                                                   QStringLiteral("VolumeMute")};
+        if (volumeGatedKeys.contains(key)) {
             const auto snapshotIt = m_snapshots.constFind(serial);
             if (snapshotIt == m_snapshots.cend() || !snapshotIt->volume.has_value()) {
                 return {{}, QStringLiteral("safetyRejected")};
@@ -1127,9 +1132,17 @@ void DaemonService::pollDueDevices() {
                 if (snapshot.displayName.isEmpty()) {
                     snapshot.displayName = currentDevice->displayName;
                 }
-                service->m_snapshots.insert(claim.serial, snapshot);
                 const bool deviceChanged =
                     service->mergeDevice({claim.serial, snapshot.displayName, address});
+                const auto mergedDevice = service->findDevice(claim.serial);
+                if (mergedDevice) {
+                    // The registry is authoritative once user preferences have
+                    // been merged in; serving the advertised name from the
+                    // snapshot would undo a rename everywhere it is displayed.
+                    snapshot.displayName = mergedDevice->displayName;
+                    snapshot.address = mergedDevice->address;
+                }
+                service->m_snapshots.insert(claim.serial, snapshot);
                 if (deviceChanged) {
                     service->m_configStore->saveDevices(service->m_deviceRegistry.devices());
                     Q_EMIT service->DeviceListChanged(service->ListDevices());

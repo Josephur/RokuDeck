@@ -93,12 +93,32 @@ widget merely starting.
 
 | # | State | What to look for | Result |
 |---|-------|------------------|--------|
-| 1 | Horizontal panel | Icon, name and status fit the panel height without clipping | not yet checked |
-| 2 | Vertical panel | Labels drop out, the icon stays legible and square | not yet checked |
+| 1 | Horizontal panel | Icon, name and status fit the panel height without clipping | pass 2026-08-22 (real panel screenshot; re-check after the control fixes below) |
+| 2 | Vertical panel | Labels drop out, the icon stays legible and square | pass 2026-08-22 (real panel screenshot) |
 | 3 | Desktop (planar) | Compact form is readable at the default widget size | not yet checked |
-| 4 | Expanded, wide | Device list and detail pane sit side by side | not yet checked |
+| 4 | Expanded, wide | Device list and detail pane sit side by side | pass 2026-08-22 (real panel screenshot) |
 | 5 | Expanded, narrow | The two panes stack instead of overlapping | not yet checked |
-| 6 | Device in standby | Reads as standby, not as an error or a failure | not yet checked |
+| 6 | Device in standby | Reads as standby, not as an error or a failure | pass 2026-08-22 (badge and suspend glyph; "Screen saver: Unknown" renders honestly) |
+
+## Defects the screenshots exposed (2026-08-22)
+
+The first real-panel screenshots passed rows 1, 2, 4 and 6 on layout, but
+showed two functional defects that plasmoidviewer and the QML fixtures could
+never catch. All three fixes below are covered by automated tests:
+
+- **Polling overwrote a user-chosen name on screen.** The registry kept the
+  rename, but every poll re-emitted the name the TV advertises, so widgets
+  showed "Home Computer TV" instead of "Living Room TV". `GetSnapshot` and
+  `DeviceSnapshotChanged` now carry the merged record's name.
+- **No remote-control buttons ever rendered.** The widget hides any control the
+  daemon does not vouch for, but the daemon only reported `supports-*` flags.
+  Snapshots now also derive `power`, `navigation` and `playback`
+  unconditionally, and `volume`/`mute` once an audio reading was observed.
+- **Power/volume/mute commands were rejected.** The widget sent them as
+  dedicated operations the daemon never accepted; they now travel as plain ECP
+  keypresses (`Power`, `PowerOn`, `VolumeUp`, `VolumeDown`, `VolumeMute`), with
+  the audio keys still gated on an observed volume reading.
+
 | 7 | Device offline | Reads as offline and controls are visibly disabled | not yet checked |
 | 8 | Screen saver active | Shown as its own state, distinct from "Inactive" | not yet checked |
 | 9 | Settings → Devices | Discovery, test connection, rename, reorder, remove all behave | not yet checked |

@@ -8,21 +8,21 @@ ConfigModel {
     ConfigCategory {
         name: i18nc("@title", "Devices")
         icon: "video-television"
-        source: "config/ConfigDevices.qml"
+        source: "ConfigDevices.qml"
     }
     ConfigCategory {
         name: i18nc("@title", "Display")
         icon: "preferences-desktop-display"
-        source: "config/ConfigDisplay.qml"
+        source: "ConfigDisplay.qml"
     }
     ConfigCategory {
         name: i18nc("@title", "Controls")
         icon: "input-gamepad"
-        source: "config/ConfigControls.qml"
+        source: "ConfigControls.qml"
     }
     ConfigCategory {
         name: i18nc("@title", "Advanced")
         icon: "configure"
-        source: "config/ConfigAdvanced.qml"
+        source: "ConfigAdvanced.qml"
     }
 }

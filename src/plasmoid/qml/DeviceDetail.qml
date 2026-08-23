@@ -67,15 +67,30 @@ Item {
                 text: root.friendlyName
             }
 
-            StatusBadge {
-                objectName: "detailStatusBadge"
+        RowLayout {
+            objectName: "detailStatusRow"
 
-                visible: root.shows("status")
+            visible: root.shows("status")
+            spacing: Kirigami.Units.smallSpacing
+
+            TvStatusIcon {
+                id: tvStatusItem
+
+                objectName: "detailStatusTv"
+
+                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                Layout.preferredHeight: width
                 health: root.health
                 power: root.power
                 stale: root.stale
-                showText: true
             }
+
+            PlasmaComponents.Label {
+                objectName: "detailStatusLabel"
+
+                text: tvStatusItem.statusText
+            }
+        }
         }
 
         GridLayout {

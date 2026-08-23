@@ -56,7 +56,7 @@ TestCase {
         }, properties ?? {});
         const compact = createTemporaryObject(compactComponent, window.contentItem, viewProperties);
         verify(compact);
-        tryVerify(() => findChild(compact, "statusBadge") !== null);
+        tryVerify(() => findChild(compact, "tvStatusIcon") !== null);
         return compact;
     }
 
@@ -77,7 +77,8 @@ TestCase {
         compact.width = 40;
         compact.height = 180;
         compare(compact.layoutMode, "verticalPanel");
-        verify(!findChild(compact, "deviceNameLabel").visible);
+        // Even the tall narrow form names its device, in small text.
+        verify(findChild(compact, "deviceNameLabel").visible);
 
         compact.formFactor = PlasmaCore.Types.Planar;
         compact.location = PlasmaCore.Types.Desktop;
@@ -85,6 +86,78 @@ TestCase {
         compact.height = 160;
         compare(compact.layoutMode, "desktop");
         verify(findChild(compact, "deviceNameLabel").visible);
+    }
+
+    function test_panelScreensPaintDeviceState_data() {
+        return [
+            { tag: "online", health: "online", power: "on", stale: false, color: "#26a269" },
+            { tag: "standby", health: "standby", power: "standby", stale: false, color: "#5d7285" },
+            { tag: "degraded", health: "degraded", power: "on", stale: false, color: "#e9ad0c" },
+            { tag: "unknown-is-degraded", health: "unknown", power: "unknown", stale: false, color: "#e9ad0c" },
+            { tag: "stale-overrides-online", health: "online", power: "on", stale: true, color: "#e9ad0c" },
+            { tag: "offline", health: "offline", power: "unknown", stale: false, color: "#c01c28" }
+        ];
+    }
+
+    function test_panelScreensPaintDeviceState(data) {
+        const compact = createCompact({
+            serial: "SERIAL-A",
+            name: "Living Room",
+            health: data.health,
+            power: data.power,
+            stale: data.stale,
+            capabilities: ["power"]
+        });
+        compare(compact.layoutMode, "horizontalPanel");
+
+        // The painted screen alone carries the state; no separate connection
+        // or warning icons exist anywhere anymore.
+        const screen = findChild(compact, "tvScreen");
+        verify(screen !== null, "the television has no paintable screen");
+        compare(String(screen.color), String(data.color));
+
+        compact.formFactor = PlasmaCore.Types.Vertical;
+        compact.location = PlasmaCore.Types.LeftEdge;
+        compare(compact.layoutMode, "verticalPanel");
+        compare(String(findChild(compact, "tvScreen").color), String(data.color));
+    }
+
+    function test_desktopUsesThePaintedTelevisionToo() {
+        const compact = createCompact({
+            serial: "SERIAL-A",
+            name: "Living Room",
+            health: "online",
+            capabilities: ["power"]
+        }, {
+            formFactor: PlasmaCore.Types.Planar,
+            location: PlasmaCore.Types.Desktop
+        });
+        compare(compact.layoutMode, "desktop");
+        verify(findChild(compact, "tvStatusIcon").visible);
+        compare(String(findChild(compact, "tvScreen").color), String("#26a269"));
+        verify(findChild(compact, "deviceNameLabel").visible);
+    }
+
+    function test_verticalPanelNamesItsDeviceInSmallText() {
+        const compact = createCompact({
+            serial: "SERIAL-A",
+            name: "Living Room",
+            capabilities: ["power"]
+        });
+        compact.formFactor = PlasmaCore.Types.Vertical;
+        compact.location = PlasmaCore.Types.LeftEdge;
+        compare(compact.layoutMode, "verticalPanel");
+
+        const nameLabel = findChild(compact, "deviceNameLabel");
+        verify(nameLabel.visible);
+        compare(nameLabel.text, "Living Room");
+        // Must genuinely be smaller than the default, not silently fall back
+        // to it through a failed binding.
+        verify(nameLabel.font.pointSize > 0
+               && nameLabel.font.pointSize < Qt.application.font.pointSize,
+               "vertical panel name must be small text");
+        verify(nameLabel.width <= compact.width + 1,
+               "the name must fit the narrow vertical form");
     }
 
     function test_primaryStatus_data() {
@@ -106,11 +179,10 @@ TestCase {
             power: data.power,
             stale: data.stale
         });
-        const badge = findChild(compact, "statusBadge");
-        compare(badge.statusKey, data.expected);
-        compare(badge.errorState, data.error);
-        verify(badge.Accessible.name.length > 0);
-        verify(badge.Accessible.description.length > 0);
+        const tv = findChild(compact, "tvStatusIcon");
+        compare(tv.statusKey, data.expected);
+        verify(tv.Accessible.name.length > 0);
+        verify(tv.Accessible.description.length > 0);
     }
 
     function test_mutedAndAutomationStatesAreVisible() {
@@ -147,17 +219,39 @@ TestCase {
         verify(findChild(compact, "deviceNameLabel").visible);
 
         compact.compactMode = "iconOnly";
+        verify(!findChild(compact, "deviceNameLabel").visible,
+               "icon only must hide the name");
+
+        compact.compactMode = "adaptive";
+        compact.formFactor = PlasmaCore.Types.Vertical;
+        compact.location = PlasmaCore.Types.LeftEdge;
         compare(compact.layoutMode, "verticalPanel");
+        verify(findChild(compact, "deviceNameLabel").visible);
+
+        compact.compactMode = "iconOnly";
         verify(!findChild(compact, "deviceNameLabel").visible);
 
         compact.compactMode = "iconAndName";
-        compact.formFactor = PlasmaCore.Types.Vertical;
-        verify(compact.layoutMode !== "verticalPanel",
-               "asking for the name must keep it even in a vertical panel");
+        compare(compact.layoutMode, "verticalPanel",
+                "asking for the name must not leave the vertical form");
         verify(findChild(compact, "deviceNameLabel").visible);
+    }
 
-        compact.compactMode = "adaptive";
+    function test_verticalPanelWrapsLongDeviceNames() {
+        const compact = createCompact({
+            serial: "SERIAL-A",
+            name: "A Very Long Living Room Roku Television Name",
+            capabilities: ["power"]
+        });
+        compact.formFactor = PlasmaCore.Types.Vertical;
+        compact.location = PlasmaCore.Types.LeftEdge;
+        compact.width = 44;
         compare(compact.layoutMode, "verticalPanel");
+
+        const nameLabel = findChild(compact, "deviceNameLabel");
+        verify(nameLabel.visible);
+        tryVerify(() => nameLabel.lineCount > 1, 5000,
+                  "a name wider than the panel must wrap instead of clipping");
     }
 
     function test_onlyTheChosenDeviceDrivesTheCompactWidget() {

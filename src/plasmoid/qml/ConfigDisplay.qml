@@ -13,10 +13,13 @@ import org.kde.kirigami as Kirigami
 KCM.SimpleKCM {
     id: root
 
+    // Plasma lights the Apply button from cfg_ property diffs; emitting this
+    // documented signal additionally forces it on for every user mutation, so
+    // a missed diff can never hide unsaved changes.
+    signal configurationChanged
+
     property var cfg_visibleInformation: []
     property string cfg_compactMode: "adaptive"
-
-    readonly property var compactModes: ["adaptive", "iconOnly", "iconAndName"]
 
     function shows(key) {
         return cfg_visibleInformation.indexOf(key) >= 0;
@@ -28,26 +31,19 @@ KCM.SimpleKCM {
             next.push(key);
         }
         cfg_visibleInformation = next;
-    }
-
-    function compactModeLabel(mode) {
-        switch (mode) {
-        case "iconOnly":
-            return KI18n.i18nc("@item:inlistbox compact widget", "Icon only");
-        case "iconAndName":
-            return KI18n.i18nc("@item:inlistbox compact widget", "Icon and device name");
-        default:
-            return KI18n.i18nc("@item:inlistbox compact widget", "Adapt to the panel");
-        }
+        configurationChanged();
     }
 
     Kirigami.FormLayout {
-        QQC2.ComboBox {
-            objectName: "compactModeBox"
-            Kirigami.FormData.label: KI18n.i18nc("@label:listbox", "In the panel show:")
-            model: root.compactModes.map(mode => root.compactModeLabel(mode))
-            currentIndex: Math.max(0, root.compactModes.indexOf(root.cfg_compactMode))
-            onActivated: index => root.cfg_compactMode = root.compactModes[index]
+        QQC2.CheckBox {
+            objectName: "showPanelNameBox"
+            Kirigami.FormData.label: KI18n.i18nc("@title:group", "In the panel show:")
+            checked: root.cfg_compactMode !== "iconOnly"
+            text: KI18n.i18nc("@option:check", "Device name")
+            onToggled: {
+                root.cfg_compactMode = checked ? "adaptive" : "iconOnly";
+                root.configurationChanged();
+            }
         }
 
         Item {
