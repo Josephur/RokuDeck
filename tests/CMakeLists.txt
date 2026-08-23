@@ -46,6 +46,14 @@ target_include_directories(device-registry-test PRIVATE ${PROJECT_SOURCE_DIR}/sr
 target_link_libraries(device-registry-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
 add_test(NAME device-registry COMMAND device-registry-test)
 
+add_executable(config-store-test unit/config_store_test.cpp)
+target_include_directories(config-store-test
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(config-store-test PRIVATE RokuDeck::Daemon Qt6::Core Qt6::Test)
+add_test(NAME config-store COMMAND config-store-test)
+
 add_executable(poll-scheduler-test unit/poll_scheduler_test.cpp)
 target_include_directories(poll-scheduler-test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(poll-scheduler-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
