@@ -252,7 +252,12 @@ constexpr int maximumDepth = 16;
         return {ParseError{ParseError::Code::InvalidValue,
             QStringLiteral("stateChange keys mismatch")}};
     }
-    auto predicate = parsePredicate(object, 0);
+    auto predicate = parsePredicate(
+        QJsonObject{{QStringLiteral("device"), QStringLiteral("*")},
+            {QStringLiteral("field"), object.value(QStringLiteral("field"))},
+            {QStringLiteral("op"), object.value(QStringLiteral("op"))},
+            {QStringLiteral("value"), object.value(QStringLiteral("value"))}},
+        0);
     if (!predicate) {
         return {ParseError{predicate.error()}};
     }
@@ -449,38 +454,32 @@ ParseResult<RuleDocument> parseRule(const QJsonObject& object)
 {
     static const QStringList modes{QStringLiteral("single"), QStringLiteral("restart"),
         QStringLiteral("queued")};
+    static const QSet<QString> knownKeys{QStringLiteral("schemaVersion"),
+        QStringLiteral("id"), QStringLiteral("name"), QStringLiteral("enabled"),
+        QStringLiteral("mode"), QStringLiteral("devices"),
+        QStringLiteral("trigger"), QStringLiteral("conditions"),
+        QStringLiteral("actions"), QStringLiteral("lastRun")};
+
+    // Strict about unknown keys, permissive about which optional blocks are
+    // present: stored documents carry everything, AddRule input may omit the
+    // daemon-owned fields and the wildcard device list.
+    const QList<QString> presentKeys = object.keys();
+    for (const QString& key : presentKeys) {
+        if (!knownKeys.contains(key)) {
+            return {ParseError{ParseError::Code::InvalidValue,
+                QStringLiteral("rule keys mismatch: unknown %1").arg(key)}};
+        }
+    }
+    if (!object.contains(QStringLiteral("name"))
+        || !object.contains(QStringLiteral("trigger"))
+        || !object.contains(QStringLiteral("actions"))) {
+        return {ParseError{ParseError::Code::InvalidValue,
+            QStringLiteral("rule keys mismatch: name/trigger/actions required")}};
+    }
 
     const bool hasConditions = object.contains(QStringLiteral("conditions"))
         && !object.value(QStringLiteral("conditions")).isNull();
     const bool hasLastRun = object.contains(QStringLiteral("lastRun"));
-
-    QStringList base{QStringLiteral("schemaVersion"), QStringLiteral("name"),
-        QStringLiteral("devices"), QStringLiteral("trigger"),
-        QStringLiteral("actions")};
-    QStringList full = base + QStringList{QStringLiteral("id"),
-        QStringLiteral("enabled"), QStringLiteral("mode")};
-    if (hasConditions) {
-        full.append(QStringLiteral("conditions"));
-    }
-    if (hasLastRun) {
-        full.append(QStringLiteral("lastRun"));
-    }
-
-    // Accept the complete stored form, or the AddRule form without daemon-
-    // owned fields (id/enabled/mode may still come from a full document).
-    bool keysOk = exactKeys(object, full);
-    if (!keysOk && !hasConditions && !hasLastRun) {
-        keysOk = exactKeys(object, base)
-            || exactKeys(object,
-                   base + QStringList{QStringLiteral("enabled"), QStringLiteral("mode")})
-            || exactKeys(object,
-                   base + QStringList{QStringLiteral("enabled"), QStringLiteral("mode"),
-                       QStringLiteral("id")});
-    }
-    if (!keysOk) {
-        return {ParseError{ParseError::Code::InvalidValue,
-            QStringLiteral("rule keys mismatch")}};
-    }
 
     RuleDocument rule;
     rule.name = object.value(QStringLiteral("name")).toString();
