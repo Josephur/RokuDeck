@@ -11,6 +11,7 @@ add_library(rokudeck-core STATIC
   process_runner.h
   qprocess_runner.cpp
   rds_client.cpp
+  rule_model.cpp
 )
 
 add_library(RokuDeck::Core ALIAS rokudeck-core)

@@ -23,6 +23,15 @@ target_include_directories(device-parsers-test PRIVATE ${PROJECT_SOURCE_DIR}/src
 target_link_libraries(device-parsers-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
 add_test(NAME device-parsers COMMAND device-parsers-test)
 
+add_executable(rule-model-test unit/rule_model_test.cpp)
+# Match the include/define block shape of device-parsers-test above it.
+target_include_directories(rule-model-test
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(rule-model-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
+add_test(NAME rule-model COMMAND rule-model-test)
+
 add_executable(rds-process-helper support/process_helper.cpp)
 target_link_libraries(rds-process-helper PRIVATE Qt6::Core)
 
