@@ -72,7 +72,7 @@ class DaemonProxy final : public QObject {
     std::unique_ptr<IoGithubJosephurRokuDeck1Interface> m_interface;
     std::unique_ptr<QDBusServiceWatcher> m_ownerWatcher;
     QHash<QString, QString> m_requestSerials;
-    QHash<QString, QSet<QString>> m_awaitingSnapshot;
+    QHash<QString, QDateTime> m_lastSnapshotAt;
     QStringList m_registeredSerials;
     quint64 m_generation = 0;
     int m_busyCount = 0;

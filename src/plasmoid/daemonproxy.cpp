@@ -207,6 +207,7 @@ std::optional<DeviceStateSnapshot> parseSnapshot(const QString& json) {
         if (!capturedAt.isValid()) {
             return std::nullopt;
         }
+        snapshot.capturedAt = capturedAt;
         snapshot.stale = false;
     }
     return snapshot;
@@ -260,6 +261,7 @@ void DaemonProxy::start() {
     }
     m_active = true;
     ++m_generation;
+    m_lastSnapshotAt.clear();
     refresh();
 }
 
@@ -269,6 +271,7 @@ void DaemonProxy::stop() {
     }
     m_active = false;
     ++m_generation;
+    m_lastSnapshotAt.clear();
     if (m_interface) {
         static_cast<void>(m_interface->UnregisterClient(m_clientId));
     }
@@ -478,6 +481,7 @@ void DaemonProxy::handleServiceOwnerChanged(const QString& service, const QStrin
     Q_UNUSED(service)
     Q_UNUSED(oldOwner)
     ++m_generation;
+    m_lastSnapshotAt.clear();
     m_registrationPending = false;
     m_registered = false;
     m_registeredSerials.clear();
@@ -519,15 +523,22 @@ void DaemonProxy::applySnapshotJson(const QString& expectedSerial, const QString
         Q_EMIT errorOccurred(i18nc("@info", "The RokuDeck device snapshot is invalid"));
         return;
     }
-    m_devices->applySnapshot(*snapshot);
     if (snapshot->stale) {
-        return;
+        // Already applied nothing new; keep whatever freshness we had.
+    } else {
+        // Post-command pulls race the periodic push: an older capture can
+        // finish after a newer one. Applying it out of order would, for
+        // example, flip the mute icon back while the television really is
+        // muted - so strictly older readings are dropped.
+        const QDateTime appliedAt = m_lastSnapshotAt.value(expectedSerial);
+        if (snapshot->capturedAt.isValid() && appliedAt.isValid()
+            && snapshot->capturedAt < appliedAt) {
+            return;
+        }
     }
-
-    const QSet<QString> confirmed = m_awaitingSnapshot.take(expectedSerial);
-    for (const QString& requestId : confirmed) {
-        m_devices->finishPendingCommand(expectedSerial, requestId);
-        m_requestSerials.remove(requestId);
+    m_devices->applySnapshot(*snapshot);
+    if (snapshot->capturedAt.isValid()) {
+        m_lastSnapshotAt[expectedSerial] = snapshot->capturedAt;
     }
 }
 
@@ -596,7 +607,6 @@ void DaemonProxy::clearPendingCommands() {
         m_devices->finishPendingCommand(it.value(), it.key());
     }
     m_requestSerials.clear();
-    m_awaitingSnapshot.clear();
 }
 
 void DaemonProxy::handleCommandFinished(const QString& requestId, const QString& resultJson) {
@@ -620,7 +630,14 @@ void DaemonProxy::handleCommandFinished(const QString& requestId, const QString&
         Q_EMIT errorOccurred(i18nc("@info", "The Roku command failed"));
         return;
     }
-    m_awaitingSnapshot[serial].insert(requestId);
+    // The command is done, so re-enable input right away: holding buttons
+    // until the next poll lands would stall repeated keypresses by seconds.
+    // Pull a fresh snapshot immediately so any state change the command
+    // caused (e.g. standby after power off) gates the controls without
+    // waiting for the next periodic poll.
+    m_devices->finishPendingCommand(serial, requestId);
+    m_requestSerials.remove(requestId);
+    requestSnapshot(serial);
 }
 
 } // namespace RokuDeck

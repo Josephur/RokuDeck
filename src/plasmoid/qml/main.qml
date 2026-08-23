@@ -25,10 +25,54 @@ PlasmoidItem {
     switchWidth: Kirigami.Units.gridUnit * 32
     switchHeight: Kirigami.Units.gridUnit * 22
 
-    toolTipMainText: KI18n.i18n("RokuDeck")
-    toolTipSubText: root.bridge.available
-        ? KI18n.i18n("Control your selected Roku device")
-        : KI18n.i18n("RokuDeck daemon is unavailable")
+    // The painted television doubles as the status vocabulary for the
+    // tooltip; a hidden instance maps the selected device's state to text.
+    TvStatusIcon {
+        id: tooltipStatus
+
+        visible: false
+        health: root.selectedSummary?.health ?? "offline"
+        power: root.selectedSummary?.power ?? "unknown"
+        stale: root.selectedSummary?.stale ?? true
+    }
+
+    property var selectedSummary: null
+
+    Instantiator {
+        model: root.bridge.devices
+
+        delegate: QtObject {
+            required property string serial
+            required property string name
+            required property string health
+            required property string power
+            required property bool stale
+
+            readonly property bool selected: serial === root.bridge.selectedSerial
+
+            onSelectedChanged: {
+                if (selected) {
+                    root.selectedSummary = this;
+                } else if (root.selectedSummary === this) {
+                    root.selectedSummary = null;
+                }
+            }
+            Component.onCompleted: {
+                if (selected) {
+                    root.selectedSummary = this;
+                }
+            }
+        }
+    }
+
+    toolTipMainText: root.selectedSummary
+        ? root.selectedSummary.name
+        : KI18n.i18n("RokuDeck")
+    toolTipSubText: !root.bridge.available
+        ? KI18n.i18n("RokuDeck daemon is unavailable")
+        : (root.selectedSummary
+           ? tooltipStatus.statusText
+           : KI18n.i18n("Select a Roku device to control"))
 
     Plasmoid.icon: "video-television"
     Plasmoid.status: root.bridge.available
@@ -61,22 +105,9 @@ PlasmoidItem {
         onTriggered: root.bridge.refresh()
     }
 
-    PlasmaCore.Action {
-        id: settingsAction
-
-        readonly property var internalConfigureAction: Plasmoid.internalAction("configure")
-
-        text: KI18n.i18n("Configure RokuDeck…")
-        icon.name: "configure"
-        enabled: internalConfigureAction !== null
-        onTriggered: {
-            if (internalConfigureAction) {
-                internalConfigureAction.trigger();
-            }
-        }
-    }
-
-    Plasmoid.contextualActions: [refreshAction, settingsAction]
+    // Plasma provides its own "Configure Widget…" entry automatically;
+    // adding ours would show two configure actions in the context menu.
+    Plasmoid.contextualActions: [refreshAction]
 
     // The configured device is restored once the daemon has told us the device
     // exists; the bridge rejects a serial it does not know, so applying this on

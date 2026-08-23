@@ -69,6 +69,13 @@ QString fullSnapshot(const QString& serial) {
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
+QString snapshotWith(const QString& serial, bool muted, const QString& capturedAt) {
+    QJsonObject object = QJsonDocument::fromJson(fullSnapshot(serial).toUtf8()).object();
+    object.insert(QStringLiteral("muted"), muted);
+    object.insert(QStringLiteral("capturedAt"), capturedAt);
+    return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+}
+
 template <typename Applet> std::unique_ptr<Applet> createApplet() {
     if constexpr (std::is_base_of_v<Plasma::Applet, Applet>) {
         return std::make_unique<Applet>(nullptr, KPluginMetaData(), QVariantList());
@@ -96,6 +103,7 @@ class FakeDaemon final : public QObject, protected QDBusContext {
 
     QStringList registrationAttempts;
     QStringList unregistrationAttempts;
+    mutable QStringList snapshotRequests;
     QSet<QString> activeClients;
     QStringList addedDevices;
     QStringList updatedDevices;
@@ -142,6 +150,7 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     }
 
     QString GetSnapshot(const QString& serial) const {
+        snapshotRequests.append(serial);
         return fullSnapshot(serial);
     }
 
@@ -261,7 +270,9 @@ class PlasmoidBridgeTest : public QObject {
     void malformedPayloadMarksExistingStateStale();
     void malformedSnapshotsAreRejectedAtomically_data();
     void malformedSnapshotsAreRejectedAtomically();
-    void successfulCommandRemainsPendingUntilFreshSnapshot();
+    void successfulCommandReenablesInputWithoutWaitingForAPoll();
+    void successfulCommandTriggersAFreshSnapshot();
+    void aLateStaleSnapshotCannotUndoNewerState();
     void staleRegistrationReplyCannotUnregisterReplacementOwner();
     void deviceListExposesDaemonOwnedPreferences();
     void deviceManagementReachesTheDaemonAndReportsRejection();
@@ -467,7 +478,7 @@ void PlasmoidBridgeTest::malformedSnapshotsAreRejectedAtomically() {
     QCOMPARE(model.data(index, DevicesModel::StaleRole).toBool(), true);
 }
 
-void PlasmoidBridgeTest::successfulCommandRemainsPendingUntilFreshSnapshot() {
+void PlasmoidBridgeTest::successfulCommandReenablesInputWithoutWaitingForAPoll() {
     DevicesModel model;
     DaemonProxy proxy(&model, QStringLiteral("PROXY-COMMAND"));
     proxy.start();
@@ -481,12 +492,77 @@ void PlasmoidBridgeTest::successfulCommandRemainsPendingUntilFreshSnapshot() {
         QStringLiteral("REQUEST-ONE"),
         QStringLiteral(
             R"json({"schemaVersion":1,"requestId":"REQUEST-ONE","serial":"SERIAL-A","success":true})json"));
+    // Holding the buttons disabled until the next poll would make repeated
+    // keypresses (d-pad navigation) wait seconds between each press; a fresh
+    // snapshot refreshes labels on its own schedule regardless.
     QTest::qWait(25);
-    QCOMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), true);
+    QCOMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), false);
 
+    // A snapshot still applies normally afterwards.
     Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
                                          fullSnapshot(QStringLiteral("SERIAL-A")));
     QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), false);
+}
+
+void PlasmoidBridgeTest::successfulCommandTriggersAFreshSnapshot() {
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-COMMAND"));
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    // State changes caused by a command (e.g. standby after power off) must
+    // reach the widget quickly, so a finished command pulls a snapshot right
+    // away instead of waiting for the next periodic poll.
+    const int before = m_fake->snapshotRequests.count(QStringLiteral("SERIAL-A"));
+
+    proxy.sendCommand(QStringLiteral("SERIAL-A"), QStringLiteral("keypress"),
+                      QStringLiteral("Home"));
+    const QModelIndex index = firstIndex(model);
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), true);
+    Q_EMIT m_fake->CommandFinished(
+        QStringLiteral("REQUEST-ONE"),
+        QStringLiteral(
+            R"json({"schemaVersion":1,"requestId":"REQUEST-ONE","serial":"SERIAL-A","success":true})json"));
+
+    QTRY_COMPARE(m_fake->snapshotRequests.count(QStringLiteral("SERIAL-A")), before + 1);
+}
+
+void PlasmoidBridgeTest::aLateStaleSnapshotCannotUndoNewerState() {
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-ORDER"));
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex index = firstIndex(model);
+
+    // Baseline reading.
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), false,
+                     QStringLiteral("2026-08-20T16:00:00.000-04:00")));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // The user tapped mute and the newer capture says muted.
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), true,
+                     QStringLiteral("2026-08-20T16:05:00.000-04:00")));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+
+    // A post-command pull started earlier can finish after the push above;
+    // applying it would flip the mute icon back while the television really
+    // is muted. Late stale readings must be dropped.
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), false,
+                     QStringLiteral("2026-08-20T16:00:00.000-04:00")));
+    QTest::qWait(50);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+
+    // Genuinely newer readings keep flowing through.
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), false,
+                     QStringLiteral("2026-08-20T16:06:00.000-04:00")));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
 }
 
 void PlasmoidBridgeTest::staleRegistrationReplyCannotUnregisterReplacementOwner() {

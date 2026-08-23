@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QDateTime>
 #include <QList>
 #include <QSet>
 #include <QStringList>
@@ -24,6 +25,7 @@ struct DeviceDescription {
 
 struct DeviceStateSnapshot {
     QString serial;
+    QDateTime capturedAt;
     std::optional<QString> name;
     std::optional<QString> address;
     std::optional<QString> health;
