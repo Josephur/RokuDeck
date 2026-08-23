@@ -946,6 +946,53 @@ QString DaemonService::AddRule(const QString& ruleJsonText) {
     return QString::fromUtf8(QJsonDocument(ruleJson(rule)).toJson());
 }
 
+QList<RuleDocument>::iterator DaemonService::findRule(const QString& ruleId) {
+    return std::find_if(m_rules.begin(), m_rules.end(),
+                        [&ruleId](const RuleDocument& rule) { return rule.id == ruleId; });
+}
+
+void DaemonService::UpdateRule(const QString& ruleJsonText) {
+    const QJsonDocument document = QJsonDocument::fromJson(ruleJsonText.toUtf8());
+    if (!document.isObject()) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("invalidRule"));
+        return;
+    }
+    const auto parsed = parseRule(document.object());
+    if (!parsed) {
+        sendErrorReply(QDBusError::InvalidArgs, parsed.error().message);
+        return;
+    }
+    const auto existing = findRule(parsed.value().id);
+    if (existing == m_rules.end()) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknownRule"));
+        return;
+    }
+    // Replacement is in place: the rule keeps its insertion position.
+    *existing = parsed.value();
+    announceRules();
+}
+
+void DaemonService::DeleteRule(const QString& ruleId) {
+    const auto existing = findRule(ruleId);
+    if (existing == m_rules.end()) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknownRule"));
+        return;
+    }
+    m_rules.erase(existing);
+    announceRules();
+}
+
+void DaemonService::SetRuleEnabled(const QString& ruleId, bool enabled) {
+    const auto existing = findRule(ruleId);
+    if (existing == m_rules.end()) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknownRule"));
+        return;
+    }
+    // Toggling never round-trips the whole definition.
+    existing->enabled = enabled;
+    announceRules();
+}
+
 DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& serial,
                                                                const QString& commandJson) const {
     constexpr qsizetype maximumCommandBytes = 2048;

@@ -73,6 +73,9 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] QString SendCommand(const QString& serial, const QString& commandJson);
     [[nodiscard]] QString ListRules() const;
     [[nodiscard]] QString AddRule(const QString& ruleJson);
+    void UpdateRule(const QString& ruleJson);
+    void DeleteRule(const QString& ruleId);
+    void SetRuleEnabled(const QString& ruleId, bool enabled);
 
   Q_SIGNALS:
     void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
@@ -135,6 +138,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] QString rulesJson() const;
     [[nodiscard]] QString nextRuleId() const;
     void announceRules();
+    [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,

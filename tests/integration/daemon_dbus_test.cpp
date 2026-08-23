@@ -72,6 +72,9 @@ class DaemonDbusTest final : public QObject {
     void powerAndAudioKeypressesHonourObservedDeviceState();
     void addRuleAssignsIdPersistsAndAnnounces();
     void addRuleRejectsClientOwnedAndMalformedPayloads();
+    void updateRuleReplacesDefinitionInPlaceAndPersists();
+    void deleteRuleRemovesAndLaterMutationsError();
+    void setRuleEnabledFlipsWithoutTouchingDefinition();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -84,6 +87,8 @@ class DaemonDbusTest final : public QObject {
     [[nodiscard]] static bool waitForHelperRegistration(QProcess& client);
     void recreateDaemon(std::chrono::milliseconds idleGrace = 30s,
                         DaemonService::DeadlineRemaining deadlineRemaining = {});
+    QString addManualRule(const QString& name);
+    QJsonObject rulesListing() const;
 
     QTemporaryDir m_configDirectory;
     QString m_configPath;
@@ -219,6 +224,8 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
         QStringLiteral("io.github.josephur.RokuDeck1.Error.TransportFailure")));
     QVERIFY(introspectionXml.contains(
         QStringLiteral("io.github.josephur.RokuDeck1.Error.InvalidRule")));
+    QVERIFY(introspectionXml.contains(
+        QStringLiteral("io.github.josephur.RokuDeck1.Error.UnknownRule")));
 
     QHash<QString, QStringList> methods;
     QHash<QString, QStringList> signals;
@@ -248,7 +255,7 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
         }
     }
     QVERIFY2(!xml.hasError(), qPrintable(xml.errorString()));
-    QCOMPARE(methods.size(), 14);
+    QCOMPARE(methods.size(), 17);
     QCOMPARE(methods.value(QStringLiteral("ListDevices")), QStringList{QStringLiteral("out:s")});
     QCOMPARE(methods.value(QStringLiteral("GetSnapshot")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
@@ -279,6 +286,10 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
     QCOMPARE(methods.value(QStringLiteral("ListRules")), QStringList{QStringLiteral("out:s")});
     QCOMPARE(methods.value(QStringLiteral("AddRule")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
+    QCOMPARE(methods.value(QStringLiteral("UpdateRule")), QStringList{QStringLiteral("in:s")});
+    QCOMPARE(methods.value(QStringLiteral("DeleteRule")), QStringList{QStringLiteral("in:s")});
+    QCOMPARE(methods.value(QStringLiteral("SetRuleEnabled")),
+             QStringList({QStringLiteral("in:s"), QStringLiteral("in:b")}));
     QCOMPARE(signals.size(), 4);
     QCOMPARE(signals.value(QStringLiteral("DeviceSnapshotChanged")),
              QStringList({QStringLiteral("s"), QStringLiteral("s")}));
@@ -999,6 +1010,15 @@ namespace {
     return serials;
 }
 
+[[nodiscard]] QStringList listedRuleNames(const QJsonObject& listing) {
+    QStringList names;
+    const QJsonArray rules = listing.value(QStringLiteral("rules")).toArray();
+    for (const QJsonValue& entry : rules) {
+        names.append(entry.toObject().value(QStringLiteral("name")).toString());
+    }
+    return names;
+}
+
 } // namespace
 
 void DaemonDbusTest::deviceManagementAddsRenamesAndRemovesDevices() {
@@ -1557,6 +1577,132 @@ void DaemonDbusTest::addRuleRejectsClientOwnedAndMalformedPayloads() {
                  .toArray()
                  .size(),
              0);
+}
+
+QString DaemonDbusTest::addManualRule(const QString& name) {
+    const QString input = QStringLiteral(
+        R"json({"name":"%1","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Select"}]})json").arg(name);
+    const QDBusMessage created = waitForReply(m_proxy->AddRule(input));
+    if (created.type() == QDBusMessage::ErrorMessage) {
+        QTest::qFail(qPrintable(QStringLiteral("AddRule fixture failed: %1")
+                                    .arg(created.errorMessage())),
+                     __FILE__, __LINE__);
+        return {};
+    }
+    return jsonResult(created).value(QStringLiteral("id")).toString();
+}
+
+QJsonObject DaemonDbusTest::rulesListing() const {
+    return jsonResult(waitForReply(m_proxy->ListRules()));
+}
+
+void DaemonDbusTest::updateRuleReplacesDefinitionInPlaceAndPersists() {
+    const QString firstId = addManualRule(QStringLiteral("Movie time"));
+    addManualRule(QStringLiteral("Second entry"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    // A complete replacement document: absent optional blocks would clear.
+    const QString renamed = QStringLiteral(
+        R"json({"id":"%1","name":"Premiere night","enabled":true,"mode":"restart",)json"
+        R"json("devices":[],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json").arg(firstId);
+    const QDBusMessage reply = waitForReply(m_proxy->UpdateRule(renamed));
+    QVERIFY2(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
+
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(listedRuleNames(rulesListing()),
+             QStringList({QStringLiteral("Premiere night"), QStringLiteral("Second entry")}));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("mode"))
+                 .toString(),
+             QStringLiteral("restart"));
+
+    recreateDaemon();
+    QCOMPARE(listedRuleNames(rulesListing()),
+             QStringList({QStringLiteral("Premiere night"), QStringLiteral("Second entry")}));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("id"))
+                 .toString(),
+             firstId);
+}
+
+void DaemonDbusTest::deleteRuleRemovesAndLaterMutationsError() {
+    const QString doomedId = addManualRule(QStringLiteral("Doomed"));
+    addManualRule(QStringLiteral("Survivor"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    const QDBusMessage removed = waitForReply(m_proxy->DeleteRule(doomedId));
+    QVERIFY2(removed.type() != QDBusMessage::ErrorMessage, qPrintable(removed.errorMessage()));
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(listedRuleNames(rulesListing()), QStringList{QStringLiteral("Survivor")});
+
+    // Every mutation of a deleted id reports the typed unknown-rule error.
+    const QString zombieUpdate = QStringLiteral(
+        R"json({"id":"%1","name":"Zombie","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json").arg(doomedId);
+    const QDBusMessage resurrected = waitForReply(m_proxy->UpdateRule(zombieUpdate));
+    QCOMPARE(resurrected.type(), QDBusMessage::ErrorMessage);
+    QVERIFY2(resurrected.errorMessage().contains(QStringLiteral("unknownRule")),
+             qPrintable(resurrected.errorMessage()));
+
+    const QDBusMessage redeleted = waitForReply(m_proxy->DeleteRule(doomedId));
+    QCOMPARE(redeleted.type(), QDBusMessage::ErrorMessage);
+    QVERIFY2(redeleted.errorMessage().contains(QStringLiteral("unknownRule")),
+             qPrintable(redeleted.errorMessage()));
+
+    const QDBusMessage retoggle =
+        waitForReply(m_proxy->SetRuleEnabled(doomedId, false));
+    QCOMPARE(retoggle.type(), QDBusMessage::ErrorMessage);
+    QVERIFY2(retoggle.errorMessage().contains(QStringLiteral("unknownRule")),
+             qPrintable(retoggle.errorMessage()));
+
+    recreateDaemon();
+    QCOMPARE(listedRuleNames(rulesListing()), QStringList{QStringLiteral("Survivor")});
+}
+
+void DaemonDbusTest::setRuleEnabledFlipsWithoutTouchingDefinition() {
+    const QString ruleId = addManualRule(QStringLiteral("Toggle me"));
+    const QJsonObject original =
+        rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+    const QDBusMessage disabled = waitForReply(m_proxy->SetRuleEnabled(ruleId, false));
+    QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
+             qPrintable(disabled.errorMessage()));
+    QCOMPARE(changed.size(), 1);
+
+    // The toggle must not round-trip or mutate the definition itself.
+    const QJsonObject flipped =
+        rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+    QJsonObject expected = original;
+    expected.insert(QStringLiteral("enabled"), false);
+    QCOMPARE(flipped, expected);
+
+    recreateDaemon();
+    const QJsonObject reloaded =
+        rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+    QCOMPARE(reloaded, expected);
+
+    const QDBusMessage enabledAgain = waitForReply(m_proxy->SetRuleEnabled(ruleId, true));
+    QVERIFY2(enabledAgain.type() != QDBusMessage::ErrorMessage,
+             qPrintable(enabledAgain.errorMessage()));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("enabled"))
+                 .toBool(),
+             true);
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

@@ -10,6 +10,7 @@
     <annotation name="io.github.josephur.RokuDeck1.Error.Timeout" value="exitCode=7"/>
     <annotation name="io.github.josephur.RokuDeck1.Error.TransportFailure" value="exitCode=7"/>
     <annotation name="io.github.josephur.RokuDeck1.Error.InvalidRule" value="exitCode=8"/>
+    <annotation name="io.github.josephur.RokuDeck1.Error.UnknownRule" value="exitCode=9"/>
     <method name="ListDevices">
       <arg direction="out" type="s" name="devicesJson"/>
     </method>
@@ -74,6 +75,16 @@
     <method name="AddRule">
       <arg direction="in" type="s" name="ruleJson"/>
       <arg direction="out" type="s" name="ruleJson"/>
+    </method>
+    <method name="UpdateRule">
+      <arg direction="in" type="s" name="ruleJson"/>
+    </method>
+    <method name="DeleteRule">
+      <arg direction="in" type="s" name="ruleId"/>
+    </method>
+    <method name="SetRuleEnabled">
+      <arg direction="in" type="s" name="ruleId"/>
+      <arg direction="in" type="b" name="enabled"/>
     </method>
     <signal name="RulesChanged">
       <arg type="s" name="rulesJson"/>
