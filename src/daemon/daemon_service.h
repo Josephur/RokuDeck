@@ -8,6 +8,7 @@
 #include "core/poll_scheduler.h"
 #include "core/process_runner.h"
 #include "core/rds_client.h"
+#include "core/rule_model.h"
 
 #include <QDBusConnection>
 #include <QDBusContext>
@@ -70,11 +71,14 @@ class DaemonService final : public QObject, protected QDBusContext {
     void SetDeviceOrder(const QStringList& serials);
     [[nodiscard]] QString TestDevice(const QString& address);
     [[nodiscard]] QString SendCommand(const QString& serial, const QString& commandJson);
+    [[nodiscard]] QString ListRules() const;
+    [[nodiscard]] QString AddRule(const QString& ruleJson);
 
   Q_SIGNALS:
     void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
     void DeviceListChanged(const QString& devicesJson);
     void CommandFinished(const QString& requestId, const QString& resultJson);
+    void RulesChanged(const QString& rulesJson);
     void idleExitRequested();
 
   private Q_SLOTS:
@@ -128,6 +132,9 @@ class DaemonService final : public QObject, protected QDBusContext {
     void finishCommandWithError(const QString& requestId, const QString& serial,
                                 const QString& errorCode);
 
+    [[nodiscard]] QString rulesJson() const;
+    [[nodiscard]] QString nextRuleId() const;
+    void announceRules();
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,
@@ -146,6 +153,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     QDBusServiceWatcher m_ownerWatcher;
     QTimer m_idleTimer;
     QTimer m_pollTimer;
+    QList<RuleDocument> m_rules;
     QHash<QString, DeviceSnapshot> m_snapshots;
     QHash<QString, quint64> m_addressGenerations;
     QList<QDBusMessage> m_discoveryReplies;

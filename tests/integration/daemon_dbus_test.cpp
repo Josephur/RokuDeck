@@ -70,6 +70,8 @@ class DaemonDbusTest final : public QObject {
     void refreshPolicyBoundsHowOftenTheDaemonPollsADevice();
     void aUserChosenNameSurvivesDiscoveryAndPolling();
     void powerAndAudioKeypressesHonourObservedDeviceState();
+    void addRuleAssignsIdPersistsAndAnnounces();
+    void addRuleRejectsClientOwnedAndMalformedPayloads();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -215,6 +217,8 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
         introspectionXml.contains(QStringLiteral("io.github.josephur.RokuDeck1.Error.Timeout")));
     QVERIFY(introspectionXml.contains(
         QStringLiteral("io.github.josephur.RokuDeck1.Error.TransportFailure")));
+    QVERIFY(introspectionXml.contains(
+        QStringLiteral("io.github.josephur.RokuDeck1.Error.InvalidRule")));
 
     QHash<QString, QStringList> methods;
     QHash<QString, QStringList> signals;
@@ -244,7 +248,7 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
         }
     }
     QVERIFY2(!xml.hasError(), qPrintable(xml.errorString()));
-    QCOMPARE(methods.size(), 12);
+    QCOMPARE(methods.size(), 14);
     QCOMPARE(methods.value(QStringLiteral("ListDevices")), QStringList{QStringLiteral("out:s")});
     QCOMPARE(methods.value(QStringLiteral("GetSnapshot")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
@@ -272,12 +276,16 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
              QStringList{QStringLiteral("in:as")});
     QCOMPARE(methods.value(QStringLiteral("TestDevice")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
-    QCOMPARE(signals.size(), 3);
+    QCOMPARE(methods.value(QStringLiteral("ListRules")), QStringList{QStringLiteral("out:s")});
+    QCOMPARE(methods.value(QStringLiteral("AddRule")),
+             QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
+    QCOMPARE(signals.size(), 4);
     QCOMPARE(signals.value(QStringLiteral("DeviceSnapshotChanged")),
              QStringList({QStringLiteral("s"), QStringLiteral("s")}));
     QCOMPARE(signals.value(QStringLiteral("DeviceListChanged")), QStringList{QStringLiteral("s")});
     QCOMPARE(signals.value(QStringLiteral("CommandFinished")),
              QStringList({QStringLiteral("s"), QStringLiteral("s")}));
+    QCOMPARE(signals.value(QStringLiteral("RulesChanged")), QStringList{QStringLiteral("s")});
 
     QSignalSpy generatedSignal(m_proxy.get(),
                                &IoGithubJosephurRokuDeck1Interface::DeviceListChanged);
@@ -1467,6 +1475,88 @@ void DaemonDbusTest::powerAndAudioKeypressesHonourObservedDeviceState() {
     QCOMPARE(m_runner->lastRequest.arguments.last(2),
              QStringList({QStringLiteral("keypress"), QStringLiteral("Power")}));
     m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
+}
+
+void DaemonDbusTest::addRuleAssignsIdPersistsAndAnnounces() {
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+    const QString input =
+        QStringLiteral(R"json({"name":"Movie time","trigger":{"type":"manual"},)json"
+                       R"json("actions":[{"type":"keypress","key":"Select"}]})json");
+
+    const QDBusMessage created = waitForReply(m_proxy->AddRule(input));
+    QVERIFY2(created.type() != QDBusMessage::ErrorMessage,
+             qPrintable(created.errorMessage()));
+    const QJsonObject rule = jsonResult(created);
+    QVERIFY2(rule.value(QStringLiteral("id")).toString().startsWith(QLatin1Char('r')),
+             "the daemon must mint the rule id, not the caller");
+    QVERIFY2(rule.value(QStringLiteral("id")).toString().size() > 1,
+             "the minted rule id must carry entropy beyond the prefix");
+    QCOMPARE(rule.value(QStringLiteral("schemaVersion")).toInt(), 1);
+    QCOMPARE(rule.value(QStringLiteral("enabled")).toBool(), true);
+    QCOMPARE(rule.value(QStringLiteral("name")).toString(), QStringLiteral("Movie time"));
+    QCOMPARE(rule.value(QStringLiteral("trigger")).toObject().value(QStringLiteral("type")),
+             QJsonValue(QStringLiteral("manual")));
+    QVERIFY2(!rule.contains(QStringLiteral("lastRun")),
+             "a freshly created rule has never run");
+
+    const QJsonObject listing = jsonResult(waitForReply(m_proxy->ListRules()));
+    QCOMPARE(listing.value(QStringLiteral("schemaVersion")).toInt(), 1);
+    QCOMPARE(listing.value(QStringLiteral("rules")).toArray().size(), 1);
+    QCOMPARE(listing.value(QStringLiteral("rules")).toArray().at(0).toObject(), rule);
+
+    // The announcement is the same envelope ListRules serves.
+    QCOMPARE(changed.size(), 1);
+    const QJsonObject announced =
+        QJsonDocument::fromJson(changed.front().front().toString().toUtf8()).object();
+    QCOMPARE(announced, listing);
+
+    // Restarting the daemon against the same config keeps the rule.
+    recreateDaemon();
+    const QJsonObject reloaded = jsonResult(waitForReply(m_proxy->ListRules()));
+    QCOMPARE(reloaded.value(QStringLiteral("rules")).toArray().size(), 1);
+    QCOMPARE(reloaded.value(QStringLiteral("rules")).toArray().at(0).toObject(), rule);
+}
+
+void DaemonDbusTest::addRuleRejectsClientOwnedAndMalformedPayloads() {
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+    const QStringList rejected{
+        QStringLiteral("not json at all"),
+        // id and enabled are daemon-owned; supplying either is a contract breach.
+        QStringLiteral(
+            R"json({"id":"rCALLER","name":"X","trigger":{"type":"manual"},)json"
+            R"json("actions":[{"type":"keypress","key":"Home"}]})json"),
+        QStringLiteral(
+            R"json({"enabled":false,"name":"X","trigger":{"type":"manual"},)json"
+            R"json("actions":[{"type":"keypress","key":"Home"}]})json"),
+        QStringLiteral(
+            R"json({"name":"X","trigger":{"type":"telepathy"},)json"
+            R"json("actions":[{"type":"keypress","key":"Home"}]})json"),
+        QStringLiteral(R"json({"name":"X","trigger":{"type":"manual"}})json")};
+
+    for (const QString& payload : rejected) {
+        const QDBusMessage reply = waitForReply(m_proxy->AddRule(payload));
+        QVERIFY2(reply.type() == QDBusMessage::ErrorMessage,
+                 qPrintable(QStringLiteral("AddRule accepted %1").arg(payload)));
+        QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    }
+
+    // The daemon-owned field breaches name the violation; parse failures carry
+    // their specific validator message instead.
+    const QDBusMessage callerId =
+        waitForReply(m_proxy->AddRule(rejected.at(1)));
+    QVERIFY2(callerId.errorMessage().contains(QStringLiteral("invalidRule")),
+             qPrintable(callerId.errorMessage()));
+    const QDBusMessage unknownTrigger =
+        waitForReply(m_proxy->AddRule(rejected.at(3)));
+    QVERIFY2(unknownTrigger.errorMessage().contains(QStringLiteral("unknown trigger type")),
+             qPrintable(unknownTrigger.errorMessage()));
+
+    QCOMPARE(changed.size(), 0);
+    QCOMPARE(jsonResult(waitForReply(m_proxy->ListRules()))
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .size(),
+             0);
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

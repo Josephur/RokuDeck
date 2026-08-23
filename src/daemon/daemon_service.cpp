@@ -8,6 +8,7 @@
 #include "rokudeck1_adaptor.h"
 
 #include <QDBusError>
+#include <QRandomGenerator>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -253,6 +254,7 @@ DaemonService::DaemonService(QDBusConnection connection,
         m_deviceRegistry.upsert(device);
         m_addressGenerations.insert(device.serial, 1);
     }
+    m_rules = m_configStore->loadRules();
 
     m_idleTimer.setSingleShot(true);
     m_idleTimer.setInterval(static_cast<int>(std::min<std::chrono::milliseconds::rep>(
@@ -879,6 +881,69 @@ QString DaemonService::DiscoverDevices() {
         service->updateIdleTimer();
     });
     return {};
+}
+
+QString DaemonService::rulesJson() const {
+    QJsonArray array;
+    for (const RuleDocument& rule : m_rules) {
+        array.append(ruleJson(rule));
+    }
+    return QString::fromUtf8(
+        QJsonDocument(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                                  {QStringLiteral("rules"), array}})
+            .toJson(QJsonDocument::Compact));
+}
+
+void DaemonService::announceRules() {
+    m_configStore->saveRules(m_rules);
+    Q_EMIT RulesChanged(rulesJson());
+}
+
+QString DaemonService::nextRuleId() const {
+    static const QString alphabet =
+        QStringLiteral("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+    QString id;
+    do {
+        id = QStringLiteral("r");
+        while (id.size() < 9) {
+            id.append(alphabet.at(QRandomGenerator::global()->bounded(alphabet.size())));
+        }
+    } while (std::any_of(m_rules.cbegin(), m_rules.cend(),
+                         [&id](const RuleDocument& rule) { return rule.id == id; }));
+    return id;
+}
+
+QString DaemonService::ListRules() const {
+    return rulesJson();
+}
+
+QString DaemonService::AddRule(const QString& ruleJsonText) {
+    const QJsonDocument document = QJsonDocument::fromJson(ruleJsonText.toUtf8());
+    if (!document.isObject()) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("invalidRule"));
+        return {};
+    }
+    QJsonObject object = document.object();
+    // The daemon owns these fields; a client supplying them is a contract
+    // violation rather than an update.
+    for (const QString& key : {QStringLiteral("id"), QStringLiteral("enabled")}) {
+        if (object.contains(key)) {
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("invalidRule"));
+            return {};
+        }
+    }
+    object.insert(QStringLiteral("schemaVersion"), 1);
+    const auto parsed = parseRule(object);
+    if (!parsed) {
+        sendErrorReply(QDBusError::InvalidArgs, parsed.error().message);
+        return {};
+    }
+    RuleDocument rule = parsed.value();
+    rule.id = nextRuleId();
+    rule.enabled = true;
+    m_rules.append(rule);
+    announceRules();
+    return QString::fromUtf8(QJsonDocument(ruleJson(rule)).toJson());
 }
 
 DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& serial,
