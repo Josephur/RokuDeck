@@ -27,11 +27,12 @@ per-widget rule visibility filters.
   dispatch time. A rule naming only non-consenting devices reports `consent-blocked` in its
   last-run record instead of firing silently.
 - The per-device **volume ceiling** is an always-on policy, not a rule: absolute `setVolume`
-  from any source (automation action, future UI slider) clamps to `[0, ceiling]`. Absent
-  ceiling = unclamped. Relative ECP keys (`VolumeUp`/`VolumeDown`) cannot be clamped by the
-  protocol and stay exempt — the ceiling therefore governs automations and absolute setters,
-  not remote-style nudging. Changes take effect on the next volume command; no retroactive
-  adjustment.
+  from any source (automation action, future UI slider) clamps to `[0, ceiling]`. Relative
+  ECP keys cannot be clamped by the protocol, but the daemon still enforces best-effort:
+  before sending `VolumeUp`/`VolumeDown` it checks the latest observed snapshot volume and
+  skips the nudge if the device is already at or above the ceiling (latency-bound by poll
+  cadence, so documented as best-effort, not guaranteed). Ceiling changes take effect on the
+  next volume command; no retroactive adjustment.
 
 ## 3. Data model
 
@@ -57,8 +58,19 @@ Trigger :=
                                                   // edge-triggered on transitions
 | { "type": "manual" }
 
+// All schedule times are wall-clock in the daemon's current local timezone at
+// evaluation time (alarm-clock semantics): a DST or timezone change shifts the
+// wall-clock meaning by design. "Once" entries are likewise wall-clock, not
+// absolute instants.
+
 Field := power | screensaver | app | muted | volume | health
-Op    := is | isNot | gt | lt | between
+// power: on|standby|unknown; screensaver: active|inactive|unknown;
+// muted: true|false; volume: 0..100; app: app id string;
+// health: online|standby|degraded|offline (canonical DeviceHealth values).
+
+Op    := is | isNot | gt | lt | between   // gt/lt strict; between CLOSED [a,b]
+// stateChange fires only when the predicate's truth value flips between the
+// previous and current snapshot (old=20,new=20 never re-fires).
 
 CondTree :=
   { "all": [CondTree…] } | { "any": [CondTree…] } | { "not": CondTree }
@@ -81,9 +93,19 @@ Validation lives daemon-side in one place (mirrors `parseSnapshot` discipline): 
 types/ops/fields are rejected with a specific error string; `between` requires a two-value
 array; `delay` bounds enforced; recursion depth of `CondTree`/`ActionList` capped (16).
 
+### AddRule / UpdateRule contract
+
+- `AddRule` input **must** include `name`, `trigger`, `actions`, and **must not** include
+  `id`, `enabled`, or a last-run record. The daemon assigns the id, defaults
+  `enabled=true`, normalizes, stores, and returns the **complete** rule JSON.
+- `UpdateRule` takes a complete rule including its `id`; absent optional blocks clear them.
+- `SetRuleEnabled` exists so toggling never round-trips the whole definition.
+
 ## 4. Engine architecture
 
-The evaluator is a daemon-internal object fed by three sources:
+A single evaluator thread drains due work, which also makes simultaneous firings
+deterministic: rules execute one at a time, in storage (insertion) order within a tick.
+The evaluator is fed by three sources:
 
 1. **Snapshot diffs** — the poll pipeline already produces fresh snapshots; the engine keeps
    the previous snapshot per device and emits state-change events on field transitions
@@ -93,7 +115,10 @@ The evaluator is a daemon-internal object fed by three sources:
    fire and after system wake (re-check on every snapshot tick too). `once` triggers whose
    time passed while the daemon was down fire once at startup if less than 24h stale;
    otherwise skipped as stale.
-3. **D-Bus `RunRule`** — manual/macros from widgets or CLI.
+3. **D-Bus `RunRule`** — manual/macros from widgets or CLI. Any enabled rule may be invoked
+   this way regardless of its trigger type; the dispatch pipeline (conditions included)
+   runs identically, so a manual invocation whose extra conditions are false records
+   `condition-false` rather than bypassing them.
 
 Dispatch pipeline per firing:
 
@@ -101,7 +126,9 @@ Dispatch pipeline per firing:
 mode gate (see §5) → conditions (CondTree against latest snapshots)
   → for each action sequentially:
       delay → sleep within worker
-      runRule → recurse with cycle set (depth cap 16, then error event)
+      runRule → recurse unless id is already on this run's call stack;
+                a hit aborts only that branch and records `cycle-error`
+                (runtime detection; no save-time graph analysis)
       device action → resolve target(s) → allowAutomations check
         → SendCommand internal path (same validation/safety as widgets)
         → record outcome per device
@@ -109,14 +136,18 @@ mode gate (see §5) → conditions (CondTree against latest snapshots)
 
 Failures never abort sibling actions of an unrelated device; an action failing for one
 device continues the list for others. Each rule run appends a bounded last-run record
-(`lastFiredAt`, `outcome`: ok | partial | failed | consent-blocked | condition-false).
+(`lastFiredAt`, `outcome`: ok | partial | failed | consent-blocked | condition-false |
+dropped | cycle-error).
 
 ### Mode semantics (from HA practice)
 
 - `single`: drop the firing while a previous run is active.
 - `restart`: cancel the active run, start fresh.
-- `queued` (default): run after the active one finishes (bounded queue depth 8; overflow
-  drops oldest and records `dropped`).
+- `queued` (default): at most one pending run per rule beyond the active one; a firing
+  that arrives while both slots are busy is recorded as `dropped`. Per-rule coalescing
+  sidesteps the drop-oldest-vs-newest dilemma: state-change re-triggers collapse into the
+  pending slot naturally, and a time firing rare enough to overflow was pathological input
+  to begin with.
 
 ## 5. Storage
 
@@ -127,7 +158,8 @@ device continues the list for others. Each rule run appends a bounded last-run r
 [rules][<id>]
 Name=Night volume
 Enabled=true
-Definition={"schemaVersion":1,…}   ;; full Rule JSON minus id/name/enabled
+Definition={"schemaVersion":1,…}   ;; complete rule JSON; id/name/enabled mirrored
+                                   ;; into the group entries for fast listing
 ```
 
 Ordering is insertion order via group order, like devices. Writes go through the existing
@@ -185,8 +217,13 @@ daemon).
 - M1 Model, validation, storage, D-Bus CRUD + signals (engine stubbed: manual rules only).
 - M2 Time + interval scheduler with missed-fire policy.
 - M3 State-change triggers, condition trees, ifThenElse actions.
-- M4 Volume ceiling policy end-to-end (store → clamp → settings toggle).
-- M5 Automations settings page: list, summaries, structured editor.
+- M4 Engine↔D-Bus integration pass: real service end-to-end — timer wheel and
+  snapshot-diff firings produce `RulesChanged`/last-run records through the actual
+  interface, not fakes.
+- M5 Volume ceiling policy end-to-end (store → clamp → settings toggle).
+- M6 Automations settings page: list, summaries, structured editor.
 
 Each milestone ships green behind the full test suite; M1–M2 already deliver user-visible
-value (scheduled power-off macros).
+value (scheduled power-off macros). Summary sentences get golden-string tests pinning the
+renderer; their comprehensibility is a design goal validated by user feedback, not unit
+tests.
