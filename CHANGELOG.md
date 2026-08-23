@@ -6,6 +6,14 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- Added daemon-owned automation rules: a typed JSON rule model with strict validation, persistent
+  `[Rules]` storage that survives daemon restarts, and full CRUD over D-Bus (`ListRules`,
+  `AddRule`, `UpdateRule`, `DeleteRule`, `SetRuleEnabled`) with `RulesChanged` announcements so
+  every client sees edits from anywhere.
+- Added manual macro execution via `RunRule`: keypress and app-launch actions dispatch through the
+  exact same validated, safety-gated command pipeline as remote controls, honor per-device
+  automation consent (devices with automations disabled are never touched), and record a
+  last-run outcome on the rule. Scheduled triggers arrive in later milestones.
 - Fixed the settings dialog showing empty pages (config QML now lives beside the other UI files),
   and reduced the panel text choice to a simple "Device name" on/off switch.
 - Made remote controls fluid again: input re-enables as soon as each command finishes, only the
