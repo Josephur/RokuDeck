@@ -75,6 +75,10 @@ class DaemonDbusTest final : public QObject {
     void updateRuleReplacesDefinitionInPlaceAndPersists();
     void deleteRuleRemovesAndLaterMutationsError();
     void setRuleEnabledFlipsWithoutTouchingDefinition();
+    void runRuleWithoutConsentingDevicesIsConsentBlocked();
+    void runRuleDispatchesKeypressThroughTheCommandPipeline();
+    void runRuleReportsUnsupportedActionsAsFailed();
+    void runRuleWithUnknownIdErrors();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -88,6 +92,7 @@ class DaemonDbusTest final : public QObject {
     void recreateDaemon(std::chrono::milliseconds idleGrace = 30s,
                         DaemonService::DeadlineRemaining deadlineRemaining = {});
     QString addManualRule(const QString& name);
+    QString addRuleReturningId(const QString& payload);
     QJsonObject rulesListing() const;
 
     QTemporaryDir m_configDirectory;
@@ -255,7 +260,7 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
         }
     }
     QVERIFY2(!xml.hasError(), qPrintable(xml.errorString()));
-    QCOMPARE(methods.size(), 17);
+    QCOMPARE(methods.size(), 18);
     QCOMPARE(methods.value(QStringLiteral("ListDevices")), QStringList{QStringLiteral("out:s")});
     QCOMPARE(methods.value(QStringLiteral("GetSnapshot")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
@@ -290,6 +295,8 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
     QCOMPARE(methods.value(QStringLiteral("DeleteRule")), QStringList{QStringLiteral("in:s")});
     QCOMPARE(methods.value(QStringLiteral("SetRuleEnabled")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("in:b")}));
+    QCOMPARE(methods.value(QStringLiteral("RunRule")),
+             QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
     QCOMPARE(signals.size(), 4);
     QCOMPARE(signals.value(QStringLiteral("DeviceSnapshotChanged")),
              QStringList({QStringLiteral("s"), QStringLiteral("s")}));
@@ -1579,11 +1586,8 @@ void DaemonDbusTest::addRuleRejectsClientOwnedAndMalformedPayloads() {
              0);
 }
 
-QString DaemonDbusTest::addManualRule(const QString& name) {
-    const QString input = QStringLiteral(
-        R"json({"name":"%1","trigger":{"type":"manual"},)json"
-        R"json("actions":[{"type":"keypress","key":"Select"}]})json").arg(name);
-    const QDBusMessage created = waitForReply(m_proxy->AddRule(input));
+QString DaemonDbusTest::addRuleReturningId(const QString& payload) {
+    const QDBusMessage created = waitForReply(m_proxy->AddRule(payload));
     if (created.type() == QDBusMessage::ErrorMessage) {
         QTest::qFail(qPrintable(QStringLiteral("AddRule fixture failed: %1")
                                     .arg(created.errorMessage())),
@@ -1591,6 +1595,12 @@ QString DaemonDbusTest::addManualRule(const QString& name) {
         return {};
     }
     return jsonResult(created).value(QStringLiteral("id")).toString();
+}
+
+QString DaemonDbusTest::addManualRule(const QString& name) {
+    return addRuleReturningId(QStringLiteral(
+        R"json({"name":"%1","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Select"}]})json").arg(name));
 }
 
 QJsonObject DaemonDbusTest::rulesListing() const {
@@ -1703,6 +1713,108 @@ void DaemonDbusTest::setRuleEnabledFlipsWithoutTouchingDefinition() {
                  .value(QStringLiteral("enabled"))
                  .toBool(),
              true);
+}
+
+void DaemonDbusTest::runRuleWithoutConsentingDevicesIsConsentBlocked() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.70")});
+    const QDBusMessage denied =
+        call(QStringLiteral("UpdateDevice"),
+             {QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"allowAutomations":false})json")});
+    QVERIFY2(denied.type() != QDBusMessage::ErrorMessage, qPrintable(denied.errorMessage()));
+    const QString ruleId = addManualRule(QStringLiteral("Quiet hour"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("consent-blocked"));
+
+    // The last-run record lands on the stored rule and is announced.
+    QCOMPARE(changed.size(), 1);
+    const QJsonObject rule = rulesListing()
+                                 .value(QStringLiteral("rules"))
+                                 .toArray()
+                                 .at(0)
+                                 .toObject();
+    QCOMPARE(rule.value(QStringLiteral("id")).toString(), ruleId);
+    QCOMPARE(rule.value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("consent-blocked"));
+    QVERIFY2(!rule.value(QStringLiteral("lastRun"))
+                  .toObject()
+                  .value(QStringLiteral("lastFiredAt"))
+                  .toString()
+                  .isEmpty(),
+             "a recorded run must carry its timestamp");
+
+    // Consent gating happens before anything reaches the device.
+    QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::runRuleDispatchesKeypressThroughTheCommandPipeline() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.71")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Movie time","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
+
+    // The macro travels the exact SendCommand pipeline: same rds invocation.
+    QCOMPARE(m_runner->requests.size(), 1);
+    QCOMPARE(m_runner->lastRequest.arguments.last(2),
+             QStringList({QStringLiteral("keypress"), QStringLiteral("Home")}));
+    QVERIFY2(m_runner->lastRequest.arguments.contains(QStringLiteral("198.51.100.71")),
+             "the macro must target the consenting device's address");
+}
+
+void DaemonDbusTest::runRuleReportsUnsupportedActionsAsFailed() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.72")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Loud evening","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":20}]})json"));
+
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("failed"));
+    // An unsupported action must never reach a device.
+    QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::runRuleWithUnknownIdErrors() {
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(QStringLiteral("rNOPE")));
+    QCOMPARE(run.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(run.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    QVERIFY2(run.errorMessage().contains(QStringLiteral("unknownRule")),
+             qPrintable(run.errorMessage()));
+    QVERIFY(m_runner->requests.isEmpty());
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

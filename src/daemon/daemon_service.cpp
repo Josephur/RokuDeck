@@ -8,6 +8,8 @@
 #include "rokudeck1_adaptor.h"
 
 #include <QDBusError>
+#include <QDateTime>
+#include <QEventLoop>
 #include <QRandomGenerator>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -991,6 +993,114 @@ void DaemonService::SetRuleEnabled(const QString& ruleId, bool enabled) {
     // Toggling never round-trips the whole definition.
     existing->enabled = enabled;
     announceRules();
+}
+
+QString DaemonService::RunRule(const QString& ruleId) {
+    const auto existing = findRule(ruleId);
+    if (existing == m_rules.end()) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknownRule"));
+        return {};
+    }
+    RuleDocument rule = *existing;
+
+    // Resolve the consenting target set. An empty device list means every
+    // known device; listed serials the daemon no longer knows are skipped.
+    QStringList targets;
+    if (rule.devices.isEmpty()) {
+        for (const DeviceRecord& device : m_deviceRegistry.devices()) {
+            if (device.allowAutomations) {
+                targets.append(device.serial);
+            }
+        }
+    } else {
+        for (const QString& serial : rule.devices) {
+            const auto device = findDevice(serial);
+            if (device && device->allowAutomations) {
+                targets.append(serial);
+            }
+        }
+    }
+
+    QString outcome;
+    if (targets.isEmpty()) {
+        outcome = QStringLiteral("consent-blocked");
+    } else {
+        const ActionResult result = executeActions(rule, targets);
+        if (!result.accepted) {
+            outcome = QStringLiteral("failed");
+        } else if (result.reason == QStringLiteral("partial")) {
+            outcome = QStringLiteral("partial");
+        } else {
+            outcome = QStringLiteral("ok");
+        }
+    }
+
+    rule.lastRun.firedAtIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    rule.lastRun.outcome = outcome;
+    *findRule(rule.id) = rule;
+    announceRules();
+    return outcome;
+}
+
+DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& rule,
+                                                          const QStringList& targets) {
+    // M1 executes the device-touching subset; the remaining action types land
+    // with the scheduler milestones and fail the run loudly until then.
+    static const QSet<QString> deferredTypes{QStringLiteral("setVolume"), QStringLiteral("mute"),
+                                             QStringLiteral("runRule"),
+                                             QStringLiteral("ifThenElse")};
+    int dispatched = 0;
+    int rejected = 0;
+    for (const ActionNode& action : rule.actions) {
+        if (deferredTypes.contains(action.type)) {
+            return {false, QStringLiteral("unsupportedAction")};
+        }
+        if (action.type == QStringLiteral("delay")) {
+            // parseRule already bounds this to 1..600 seconds; sleeping here
+            // keeps sequential actions ordered exactly as authored.
+            QEventLoop pause;
+            QTimer::singleShot(action.delaySeconds * 1000, &pause, &QEventLoop::quit);
+            pause.exec();
+            continue;
+        }
+        QJsonObject command;
+        if (action.type == QStringLiteral("keypress")) {
+            command.insert(QStringLiteral("operation"), QStringLiteral("keypress"));
+            command.insert(QStringLiteral("key"), action.key);
+        } else {
+            command.insert(QStringLiteral("operation"), QStringLiteral("launch"));
+            command.insert(QStringLiteral("appId"), action.appId);
+        }
+        const QString commandJson =
+            QString::fromUtf8(QJsonDocument(command).toJson(QJsonDocument::Compact));
+        for (const QString& serial : targets) {
+            // Same validation/safety gates as widget-issued SendCommand calls,
+            // minus the D-Bus error replies a rejected step must not emit.
+            const ValidatedCommand validated = validateCommand(serial, commandJson);
+            if (!validated.errorCode.isEmpty()) {
+                ++rejected;
+                continue;
+            }
+            QQueue<QueuedCommand>& queue = m_commandQueues[serial];
+            if (queue.size() >= CommandContract::maximumOutstandingPerDevice) {
+                ++rejected;
+                continue;
+            }
+            queue.enqueue({QUuid::createUuid().toString(QUuid::WithoutBraces), serial,
+                           validated.arguments,
+                           QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs,
+                                          Qt::PreciseTimer)});
+            ++dispatched;
+            processNextCommand(serial);
+        }
+    }
+    if (dispatched == 0 && rejected > 0) {
+        return {false, QStringLiteral("allRejected")};
+    }
+    if (rejected > 0) {
+        return {true, QStringLiteral("partial")};
+    }
+    return {true, {}};
 }
 
 DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& serial,

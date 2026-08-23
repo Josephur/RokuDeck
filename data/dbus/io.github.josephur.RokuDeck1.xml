@@ -86,6 +86,10 @@
       <arg direction="in" type="s" name="ruleId"/>
       <arg direction="in" type="b" name="enabled"/>
     </method>
+    <method name="RunRule">
+      <arg direction="in" type="s" name="ruleId"/>
+      <arg direction="out" type="s" name="outcome"/>
+    </method>
     <signal name="RulesChanged">
       <arg type="s" name="rulesJson"/>
     </signal>

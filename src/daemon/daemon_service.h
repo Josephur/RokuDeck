@@ -76,6 +76,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     void UpdateRule(const QString& ruleJson);
     void DeleteRule(const QString& ruleId);
     void SetRuleEnabled(const QString& ruleId, bool enabled);
+    [[nodiscard]] QString RunRule(const QString& ruleId);
 
   Q_SIGNALS:
     void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
@@ -111,6 +112,14 @@ class DaemonService final : public QObject, protected QDBusContext {
         QString errorMessage;
     };
 
+    // Outcome of one manual rule run over its consenting targets. accepted
+    // means every attempted dispatch succeeded; reason carries "partial" when
+    // some dispatches were rejected, or the terminal failure cause otherwise.
+    struct ActionResult {
+        bool accepted;
+        QString reason;
+    };
+
     [[nodiscard]] QString callerOwner() const;
     [[nodiscard]] std::optional<DeviceRecord> findDevice(const QString& serial) const;
     void removePollInterests(const ClientRegistration& registration);
@@ -139,6 +148,8 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] QString nextRuleId() const;
     void announceRules();
     [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
+    [[nodiscard]] ActionResult executeActions(const RuleDocument& rule,
+                                              const QStringList& targets);
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,
