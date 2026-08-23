@@ -24,6 +24,39 @@ ParseResult<DeviceSnapshot> parseAudioDevice(QByteArrayView xml)
             continue;
         }
 
+        // Real devices report the master values under <global> and per output
+        // destination under <destinations>. Only the master values describe
+        // what the remote's volume keys act on, so destinations are skipped.
+        if (reader.name() == u"destinations") {
+            reader.skipCurrentElement();
+            continue;
+        }
+        if (reader.name() == u"global") {
+            while (reader.readNextStartElement()) {
+                if (reader.name() == u"volume") {
+                    bool valid = false;
+                    const int volume = reader.readElementText().trimmed().toInt(&valid);
+                    if (!valid) {
+                        return {ParseError{ParseError::Code::InvalidValue, QStringLiteral("Audio volume is not an integer")}};
+                    }
+                    snapshot.volume = volume;
+                } else if (reader.name() == u"muted") {
+                    const QString value = reader.readElementText().trimmed();
+                    if (value.compare(u"true", Qt::CaseInsensitive) == 0) {
+                        snapshot.muted = true;
+                    } else if (value.compare(u"false", Qt::CaseInsensitive) == 0) {
+                        snapshot.muted = false;
+                    } else {
+                        return {ParseError{ParseError::Code::InvalidValue, QStringLiteral("Mute status is not a boolean")}};
+                    }
+                } else {
+                    reader.skipCurrentElement();
+                }
+            }
+            continue;
+        }
+
+        // Older/flat payloads keep the values at the top level.
         const QString name = reader.name().toString();
         const QString value = reader.readElementText(QXmlStreamReader::SkipChildElements).trimmed();
         if (name == u"volume") {
@@ -33,7 +66,7 @@ ParseResult<DeviceSnapshot> parseAudioDevice(QByteArrayView xml)
                 return {ParseError{ParseError::Code::InvalidValue, QStringLiteral("Audio volume is not an integer")}};
             }
             snapshot.volume = volume;
-        } else if (name == u"mute-status") {
+        } else if (name == u"mute-status" || name == u"muted") {
             if (value.compare(u"true", Qt::CaseInsensitive) == 0) {
                 snapshot.muted = true;
             } else if (value.compare(u"false", Qt::CaseInsensitive) == 0) {

@@ -1,6 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Captured verbatim from a real Roku ECP /query/audio-device reply. -->
 <audio-device>
-  <volume>17</volume>
-  <mute-status>true</mute-status>
+	<capabilities>
+		<all-destinations>wifi-remote,datagram,headphones,arc,speakers,spdif,lineout</all-destinations>
+	</capabilities>
+	<global>
+		<muted>true</muted>
+		<volume>17</volume>
+		<destination-list>speakers,spdif,lineout</destination-list>
+	</global>
+	<destinations>
+		<destination name="speakers">
+			<muted>false</muted>
+			<volume>45</volume>
+		</destination>
+		<destination name="spdif">
+			<muted>false</muted>
+			<volume>100</volume>
+		</destination>
+	</destinations>
 </audio-device>

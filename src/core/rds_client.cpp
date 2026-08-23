@@ -6,6 +6,7 @@
 #include "media_player_parser.h"
 
 #include <QJsonDocument>
+#include <QDebug>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QPointer>
@@ -117,42 +118,76 @@ parseDeviceInfo(const QString& address, const ProcessResult& result, RdsError& e
 }
 
 [[nodiscard]] ProcessRequest deviceInfoRequest(const QString& address) {
+    // rds gives up on the HTTP call at 4000ms; the process deadline below is
+    // only a safety net and must stay strictly larger so a slow reply is
+    // reported by rds itself instead of being killed mid-flight (which used
+    // to flap devices between online and degraded on marginal WiFi).
     return {QStringLiteral("rds"),
             {QStringLiteral("--json"), QStringLiteral("--quiet"), QStringLiteral("--timeout"),
-             QStringLiteral("3000"), QStringLiteral("--ip"), address, QStringLiteral("device"),
+             QStringLiteral("4000"), QStringLiteral("--ip"), address, QStringLiteral("device"),
              QStringLiteral("info")},
-            std::chrono::milliseconds(3000)};
+            std::chrono::milliseconds(6000)};
 }
 
 [[nodiscard]] ProcessRequest endpointRequest(const QString& address, const QString& endpoint) {
     return {QStringLiteral("rds"),
             {QStringLiteral("--json"), QStringLiteral("--quiet"), QStringLiteral("--timeout"),
-             QStringLiteral("3000"), QStringLiteral("--ip"), address, QStringLiteral("ecp"),
+             QStringLiteral("4000"), QStringLiteral("--ip"), address, QStringLiteral("ecp"),
              QStringLiteral("query"), endpoint},
-            std::chrono::milliseconds(3000)};
+            std::chrono::milliseconds(6000)};
 }
 
-[[nodiscard]] std::optional<QByteArray> endpointPayload(const ProcessResult& result) {
-    if (result.timedOut || result.exitCode != 0) {
-        return std::nullopt;
+struct EndpointOutcome {
+    std::optional<QByteArray> payload;
+    QString failureReason;
+};
+
+[[nodiscard]] EndpointOutcome endpointOutcome(const ProcessResult& result) {
+    if (result.timedOut) {
+        return {{}, QStringLiteral("timed out after the process deadline")};
+    }
+    if (result.exitCode != 0) {
+        return {{},
+                QStringLiteral("rds exited with code %1: %2")
+                    .arg(result.exitCode)
+                    .arg(QString::fromUtf8(result.standardError.left(200)))};
     }
     const auto object = jsonObject(result.standardOutput);
-    if (!object || !object->value(QStringLiteral("success")).toBool() ||
-        object->value(QStringLiteral("status")).toInt(-1) != 200 ||
-        !object->value(QStringLiteral("data")).isString()) {
-        return std::nullopt;
+    if (!object) {
+        return {{}, QStringLiteral("rds printed malformed JSON")};
+    }
+    if (!object->value(QStringLiteral("success")).toBool()) {
+        return {
+            {},
+            QStringLiteral("rds reported success=false: %1")
+                .arg(object->value(QStringLiteral("error")).toString(
+                    QStringLiteral("no error detail")))};
+    }
+    const int status = object->value(QStringLiteral("status")).toInt(-1);
+    if (status != 200) {
+        return {{}, QStringLiteral("television answered HTTP %1").arg(status)};
+    }
+    if (!object->value(QStringLiteral("data")).isString()) {
+        return {{}, QStringLiteral("rds returned no data payload")};
     }
     const QByteArray payload = object->value(QStringLiteral("data")).toString().toUtf8();
-    return payload.isEmpty() ? std::nullopt : std::optional<QByteArray>(payload);
+    if (payload.isEmpty()) {
+        return {{}, QStringLiteral("television returned an empty body")};
+    }
+    return {payload, {}};
 }
 
 void finishEndpoint(const std::shared_ptr<QueryState>& state, const QString& endpoint,
                     const ProcessResult& result) {
-    const auto payload = endpointPayload(result);
-    if (!payload) {
+    const auto outcome = endpointOutcome(result);
+    if (!outcome.payload) {
         state->partialFailure = true;
+        // Transient television or network hiccups degrade a single snapshot;
+        // this line is what makes the next "why does it flap" question answerable.
+        qWarning().nospace() << "RokuDeck poll of " << state->snapshot.address << endpoint
+                             << " failed: " << outcome.failureReason;
     } else if (endpoint == QString::fromLatin1(activeAppEndpoint)) {
-        const auto parsed = parseActiveApp(*payload);
+        const auto parsed = parseActiveApp(*outcome.payload);
         if (parsed) {
             state->snapshot.activeApp = parsed.value();
             state->snapshot.screensaver = parsed.value().screensaver;
@@ -160,14 +195,14 @@ void finishEndpoint(const std::shared_ptr<QueryState>& state, const QString& end
             state->partialFailure = true;
         }
     } else if (endpoint == QString::fromLatin1(mediaPlayerEndpoint)) {
-        const auto parsed = parseMediaPlayer(*payload);
+        const auto parsed = parseMediaPlayer(*outcome.payload);
         if (parsed) {
             state->snapshot.media = parsed.value();
         } else {
             state->partialFailure = true;
         }
     } else if (endpoint == QString::fromLatin1(audioDeviceEndpoint)) {
-        const auto parsed = parseAudioDevice(*payload);
+        const auto parsed = parseAudioDevice(*outcome.payload);
         if (parsed) {
             state->snapshot.volume = parsed.value().volume;
             state->snapshot.muted = parsed.value().muted;
@@ -187,6 +222,16 @@ void finishEndpoint(const std::shared_ptr<QueryState>& state, const QString& end
     state->snapshot.partialFailure = state->partialFailure;
     if (state->partialFailure) {
         state->snapshot.health = DeviceHealth::Degraded;
+    }
+    // Navigation and playback keypresses exist on every Roku, so the snapshot
+    // vouches for them unconditionally; audio controls are only vouched for
+    // once a reading was actually observed.
+    state->snapshot.capabilities.insert(QStringLiteral("power"));
+    state->snapshot.capabilities.insert(QStringLiteral("navigation"));
+    state->snapshot.capabilities.insert(QStringLiteral("playback"));
+    if (state->snapshot.volume.has_value()) {
+        state->snapshot.capabilities.insert(QStringLiteral("volume"));
+        state->snapshot.capabilities.insert(QStringLiteral("mute"));
     }
     state->snapshot.normalize();
     state->callback(std::move(state->snapshot));

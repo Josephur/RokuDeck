@@ -23,6 +23,7 @@ class RdsClientTest final : public QObject {
 
   private Q_SLOTS:
     void usesInstalledGrammarAndMergesAllEndpointOutcomes();
+    void timeoutsLeaveHeadroomForRdsOwnDeadline();
     void missingRequestedEndpointDegradesDeviceInfoOnlySnapshot();
     void incompatibleVersionDisablesPollingAndExposesDiagnostic();
     void incompatibleGrammarDisablesPollingAndExposesDiagnostic();
@@ -49,7 +50,7 @@ void RdsClientTest::usesInstalledGrammarAndMergesAllEndpointOutcomes() {
     QCOMPARE(
         runner.requests.at(1).arguments,
         QStringList({QStringLiteral("--json"), QStringLiteral("--quiet"),
-                     QStringLiteral("--timeout"), QStringLiteral("3000"), QStringLiteral("--ip"),
+                     QStringLiteral("--timeout"), QStringLiteral("4000"), QStringLiteral("--ip"),
                      address, QStringLiteral("device"), QStringLiteral("info")}));
     const QByteArray deviceInfo = R"json({
         "deviceName":"Fixture Room",
@@ -62,7 +63,7 @@ void RdsClientTest::usesInstalledGrammarAndMergesAllEndpointOutcomes() {
 
     QCOMPARE(runner.requests.size(), 5);
     const QStringList prefix{QStringLiteral("--json"),    QStringLiteral("--quiet"),
-                             QStringLiteral("--timeout"), QStringLiteral("3000"),
+                             QStringLiteral("--timeout"), QStringLiteral("4000"),
                              QStringLiteral("--ip"),      address,
                              QStringLiteral("ecp"),       QStringLiteral("query")};
     QCOMPARE(runner.requests.at(2).arguments,
@@ -106,6 +107,48 @@ void RdsClientTest::usesInstalledGrammarAndMergesAllEndpointOutcomes() {
     QCOMPARE(snapshot.volume, std::optional<int>(23));
     QCOMPARE(snapshot.muted, std::optional<bool>(false));
     QVERIFY(snapshot.capabilities.contains(QStringLiteral("supports-suspend")));
+    // Keypress-based controls exist on every Roku, so the daemon reports them
+    // as capabilities; the widget offers nothing the daemon does not vouch for.
+    QVERIFY(snapshot.capabilities.contains(QStringLiteral("power")));
+    QVERIFY(snapshot.capabilities.contains(QStringLiteral("navigation")));
+    QVERIFY(snapshot.capabilities.contains(QStringLiteral("playback")));
+    // Audio controls are only offered once an audio reading was observed.
+    QVERIFY(snapshot.capabilities.contains(QStringLiteral("volume")));
+    QVERIFY(snapshot.capabilities.contains(QStringLiteral("mute")));
+}
+
+void RdsClientTest::timeoutsLeaveHeadroomForRdsOwnDeadline() {
+    FakeProcessRunner runner;
+    RdsClient client(&runner);
+    std::optional<RdsQueryResult> received;
+    client.queryDevice(QStringLiteral("192.0.2.30"),
+                       [&](RdsQueryResult result) { received = std::move(result); });
+    runner.complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
+    runner.complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"deviceName":"Fixture Room","serialNumber":"SERIAL-FIXTURE-A","powerMode":"PowerOn"})json"),
+         {},
+         false});
+
+    // A borderline WiFi stall must be answered by rds's own HTTP deadline,
+    // never by our kill timer racing it: killing rds mid-flight turns a
+    // recoverable slow poll into a hard failure and flaps the widget between
+    // online and degraded.
+    const auto rdsDeadline = [&runner](int index) {
+        const int at = runner.requests.at(index).arguments.indexOf(QStringLiteral("--timeout"));
+        return runner.requests.at(index).arguments.at(at + 1).toInt();
+    };
+    for (int index = 1; index < runner.requests.size(); ++index) {
+        const int waitMs = rdsDeadline(index);
+        QVERIFY2(runner.requests.at(index).timeout.count() > waitMs,
+                 qPrintable(QStringLiteral("request %1 kills rds at %2ms but rds waits %3ms")
+                                .arg(index)
+                                .arg(runner.requests.at(index).timeout.count())
+                                .arg(waitMs)));
+    }
+    QCOMPARE(rdsDeadline(1), 4000);
+    QCOMPARE(rdsDeadline(2), 4000);
 }
 
 void RdsClientTest::missingRequestedEndpointDegradesDeviceInfoOnlySnapshot() {
@@ -139,6 +182,13 @@ void RdsClientTest::missingRequestedEndpointDegradesDeviceInfoOnlySnapshot() {
     QCOMPARE(snapshot.media, MediaPlaybackState::Unknown);
     QVERIFY(!snapshot.volume.has_value());
     QVERIFY(!snapshot.muted.has_value());
+    // Keypress controls survive a degraded poll, but audio controls must not
+    // be offered when no audio reading was obtained.
+    QVERIFY(snapshot.capabilities.contains(QStringLiteral("power")));
+    QVERIFY(snapshot.capabilities.contains(QStringLiteral("navigation")));
+    QVERIFY(snapshot.capabilities.contains(QStringLiteral("playback")));
+    QVERIFY(!snapshot.capabilities.contains(QStringLiteral("volume")));
+    QVERIFY(!snapshot.capabilities.contains(QStringLiteral("mute")));
 }
 
 void RdsClientTest::incompatibleVersionDisablesPollingAndExposesDiagnostic() {

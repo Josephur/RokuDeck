@@ -52,6 +52,12 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
 fi
+# D-Bus activation only starts units that are not already running, so an old
+# daemon process would keep serving the previous build's code indefinitely.
+if command -v systemctl >/dev/null 2>&1 \
+   && systemctl --user is-active --quiet rokudeckd.service; then
+    systemctl --user restart rokudeckd.service
+fi
 # A session bus that is already running will not notice a newly installed
 # service file on its own, so the first install would otherwise leave D-Bus
 # activation broken until the next login.
