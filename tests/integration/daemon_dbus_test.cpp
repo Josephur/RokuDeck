@@ -93,6 +93,7 @@ class DaemonDbusTest final : public QObject {
     void pendingScheduleKeepsTheDaemonAwake();
     void stateChangeRuleFiresOnRisingEdgeOnly();
     void firstObservationIsBaselineAndNeverFires();
+    void rokuSnapshotsReportPlayingAsNull();
     void muteActionPressesVolumeMuteOnce();
     void muteActionMatchingObservedStateIsANoOp();
     void setVolumeWalksDownWithBoundedPresses();
@@ -2360,6 +2361,26 @@ void DaemonDbusTest::firstObservationIsBaselineAndNeverFires() {
                  .value(QStringLiteral("outcome"))
                  .toString(),
              QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::rokuSnapshotsReportPlayingAsNull() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.44")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("playing-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    completePollVersion();
+    completePollReadings(18);
+    const QJsonObject snapshot =
+        jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("SERIAL-A")}));
+    QCOMPARE(snapshot.value(QStringLiteral("volume")).toInt(), 18);
+    // Roku snapshots never carry a playing reading: the key must exist as an
+    // explicit null so clients can distinguish "no reading" from absence.
+    QVERIFY2(snapshot.contains(QStringLiteral("playing")),
+             "snapshot JSON omits the playing key entirely");
+    QVERIFY(snapshot.value(QStringLiteral("playing")).isNull());
 }
 
 void DaemonDbusTest::muteActionPressesVolumeMuteOnce() {

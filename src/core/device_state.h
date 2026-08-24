@@ -32,6 +32,7 @@ struct DeviceSnapshot {
     MediaPlaybackState media = MediaPlaybackState::Unknown;
     std::optional<int> volume;
     std::optional<bool> muted;
+    std::optional<bool> playing;
     QSet<QString> capabilities;
     QDateTime capturedAt;
     DeviceHealth health = DeviceHealth::Unknown;

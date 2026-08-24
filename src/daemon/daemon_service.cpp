@@ -448,6 +448,8 @@ QString DaemonService::snapshotJson(const DeviceSnapshot& snapshot, const QStrin
                   snapshot.volume ? QJsonValue(*snapshot.volume) : QJsonValue::Null);
     object.insert(QStringLiteral("muted"),
                   snapshot.muted ? QJsonValue(*snapshot.muted) : QJsonValue::Null);
+    object.insert(QStringLiteral("playing"),
+                  snapshot.playing ? QJsonValue(*snapshot.playing) : QJsonValue::Null);
 
     QStringList capabilities(snapshot.capabilities.cbegin(), snapshot.capabilities.cend());
     capabilities.sort();

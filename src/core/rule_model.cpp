@@ -22,7 +22,7 @@ constexpr int maximumDepth = 16;
 {
     static const QSet<QString> fields{QStringLiteral("power"),
         QStringLiteral("screensaver"), QStringLiteral("app"), QStringLiteral("muted"),
-        QStringLiteral("volume"), QStringLiteral("health")};
+        QStringLiteral("volume"), QStringLiteral("health"), QStringLiteral("playing")};
     return fields.contains(field);
 }
 
@@ -66,6 +66,11 @@ constexpr int maximumDepth = 16;
             return {ParseError{ParseError::Code::InvalidValue,
                 QStringLiteral("between needs [low,high]")}};
         }
+    }
+    if (predicate.field == QStringLiteral("playing")
+        && !object.value(QStringLiteral("value")).isBool()) {
+        return {ParseError{ParseError::Code::InvalidValue,
+            QStringLiteral("playing needs boolean value")}};
     }
     predicate.value = object.value(QStringLiteral("value"));
     return {std::move(predicate)};

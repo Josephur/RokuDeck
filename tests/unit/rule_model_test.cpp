@@ -84,6 +84,7 @@ private:
 
 private Q_SLOTS:
     void parsesAndSerializesACompleteRule();
+    void parsesPlayingFieldsAndRejectsNonBooleanValues();
     void rejectsMalformedRules_data();
     void rejectsMalformedRules();
     void rejectsOverlyDeepConditions();
@@ -120,6 +121,61 @@ void RuleModelTest::parsesAndSerializesACompleteRule()
     }
     QCOMPARE(QJsonDocument(ruleJson(reparsed.value())),
         QJsonDocument(serialized));
+}
+
+void RuleModelTest::parsesPlayingFieldsAndRejectsNonBooleanValues()
+{
+    const QJsonObject playingTrigger{
+        {QStringLiteral("type"), QStringLiteral("stateChange")},
+        {QStringLiteral("field"), QStringLiteral("playing")},
+        {QStringLiteral("op"), QStringLiteral("is")},
+        {QStringLiteral("value"), true}};
+    const QJsonObject playingLeaf = leaf(QStringLiteral("playing"),
+        QStringLiteral("isNot"), false, QStringLiteral("LOCAL-PC"));
+    const QJsonObject document{
+        {"schemaVersion"_L1, 1},
+        {"name"_L1, "media"_L1},
+        {"devices"_L1, QJsonArray{QStringLiteral("LOCAL-PC")}},
+        {"trigger"_L1, playingTrigger},
+        {"conditions"_L1,
+            QJsonObject{{QStringLiteral("leaf"), playingLeaf}}},
+        {"actions"_L1, QJsonArray{keypressAction(QStringLiteral("Home"))}}};
+
+    const auto parsed = parseRule(document);
+    if (!parsed.has_value()) {
+        QFAIL(qPrintable(parsed.error().message));
+    }
+    QCOMPARE(parsed.value().trigger.stateChange.field, "playing"_L1);
+    QVERIFY(parsed.value().trigger.stateChange.value.isBool());
+    QCOMPARE(parsed.value().trigger.stateChange.value.toBool(), true);
+    QVERIFY(parsed.value().conditions.has_value());
+    QCOMPARE(parsed.value().conditions->leaf.device, "LOCAL-PC"_L1);
+    QCOMPARE(parsed.value().conditions->leaf.value.toBool(), false);
+
+    // Round trip: the boolean value survives serialization untouched.
+    const auto reparsed = parseRule(ruleJson(parsed.value()));
+    if (!reparsed.has_value()) {
+        QFAIL(qPrintable(reparsed.error().message));
+    }
+    QCOMPARE(reparsed.value().trigger.stateChange.value.toBool(), true);
+
+    // Strings and numbers never satisfy the boolean field.
+    QJsonObject stringified = document;
+    QJsonObject trigger = playingTrigger;
+    trigger.insert(QStringLiteral("value"), QStringLiteral("true"));
+    stringified.insert(QStringLiteral("trigger"), trigger);
+    const auto stringParsed = parseRule(stringified);
+    QVERIFY(!stringParsed.has_value());
+    QVERIFY2(stringParsed.error().message.contains(QStringLiteral("playing")),
+             qPrintable(stringParsed.error().message));
+
+    QJsonObject numeric = document;
+    trigger.insert(QStringLiteral("value"), 1);
+    numeric.insert(QStringLiteral("trigger"), trigger);
+    const auto numericParsed = parseRule(numeric);
+    QVERIFY(!numericParsed.has_value());
+    QVERIFY2(numericParsed.error().message.contains(QStringLiteral("playing")),
+             qPrintable(numericParsed.error().message));
 }
 
 void RuleModelTest::rejectsMalformedRules_data()

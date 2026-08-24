@@ -110,6 +110,14 @@ void RuleSummaryTest::rendersKnownTriggerAndActionShapes_data() {
                        QJsonArray{QJsonObject{{"type"_L1, "keypress"_L1},
                                               {"key"_L1, "PowerOn"_L1}}})
         << QStringLiteral("When power is standby \u00b7 Press PowerOn");
+    QTest::newRow("statechange-playing")
+        << fixtureRule(QJsonObject{{"type"_L1, "stateChange"_L1},
+                                   {"field"_L1, "playing"_L1},
+                                   {"op"_L1, "is"_L1},
+                                   {"value"_L1, true}},
+                       QJsonArray{QJsonObject{{"type"_L1, "keypress"_L1},
+                                              {"key"_L1, "Home"_L1}}})
+        << QStringLiteral("When playing is true \u00b7 Press Home");
     QTest::newRow("runrule-macro")
         << fixtureRule(trigger("manual"_L1), QJsonArray{QJsonObject{{"type"_L1, "runRule"_L1},
                                                                    {"id"_L1, "rABC123"_L1}}})

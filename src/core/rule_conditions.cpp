@@ -89,6 +89,12 @@ namespace {
         }
         return *snapshot.muted ? u"true"_s : u"false"_s;
     }
+    if (field == u"playing"_s) {
+        if (!snapshot.playing.has_value()) {
+            return std::nullopt;
+        }
+        return *snapshot.playing ? u"true"_s : u"false"_s;
+    }
     if (field == u"volume"_s) {
         if (!snapshot.volume.has_value()) {
             return std::nullopt;

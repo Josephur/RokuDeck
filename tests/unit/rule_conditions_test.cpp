@@ -115,6 +115,8 @@ class RuleConditionsTest final : public QObject {
     void absentOrUnknownFieldNeverMatchesEvenForIsNot();
     void volumeOpsAreStrictAndBetweenIsClosed();
     void numericOpsNeverMatchMutedBooleans();
+    void playingPredicateRendersBooleansAndNumericOpsNeverMatch();
+    void dueStateChangeFiresOnPlayingEdge();
     void appPredicateMatchesTheActiveAppId();
     void healthPredicateRendersHealthNames();
     void screensaverPredicateRendersTriState();
@@ -236,6 +238,62 @@ void RuleConditionsTest::numericOpsNeverMatchMutedBooleans() {
                              unmutedMap, QStringList{quietTv.serial}));
     QVERIFY(!predicateMatches(predicate(quietTv.serial, u"muted"_s, u"isNot"_s, false), unmutedMap,
                               QStringList{quietTv.serial}));
+}
+
+void RuleConditionsTest::playingPredicateRendersBooleansAndNumericOpsNeverMatch() {
+    DeviceSnapshot playing = knownSnapshot(QStringLiteral("serial-tv"));
+    playing.playing = true;
+
+    const auto playingMatches = [&playing](const QString& op, QJsonValue value) {
+        const QHash<QString, DeviceSnapshot> snapshots{{playing.serial, playing}};
+        return predicateMatches(predicate(playing.serial, u"playing"_s, op, std::move(value)),
+                                snapshots, QStringList{playing.serial});
+    };
+    QVERIFY(playingMatches(u"is"_s, true));
+    QVERIFY(!playingMatches(u"is"_s, false));
+    QVERIFY(playingMatches(u"isNot"_s, false));
+    QVERIFY(!playingMatches(u"isNot"_s, true));
+    // Numeric ops never match a boolean field, mirroring muted.
+    QVERIFY(!playingMatches(u"gt"_s, 0));
+    QVERIFY(!playingMatches(u"lt"_s, 1));
+    QVERIFY(!playingMatches(u"between"_s, QJsonArray{0, 1}));
+
+    DeviceSnapshot paused = knownSnapshot(QStringLiteral("serial-tv"));
+    paused.playing = false;
+    const QHash<QString, DeviceSnapshot> pausedMap{{paused.serial, paused}};
+    QVERIFY(predicateMatches(predicate(paused.serial, u"playing"_s, u"is"_s, false), pausedMap,
+                             QStringList{paused.serial}));
+    QVERIFY(!predicateMatches(predicate(paused.serial, u"playing"_s, u"isNot"_s, false), pausedMap,
+                              QStringList{paused.serial}));
+
+    // Absent playing (a Roku snapshot) never matches - not even isNot.
+    const DeviceSnapshot roku = knownSnapshot(QStringLiteral("serial-tv"));
+    const QHash<QString, DeviceSnapshot> rokuMap{{roku.serial, roku}};
+    QVERIFY(!predicateMatches(predicate(roku.serial, u"playing"_s, u"is"_s, true), rokuMap,
+                              QStringList{roku.serial}));
+    QVERIFY(!predicateMatches(predicate(roku.serial, u"playing"_s, u"isNot"_s, true), rokuMap,
+                              QStringList{roku.serial}));
+}
+
+void RuleConditionsTest::dueStateChangeFiresOnPlayingEdge() {
+    const QList<RuleDocument> rules{
+        rule(u"media"_s,
+             QJsonObject{{"type"_L1, "stateChange"_L1},
+                         {"field"_L1, "playing"_L1},
+                         {"op"_L1, "is"_L1},
+                         {"value"_L1, true}})};
+    DeviceSnapshot stopped = knownSnapshot(QStringLiteral("serial-tv"));
+    stopped.playing = false;
+    DeviceSnapshot started = knownSnapshot(QStringLiteral("serial-tv"));
+    started.playing = true;
+
+    QCOMPARE(dueStateChangeRuleIds(rules, started.serial, stopped, started),
+             QStringList{u"media"_s});
+    QVERIFY(dueStateChangeRuleIds(rules, started.serial, started, stopped).isEmpty());
+    QVERIFY(dueStateChangeRuleIds(rules, started.serial, started, started).isEmpty());
+    // A Roku device that never reports playing cannot fire the rule.
+    const DeviceSnapshot blank = knownSnapshot(QStringLiteral("serial-roku"));
+    QVERIFY(dueStateChangeRuleIds(rules, blank.serial, blank, blank).isEmpty());
 }
 
 void RuleConditionsTest::appPredicateMatchesTheActiveAppId() {
