@@ -123,12 +123,14 @@ class DaemonService final : public QObject, protected QDBusContext {
     // Outcome of one manual rule run over its consenting targets. accepted
     // means every attempted dispatch succeeded; reason carries "partial" when
     // some dispatches were rejected, or the terminal failure cause otherwise.
+    // cycleDetected marks a runRule branch cut for re-entering an ancestor.
     struct ActionResult {
         bool accepted;
         QString reason;
         int dispatched = 0;
         int rejected = 0;
         int deliveryFailures = 0;
+        bool cycleDetected = false;
     };
 
     [[nodiscard]] QString callerOwner() const;
@@ -160,19 +162,27 @@ class DaemonService final : public QObject, protected QDBusContext {
     void announceRules();
     [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
     [[nodiscard]] ActionResult executeActions(const RuleDocument& rule,
-                                              const QStringList& targets);
+                                              const QStringList& targets,
+                                              const QStringList& callStack,
+                                              const QString& currentRuleId);
     // Walks one authored action list against the consenting targets. Returns
     // false when an action type cannot be executed yet, failing the whole run
     // before anything dispatches; per-target rejections are counted instead.
-    // callStack carries the ancestor ids of nested runRule dispatches (unused
-    // until those land).
+    // currentRuleId owns `actions`; callStack carries the ancestor ids of
+    // nested runRule dispatches, so a macro naming any of them (or this rule)
+    // is a cycle: that branch counts as one failure and reports cycleDetected.
     [[nodiscard]] bool dispatchActionList(const QList<ActionNode>& actions,
                                           const QStringList& targets,
-                                          const QStringList& callStack, int& dispatched,
+                                          const QStringList& callStack,
+                                          const QString& currentRuleId, int& dispatched,
                                           int& rejected, int& deliveryFailures,
-                                          QStringList& pendingRequests);
+                                          QStringList& pendingRequests, bool& cycleDetected);
     void rearmScheduleTimer();
-    [[nodiscard]] QString executeRuleRun(const QString& ruleId);
+    // Runs one rule to completion and records its outcome. callStack carries
+    // the ids of the enclosing macro runs; runRule steps recurse synchronously
+    // with the ancestry extended by this rule's own id.
+    [[nodiscard]] QString executeRuleRun(const QString& ruleId,
+                                         const QStringList& callStack = {});
     void runStateChangeFirings(const QStringList& ruleIds);
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);

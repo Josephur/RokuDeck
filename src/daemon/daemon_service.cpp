@@ -1053,7 +1053,7 @@ QString DaemonService::RunRule(const QString& ruleId) {
     return executeRuleRun(ruleId);
 }
 
-QString DaemonService::executeRuleRun(const QString& ruleId) {
+QString DaemonService::executeRuleRun(const QString& ruleId, const QStringList& callStack) {
     const auto existing = findRule(ruleId);
     if (existing == m_rules.end()) {
         return {};
@@ -1098,7 +1098,7 @@ QString DaemonService::executeRuleRun(const QString& ruleId) {
     if (targets.isEmpty()) {
         outcome = QStringLiteral("consent-blocked");
     } else {
-        const ActionResult result = executeActions(rule, targets);
+        const ActionResult result = executeActions(rule, targets, callStack, rule.id);
         // Attempts cover both dispatch-time rejections and commands that went
         // out but were not acknowledged by rds; a run only earns "ok" when
         // everything it attempted actually landed.
@@ -1115,6 +1115,12 @@ QString DaemonService::executeRuleRun(const QString& ruleId) {
         } else {
             outcome = QStringLiteral("ok");
         }
+        // A macro cycle cut anywhere in this run's tree is the honest verdict,
+        // even when every other step landed. Consent-blocked never ran actions
+        // (and condition-false returns earlier), so both keep precedence.
+        if (result.cycleDetected && outcome != QStringLiteral("consent-blocked")) {
+            outcome = QStringLiteral("cycle-error");
+        }
     }
 
     rule.lastRun.firedAtIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
@@ -1130,14 +1136,17 @@ QString DaemonService::executeRuleRun(const QString& ruleId) {
 }
 
 DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& rule,
-                                                           const QStringList& targets) {
+                                                           const QStringList& targets,
+                                                           const QStringList& callStack,
+                                                           const QString& currentRuleId) {
     int dispatched = 0;
     int rejected = 0;
     int deliveryFailures = 0;
+    bool cycleDetected = false;
     QStringList pendingRequests;
-    if (!dispatchActionList(rule.actions, targets, {}, dispatched, rejected, deliveryFailures,
-                            pendingRequests)) {
-        return {false, QStringLiteral("unsupportedAction"), 0, 0, 0};
+    if (!dispatchActionList(rule.actions, targets, callStack, currentRuleId, dispatched,
+                            rejected, deliveryFailures, pendingRequests, cycleDetected)) {
+        return {false, QStringLiteral("unsupportedAction"), 0, 0, 0, false};
     }
 
     // A queued command is an attempt, not a result: wait (bounded by each
@@ -1185,18 +1194,19 @@ DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& ru
         }
     }
 
-    return {true, {}, dispatched, rejected, deliveryFailures};
+    return {true, {}, dispatched, rejected, deliveryFailures, cycleDetected};
 }
 
 bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
-                                       const QStringList& targets, const QStringList& callStack,
-                                       int& dispatched, int& rejected, int& deliveryFailures,
-                                       QStringList& pendingRequests) {
-    // callStack feeds runRule cycle detection and deliveryFailures collects
-    // nested-run failures once those actions land; threaded now so later
-    // milestones never change this signature.
-    Q_UNUSED(callStack)
-    Q_UNUSED(deliveryFailures)
+                                       const QStringList& targets,
+                                       const QStringList& callStack,
+                                       const QString& currentRuleId, int& dispatched,
+                                       int& rejected, int& deliveryFailures,
+                                       QStringList& pendingRequests, bool& cycleDetected) {
+    // The effective ancestry for cycle detection: every enclosing macro run
+    // plus this rule itself. Naming any of them would never terminate.
+    QStringList ancestry = callStack;
+    ancestry.append(currentRuleId);
 
     // Action types whose execution lands in later milestones abort the whole
     // list up front, so a mixed list never half-executes (and an unknown type
@@ -1204,7 +1214,7 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
     static const QSet<QString> executableTypes{
         QStringLiteral("delay"),     QStringLiteral("keypress"),
         QStringLiteral("launchApp"), QStringLiteral("mute"),
-        QStringLiteral("setVolume")};
+        QStringLiteral("setVolume"), QStringLiteral("runRule")};
     for (const ActionNode& action : actions) {
         if (!executableTypes.contains(action.type)) {
             return false;
@@ -1287,6 +1297,26 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                 for (int press = 0; press < presses; ++press) {
                     enqueue(serial, command);
                 }
+            }
+            continue;
+        }
+        if (action.type == QStringLiteral("runRule")) {
+            // Re-entering any rule on the ancestry (including this one) is a
+            // cycle: only that branch aborts, as one failed attempt.
+            if (ancestry.contains(action.ruleId)) {
+                ++deliveryFailures;
+                cycleDetected = true;
+                continue;
+            }
+            // A dangling macro target is one rejected attempt, not an abort.
+            if (findRule(action.ruleId) == m_rules.end()) {
+                ++rejected;
+                continue;
+            }
+            const QString childOutcome = executeRuleRun(action.ruleId, ancestry);
+            if (childOutcome != QStringLiteral("ok")) {
+                ++deliveryFailures;
+                cycleDetected = cycleDetected || childOutcome == QStringLiteral("cycle-error");
             }
             continue;
         }

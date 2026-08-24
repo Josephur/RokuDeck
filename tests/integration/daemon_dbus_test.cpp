@@ -97,6 +97,9 @@ class DaemonDbusTest final : public QObject {
     void volumeActionsWithoutObservedAudioFailWithoutDispatching();
     void mixedAudioStateAcrossTargetsYieldsPartial();
     void notYetExecutableActionsAbortTheWholeRunWithoutDispatching();
+    void macroChainRunsChildAndReportsOk();
+    void selfReferencingMacroReportsCycleError();
+    void missingMacroTargetCountsAsFailure();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -2433,9 +2436,112 @@ void DaemonDbusTest::notYetExecutableActionsAbortTheWholeRunWithoutDispatching()
     QCOMPARE(macroRun.arguments().front().toString(), QStringLiteral("failed"));
 
     // The deliberate abort guard: nothing reaches a device, not even the
-    // executable steps sharing the list (replaced by Tasks 5–6).
+    // executable steps sharing the list (ifThenElse lands in Task 6).
     QVERIFY(m_runner->requests.isEmpty());
     QCOMPARE(homeKeypressCount(), 0);
+}
+
+void DaemonDbusTest::macroChainRunsChildAndReportsOk() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.94")});
+    // The child is added first so its generated id can seed the parent's
+    // macro target without a rewrite.
+    const QString childId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Child step","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    const QString parentId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Movie night","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"keypress","key":"Home"},)json"
+        R"json({"type":"runRule","id":"%1"}]})json").arg(childId));
+
+    startRunnerCompleter();  // the nested run waits for its delivery verdict
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(parentId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+
+    // The parent's own Home plus the child's: two dispatches, one pipeline.
+    QCOMPARE(homeKeypressCount(), 2);
+    QCOMPARE(m_runner->requests.size(), 2);
+
+    // Each run records its own outcome on its own rule.
+    const QJsonArray rules = rulesListing().value(QStringLiteral("rules")).toArray();
+    QCOMPARE(rules.at(0).toObject().value(QStringLiteral("id")).toString(), childId);
+    QCOMPARE(rules.at(0).toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
+    QCOMPARE(rules.at(1).toObject().value(QStringLiteral("id")).toString(), parentId);
+    QCOMPARE(rules.at(1).toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::selfReferencingMacroReportsCycleError() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.95")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Bootstrap","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    // A self-targeting macro is only expressible after creation: replace the
+    // whole definition with one that names its own id.
+    const QString updated = QStringLiteral(
+        R"json({"id":"%1","name":"Ouroboros","enabled":true,"mode":"restart",)json"
+        R"json("devices":[],"trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"runRule","id":"%1"}]})json").arg(ruleId);
+    const QDBusMessage rewritten = waitForReply(m_proxy->UpdateRule(updated));
+    QVERIFY2(rewritten.type() != QDBusMessage::ErrorMessage,
+             qPrintable(rewritten.errorMessage()));
+
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    // The cycle is cut and reported honestly instead of looping forever.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("cycle-error"));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("cycle-error"));
+
+    // Cutting the branch means nothing ever reaches a device.
+    QVERIFY(m_runner->requests.isEmpty());
+    QCOMPARE(homeKeypressCount(), 0);
+}
+
+void DaemonDbusTest::missingMacroTargetCountsAsFailure() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.96")});
+    const QString parentId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Dangling macro","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"runRule","id":"rNOPE"}]})json"));
+
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(parentId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    // One attempted macro step, one rejection: the run cannot claim ok.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("failed"));
+    // A dangling target must not reach any device.
+    QVERIFY(m_runner->requests.isEmpty());
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)
