@@ -104,6 +104,9 @@ class DaemonDbusTest final : public QObject {
     void stateChangeRuleFiresOnRisingEdgeOnly();
     void firstObservationIsBaselineAndNeverFires();
     void rokuSnapshotsReportPlayingAsNull();
+    void pcPollerTracksPipeWireVolume();
+    void pcVolumeEdgeFiresStateChangeRule();
+    void pcPollerGoesOfflineAfterThreeFailuresAndRecovers();
     void muteActionPressesVolumeMuteOnce();
     void muteActionMatchingObservedStateIsANoOp();
     void setVolumeWalksDownWithBoundedPresses();
@@ -144,7 +147,8 @@ class DaemonDbusTest final : public QObject {
     [[nodiscard]] static bool waitForHelperRegistration(QProcess& client);
     void recreateDaemon(std::chrono::milliseconds idleGrace = 30s,
                         DaemonService::DeadlineRemaining deadlineRemaining = {},
-                        DaemonService::WallClock wallClock = {});
+                        DaemonService::WallClock wallClock = {},
+                        std::chrono::milliseconds localPcPollInterval = 1h);
     QString addManualRule(const QString& name);
     QString addRuleReturningId(const QString& payload);
     QJsonObject rulesListing() const;
@@ -172,6 +176,10 @@ class DaemonDbusTest final : public QObject {
     // scheduler re-arms. A firing triggered by the audio response dispatches
     // synchronously inside this call.
     void completePollReadings(int volume, bool muted = false);
+    // Waits for the next wpctl get-volume request from the local-PC poller and
+    // completes it with the given raw stdout/exit code. Pins the invocation
+    // shape on the way through.
+    void completePcVolumePoll(const QByteArray& output, int exitCode = 0);
 
     QTemporaryDir m_configDirectory;
     QString m_configPath;
@@ -201,7 +209,8 @@ void DaemonDbusTest::init() {
 
 void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
                                     DaemonService::DeadlineRemaining deadlineRemaining,
-                                    DaemonService::WallClock wallClock) {
+                                    DaemonService::WallClock wallClock,
+                                    std::chrono::milliseconds localPcPollInterval) {
     m_proxy.reset();
     m_daemon.reset();
     auto runner = std::make_unique<FakeProcessRunner>();
@@ -210,7 +219,8 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
     auto configStore = std::make_unique<ConfigStore>(std::move(config));
     m_daemon = std::make_unique<DaemonService>(
         QDBusConnection::sessionBus(), [this] { return m_automationEnabled; }, std::move(runner),
-        std::move(configStore), idleGrace, std::move(deadlineRemaining), std::move(wallClock));
+        std::move(configStore), idleGrace, std::move(deadlineRemaining), std::move(wallClock),
+        localPcPollInterval);
     QVERIFY2(m_daemon->registerOnBus(),
              "the test daemon could not own its private session-bus name");
     if (!m_clientConnection) {
@@ -1887,6 +1897,16 @@ void DaemonDbusTest::completePollReadings(int volume, bool muted) {
          false});
 }
 
+void DaemonDbusTest::completePcVolumePoll(const QByteArray& output, int exitCode) {
+    QVERIFY2(QTest::qWaitFor([&] { return m_runner != nullptr && !m_runner->callbacks.isEmpty(); },
+                             8s),
+             "the wpctl get-volume request never reached the fake runner");
+    QCOMPARE(m_runner->lastRequest.program, QStringLiteral("wpctl"));
+    QCOMPARE(m_runner->lastRequest.arguments,
+             QStringList({QStringLiteral("get-volume"), QStringLiteral("@DEFAULT_AUDIO_SINK@")}));
+    m_runner->complete({exitCode, output, {}, false});
+}
+
 QString DaemonDbusTest::addRuleReturningId(const QString& payload) {
     const QDBusMessage created = waitForReply(m_proxy->AddRule(payload));
     if (created.type() == QDBusMessage::ErrorMessage) {
@@ -2471,6 +2491,97 @@ void DaemonDbusTest::rokuSnapshotsReportPlayingAsNull() {
              "snapshot JSON omits the playing key entirely");
     QVERIFY(snapshot.value(QStringLiteral("playing")).isNull());
 }
+
+void DaemonDbusTest::pcPollerTracksPipeWireVolume() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    QSignalSpy snapshots(m_daemon.get(), &DaemonService::DeviceSnapshotChanged);
+    // Before the first reading the device answers from the registry only.
+    QCOMPARE(jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("LOCAL-PC")}))
+                 .value(QStringLiteral("health"))
+                 .toString(),
+             QStringLiteral("unknown"));
+
+    // First reading establishes the baseline: audible at 18%.
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.18\n"));
+    QCOMPARE(snapshots.size(), 1);
+    const QJsonObject first =
+        QJsonDocument::fromJson(snapshots.at(0).at(1).toString().toUtf8()).object();
+    QCOMPARE(first.value(QStringLiteral("volume")).toInt(), 18);
+    QCOMPARE(first.value(QStringLiteral("muted")).toBool(), false);
+    QCOMPARE(first.value(QStringLiteral("power")).toString(), QStringLiteral("on"));
+    QCOMPARE(first.value(QStringLiteral("health")).toString(), QStringLiteral("online"));
+
+    // A muted reading flows through the same pipeline: 5% and MUTED.
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.05 [MUTED]\n"));
+    QCOMPARE(snapshots.size(), 2);
+    const QJsonObject mutedSnapshot =
+        QJsonDocument::fromJson(snapshots.at(1).at(1).toString().toUtf8()).object();
+    QCOMPARE(mutedSnapshot.value(QStringLiteral("volume")).toInt(), 5);
+    QCOMPARE(mutedSnapshot.value(QStringLiteral("muted")).toBool(), true);
+    QCOMPARE(jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("LOCAL-PC")}))
+                 .value(QStringLiteral("muted"))
+                 .toBool(),
+             true);
+}
+
+void DaemonDbusTest::pcVolumeEdgeFiresStateChangeRule() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Night wind-down","devices":["LOCAL-PC"],)json"
+        R"json("trigger":{"type":"stateChange","field":"volume","op":"lt","value":20},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.25\n"));  // baseline above threshold
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 0);
+
+    startRunnerCompleter();  // the firing waits for its delivery verdict
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.05 [MUTED]\n"));
+    stopRunnerCompleter();
+    QCOMPARE(homeKeypressCount(), 1);
+    const QJsonObject fired =
+        rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+    QCOMPARE(fired.value(QStringLiteral("id")).toString(), ruleId);
+    QCOMPARE(fired.value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::pcPollerGoesOfflineAfterThreeFailuresAndRecovers() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    QSignalSpy snapshots(m_daemon.get(), &DaemonService::DeviceSnapshotChanged);
+
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.40\n"));
+    QCOMPARE(snapshots.size(), 1);  // baseline online
+
+    // Two failures are tolerated: the last good reading stays on display.
+    completePcVolumePoll({}, -1);
+    completePcVolumePoll({}, -1);
+    QCOMPARE(snapshots.size(), 1);
+    QCOMPARE(jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("LOCAL-PC")}))
+                 .value(QStringLiteral("health"))
+                 .toString(),
+             QStringLiteral("online"));
+
+    // The third consecutive failure flips health to Offline until a success.
+    completePcVolumePoll({}, -1);
+    QCOMPARE(snapshots.size(), 2);
+    QCOMPARE(jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("LOCAL-PC")}))
+                 .value(QStringLiteral("health"))
+                 .toString(),
+             QStringLiteral("offline"));
+
+    // One successful reading restores Online with a fresh volume.
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.58\n"));
+    QCOMPARE(snapshots.size(), 3);
+    const QJsonObject recovered =
+        jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("LOCAL-PC")}));
+    QCOMPARE(recovered.value(QStringLiteral("health")).toString(), QStringLiteral("online"));
+    QCOMPARE(recovered.value(QStringLiteral("volume")).toInt(), 58);
+}
+
 
 void DaemonDbusTest::muteActionPressesVolumeMuteOnce() {
     m_daemon->upsertDevice(

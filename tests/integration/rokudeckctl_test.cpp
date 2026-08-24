@@ -92,7 +92,9 @@ void RokuDeckCtlTest::init() {
     auto config = KSharedConfig::openConfig(configPath, KConfig::SimpleConfig);
     m_daemon = std::make_unique<DaemonService>(
         QDBusConnection::sessionBus(), [] { return true; }, std::move(runner),
-        std::make_unique<ConfigStore>(std::move(config)));
+        std::make_unique<ConfigStore>(std::move(config)), std::chrono::seconds(30),
+        DaemonService::DeadlineRemaining{}, DaemonService::WallClock{},
+        std::chrono::hours(1));
     QVERIFY2(m_daemon->registerOnBus(), "test daemon could not own the private D-Bus service");
 }
 

@@ -95,6 +95,21 @@ constexpr qsizetype maximumSerialLength = 64;
 // such device is bootstrapped at startup, undeletable and always consenting.
 constexpr auto localPcSerial = "LOCAL-PC";
 
+// wpctl get-volume prints "Volume: 0.58", optionally suffixed " [MUTED]".
+// Returns the 0..100 volume (rounded) plus the mute flag; nullopt when the
+// output cannot be trusted (treated as a failed poll).
+[[nodiscard]] std::optional<std::pair<int, bool>> parseWpctlVolume(const QByteArray& output) {
+    static const QRegularExpression pattern(
+        QStringLiteral("^Volume: ([0-9]+(?:\\.[0-9]+)?)( \\[MUTED\\])?$"));
+    const QString line = QString::fromUtf8(output).trimmed();
+    const auto match = pattern.match(line);
+    if (!match.hasMatch()) {
+        return std::nullopt;
+    }
+    return std::make_pair(qRound(match.captured(1).toDouble() * 100.0),
+                          !match.captured(2).isEmpty());
+}
+
 // Deliberately parsed by hand rather than with QHostAddress: the daemon must
 // accept exactly one notation, and QHostAddress also resolves shorthand forms
 // such as "10.1" that would silently reach a different host than the user typed.
@@ -242,7 +257,7 @@ DaemonService::DaemonService(QDBusConnection connection,
                              std::unique_ptr<ConfigStore> configStore,
                              std::chrono::milliseconds idleGrace,
                              DeadlineRemaining deadlineRemaining, WallClock wallClock,
-                             QObject* parent)
+                             std::chrono::milliseconds localPcPollInterval, QObject* parent)
     : QObject(parent), m_connection(std::move(connection)),
       m_hasEnabledAutomations(hasEnabledAutomations ? std::move(hasEnabledAutomations)
                                                     : [] { return false; }),
@@ -292,6 +307,11 @@ DaemonService::DaemonService(QDBusConnection connection,
     m_pollTimer.setInterval(50);
     connect(&m_pollTimer, &QTimer::timeout, this, &DaemonService::pollDueDevices);
     m_pollTimer.start();
+
+    m_pcPollTimer.setInterval(static_cast<int>(std::min<std::chrono::milliseconds::rep>(
+        localPcPollInterval.count(), std::numeric_limits<int>::max())));
+    connect(&m_pcPollTimer, &QTimer::timeout, this, &DaemonService::pollLocalPcAudio);
+    m_pcPollTimer.start();
     connect(&m_ownerWatcher, &QDBusServiceWatcher::serviceUnregistered, this,
             &DaemonService::removeClientsForOwner);
     updateIdleTimer();
@@ -300,6 +320,7 @@ DaemonService::DaemonService(QDBusConnection connection,
 DaemonService::~DaemonService() {
     m_shuttingDown = true;
     m_pollTimer.stop();
+    m_pcPollTimer.stop();
     m_idleTimer.stop();
     m_commandQueues.clear();
     for (const QDBusMessage& request : std::as_const(m_discoveryReplies)) {
@@ -1827,6 +1848,77 @@ void DaemonService::pollDueDevices() {
                         dueStateChangeRuleIds(service->m_rules, claim.serial, previous, snapshot));
                 }
             });
+    }
+}
+
+void DaemonService::pollLocalPcAudio() {
+    if (m_pcPollInFlight || !findDevice(QLatin1String(localPcSerial))) {
+        return;
+    }
+    ProcessRequest request;
+    request.program = QStringLiteral("wpctl");
+    request.arguments = {QStringLiteral("get-volume"), QStringLiteral("@DEFAULT_AUDIO_SINK@")};
+    request.timeout = std::chrono::milliseconds(CommandContract::executionTimeoutMs);
+    m_pcPollInFlight = true;
+    QPointer<DaemonService> service(this);
+    m_processRunner->start(request, [service](ProcessResult result) {
+        if (!service || service->m_shuttingDown) {
+            return;
+        }
+        service->finishLocalPcPoll(result);
+    });
+}
+
+void DaemonService::finishLocalPcPoll(const ProcessResult& result) {
+    m_pcPollInFlight = false;
+    const bool ranCleanly = !result.timedOut && result.exitCode == 0;
+    const auto parsed =
+        ranCleanly ? parseWpctlVolume(result.standardOutput) : std::nullopt;
+    if (!parsed) {
+        ++m_pcPollFailures;
+        // Spec §2.1: three consecutive failures flip health to Offline; the
+        // interim failures leave the last good reading on display.
+        if (m_pcPollFailures == 3) {
+            DeviceSnapshot offline;
+            offline.serial = QLatin1String(localPcSerial);
+            if (const auto device = findDevice(offline.serial)) {
+                offline.displayName = device->displayName;
+                offline.address = device->address;
+            }
+            offline.power = PowerState::On;
+            offline.health = DeviceHealth::Offline;
+            applyLocalPcSnapshot(std::move(offline));
+        }
+        return;
+    }
+
+    const auto device = findDevice(QLatin1String(localPcSerial));
+    if (!device) {
+        return;
+    }
+    m_pcPollFailures = 0;
+    DeviceSnapshot snapshot;
+    snapshot.serial = QLatin1String(localPcSerial);
+    snapshot.displayName = device->displayName;
+    snapshot.address = device->address;
+    snapshot.power = PowerState::On;
+    snapshot.health = DeviceHealth::Online;
+    snapshot.volume = parsed->first;
+    snapshot.muted = parsed->second;
+    applyLocalPcSnapshot(std::move(snapshot));
+}
+
+void DaemonService::applyLocalPcSnapshot(DeviceSnapshot snapshot) {
+    snapshot.capturedAt = QDateTime::currentDateTimeUtc();
+    // The pre-insert snapshot is the diff baseline; a serial never seen before
+    // only establishes it and must not fire (§4.1) — identical to rds polls.
+    const bool hadPrevious = m_snapshots.contains(snapshot.serial);
+    const DeviceSnapshot previous = m_snapshots.value(snapshot.serial);
+    m_snapshots.insert(snapshot.serial, snapshot);
+    Q_EMIT DeviceSnapshotChanged(snapshot.serial, snapshotJson(snapshot));
+    if (hadPrevious) {
+        runStateChangeFirings(
+            dueStateChangeRuleIds(m_rules, snapshot.serial, previous, snapshot));
     }
 }
 

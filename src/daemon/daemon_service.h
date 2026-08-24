@@ -47,7 +47,9 @@ class DaemonService final : public QObject, protected QDBusContext {
         std::unique_ptr<ProcessRunner> processRunner = {},
         std::unique_ptr<ConfigStore> configStore = {},
         std::chrono::milliseconds idleGrace = std::chrono::seconds(30),
-        DeadlineRemaining deadlineRemaining = {}, WallClock wallClock = {},
+        DeadlineRemaining deadlineRemaining = {},
+        WallClock wallClock = {},
+        std::chrono::milliseconds localPcPollInterval = std::chrono::seconds(2),
         QObject* parent = nullptr);
     ~DaemonService() override;
 
@@ -102,6 +104,9 @@ class DaemonService final : public QObject, protected QDBusContext {
   private Q_SLOTS:
     void removeClientsForOwner(const QString& owner);
     void pollDueDevices();
+    // Spec §2.1: every 2 s read the default PipeWire sink via wpctl and feed
+    // the result through the same snapshot pipeline as a Roku poll.
+    void pollLocalPcAudio();
     void handleIdleTimeout();
 
   private:
@@ -169,8 +174,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     void finishCommandWithError(const QString& requestId, const QString& serial,
                                 const QString& errorCode, bool trackDelivery = false);
 
-    [[nodiscard]] QString rulesJson() const;
-    [[nodiscard]] QString nextRuleId() const;
+    [[nodiscard]] QString rulesJson() const;    [[nodiscard]] QString nextRuleId() const;
     void announceRules();
     [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
     [[nodiscard]] ActionResult executeActions(const RuleDocument& rule,
@@ -196,6 +200,12 @@ class DaemonService final : public QObject, protected QDBusContext {
                                            const std::shared_ptr<std::atomic_bool>& cancelToken
                                                = {});
     void rearmScheduleTimer();
+    // Consumes one completed wpctl reading: healthy output becomes an Online
+    // snapshot, and the third consecutive failure flips health to Offline.
+    void finishLocalPcPoll(const ProcessResult& result);
+    // Shared insert path with the rds poll tail: baseline bookkeeping,
+    // DeviceSnapshotChanged announcement, then edge firings (§4.1).
+    void applyLocalPcSnapshot(DeviceSnapshot snapshot);
     // Runs one rule to completion and records its outcome. callStack carries
     // the ids of the enclosing macro runs; runRule steps recurse synchronously
     // with the ancestry extended by this rule's own id. A set cancelToken (a
@@ -234,6 +244,9 @@ class DaemonService final : public QObject, protected QDBusContext {
     WallClock m_wallClock;
     QTimer m_idleTimer;
     QTimer m_pollTimer;
+    QTimer m_pcPollTimer;
+    int m_pcPollFailures = 0;
+    bool m_pcPollInFlight = false;
     QTimer m_scheduleTimer;
     QList<RuleDocument> m_rules;
     // Delivery verdicts (true = rds acknowledged) keyed by requestId, written
