@@ -6,6 +6,10 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- The widget's settings dialog gains an **Automations** page: every daemon-owned rule appears
+  live with its plain-language summary, an enable switch, the last-run outcome, and Run-now /
+  Delete controls. Rules are still created from the command line; a structured in-widget editor
+  comes later.
 - The daemon now fires `time` (daily/weekdays/once) and `interval` automation triggers on
   its own — no widget or CLI session needs to be running, and pending schedules keep the
   daemon alive.
