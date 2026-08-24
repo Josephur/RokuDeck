@@ -1131,59 +1131,13 @@ QString DaemonService::executeRuleRun(const QString& ruleId) {
 
 DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& rule,
                                                            const QStringList& targets) {
-    // M1 executes the device-touching subset; the remaining action types land
-    // with the scheduler milestones and fail the run loudly until then.
-    static const QSet<QString> deferredTypes{QStringLiteral("setVolume"), QStringLiteral("mute"),
-                                             QStringLiteral("runRule"),
-                                             QStringLiteral("ifThenElse")};
     int dispatched = 0;
     int rejected = 0;
     int deliveryFailures = 0;
     QStringList pendingRequests;
-    for (const ActionNode& action : rule.actions) {
-        if (deferredTypes.contains(action.type)) {
-            return {false, QStringLiteral("unsupportedAction"), 0, 0, 0};
-        }
-        if (action.type == QStringLiteral("delay")) {
-            // parseRule already bounds this to 1..600 seconds; sleeping here
-            // keeps sequential actions ordered exactly as authored.
-            QEventLoop pause;
-            QTimer::singleShot(action.delaySeconds * 1000, &pause, &QEventLoop::quit);
-            pause.exec();
-            continue;
-        }
-        QJsonObject command;
-        if (action.type == QStringLiteral("keypress")) {
-            command.insert(QStringLiteral("operation"), QStringLiteral("keypress"));
-            command.insert(QStringLiteral("key"), action.key);
-        } else {
-            command.insert(QStringLiteral("operation"), QStringLiteral("launch"));
-            command.insert(QStringLiteral("appId"), action.appId);
-        }
-        const QString commandJson =
-            QString::fromUtf8(QJsonDocument(command).toJson(QJsonDocument::Compact));
-        for (const QString& serial : targets) {
-            // Same validation/safety gates as widget-issued SendCommand calls,
-            // minus the D-Bus error replies a rejected step must not emit.
-            const ValidatedCommand validated = validateCommand(serial, commandJson);
-            if (!validated.errorCode.isEmpty()) {
-                ++rejected;
-                continue;
-            }
-            QQueue<QueuedCommand>& queue = m_commandQueues[serial];
-            if (queue.size() >= CommandContract::maximumOutstandingPerDevice) {
-                ++rejected;
-                continue;
-            }
-            const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            queue.enqueue({requestId, serial, validated.arguments,
-                           QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs,
-                                          Qt::PreciseTimer),
-                           true});
-            pendingRequests.append(requestId);
-            ++dispatched;
-            processNextCommand(serial);
-        }
+    if (!dispatchActionList(rule.actions, targets, {}, dispatched, rejected, deliveryFailures,
+                            pendingRequests)) {
+        return {false, QStringLiteral("unsupportedAction"), 0, 0, 0};
     }
 
     // A queued command is an attempt, not a result: wait (bounded by each
@@ -1232,6 +1186,110 @@ DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& ru
     }
 
     return {true, {}, dispatched, rejected, deliveryFailures};
+}
+
+bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
+                                       const QStringList& targets, const QStringList& callStack,
+                                       int& dispatched, int& rejected, int& deliveryFailures,
+                                       QStringList& pendingRequests) {
+    // callStack feeds runRule cycle detection and deliveryFailures collects
+    // nested-run failures once those actions land; threaded now so later
+    // milestones never change this signature.
+    Q_UNUSED(callStack)
+    Q_UNUSED(deliveryFailures)
+
+    auto enqueue = [&](const QString& serial, const QJsonObject& command) {
+        const QString commandJson =
+            QString::fromUtf8(QJsonDocument(command).toJson(QJsonDocument::Compact));
+        // Same validation/safety gates as widget-issued SendCommand calls,
+        // minus the D-Bus error replies a rejected step must not emit.
+        const ValidatedCommand validated = validateCommand(serial, commandJson);
+        if (!validated.errorCode.isEmpty()) {
+            ++rejected;
+            return;
+        }
+        QQueue<QueuedCommand>& queue = m_commandQueues[serial];
+        if (queue.size() >= CommandContract::maximumOutstandingPerDevice) {
+            ++rejected;
+            return;
+        }
+        const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        queue.enqueue({requestId, serial, validated.arguments,
+                       QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs,
+                                      Qt::PreciseTimer),
+                       true});
+        pendingRequests.append(requestId);
+        ++dispatched;
+        processNextCommand(serial);
+    };
+
+    for (const ActionNode& action : actions) {
+        if (action.type == QStringLiteral("delay")) {
+            // parseRule already bounds this to 1..600 seconds; sleeping here
+            // keeps sequential actions ordered exactly as authored.
+            QEventLoop pause;
+            QTimer::singleShot(action.delaySeconds * 1000, &pause, &QEventLoop::quit);
+            pause.exec();
+            continue;
+        }
+        if (action.type == QStringLiteral("mute")) {
+            // A conditional toggle against the latest observation: matching
+            // state is a successful no-op, unknown state a rejected attempt.
+            const bool wantMuted = action.mutedFlag != 0;
+            for (const QString& serial : targets) {
+                const DeviceSnapshot snapshot = m_snapshots.value(serial);
+                if (!snapshot.muted.has_value()) {
+                    ++rejected;
+                    continue;
+                }
+                if (*snapshot.muted == wantMuted) {
+                    continue;
+                }
+                QJsonObject command;
+                command.insert(QStringLiteral("operation"), QStringLiteral("keypress"));
+                command.insert(QStringLiteral("key"), QStringLiteral("VolumeMute"));
+                enqueue(serial, command);
+            }
+            continue;
+        }
+        if (action.type == QStringLiteral("setVolume")) {
+            // ECP offers no absolute volume: walk relative from the last
+            // observed reading, bounded at 30 presses (~1 unit per press).
+            for (const QString& serial : targets) {
+                const DeviceSnapshot snapshot = m_snapshots.value(serial);
+                if (!snapshot.volume.has_value()) {
+                    ++rejected;
+                    continue;
+                }
+                const int delta = action.volume - *snapshot.volume;
+                if (delta == 0) {
+                    continue;
+                }
+                QJsonObject command;
+                command.insert(QStringLiteral("operation"), QStringLiteral("keypress"));
+                command.insert(
+                    QStringLiteral("key"),
+                    delta > 0 ? QStringLiteral("VolumeUp") : QStringLiteral("VolumeDown"));
+                const int presses = std::min(qAbs(delta), 30);
+                for (int press = 0; press < presses; ++press) {
+                    enqueue(serial, command);
+                }
+            }
+            continue;
+        }
+        QJsonObject command;
+        if (action.type == QStringLiteral("keypress")) {
+            command.insert(QStringLiteral("operation"), QStringLiteral("keypress"));
+            command.insert(QStringLiteral("key"), action.key);
+        } else {
+            command.insert(QStringLiteral("operation"), QStringLiteral("launch"));
+            command.insert(QStringLiteral("appId"), action.appId);
+        }
+        for (const QString& serial : targets) {
+            enqueue(serial, command);
+        }
+    }
+    return true;
 }
 
 DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& serial,

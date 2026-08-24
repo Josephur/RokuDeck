@@ -91,6 +91,11 @@ class DaemonDbusTest final : public QObject {
     void pendingScheduleKeepsTheDaemonAwake();
     void stateChangeRuleFiresOnRisingEdgeOnly();
     void firstObservationIsBaselineAndNeverFires();
+    void muteActionPressesVolumeMuteOnce();
+    void muteActionMatchingObservedStateIsANoOp();
+    void setVolumeWalksDownWithBoundedPresses();
+    void volumeActionsWithoutObservedAudioFailWithoutDispatching();
+    void mixedAudioStateAcrossTargetsYieldsPartial();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -116,6 +121,8 @@ class DaemonDbusTest final : public QObject {
     // Home keypress requests seen by the fake runner, i.e. stateChange
     // firings that reached a device.
     [[nodiscard]] int homeKeypressCount() const;
+    // Keypress requests for one specific key seen by the fake runner.
+    [[nodiscard]] int keypressCount(const QString& key) const;
     // Serves the one-time rds --version probe that precedes the very first
     // device query of a daemon's lifetime.
     void completePollVersion();
@@ -124,7 +131,7 @@ class DaemonDbusTest final : public QObject {
     // per serial, so this consumes exactly one cycle no matter how eagerly the
     // scheduler re-arms. A firing triggered by the audio response dispatches
     // synchronously inside this call.
-    void completePollReadings(int volume);
+    void completePollReadings(int volume, bool muted = false);
 
     QTemporaryDir m_configDirectory;
     QString m_configPath;
@@ -1656,11 +1663,15 @@ void DaemonDbusTest::stopRunnerCompleter() {
 }
 
 int DaemonDbusTest::homeKeypressCount() const {
+    return keypressCount(QStringLiteral("Home"));
+}
+
+int DaemonDbusTest::keypressCount(const QString& key) const {
     int count = 0;
     for (const ProcessRequest& request : m_runner->requests) {
         if (request.arguments.size() >= 2
             && request.arguments.last(2)
-                == QStringList({QStringLiteral("keypress"), QStringLiteral("Home")})) {
+                == QStringList({QStringLiteral("keypress"), key})) {
             ++count;
         }
     }
@@ -1673,7 +1684,7 @@ void DaemonDbusTest::completePollVersion() {
     m_runner->complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
 }
 
-void DaemonDbusTest::completePollReadings(int volume) {
+void DaemonDbusTest::completePollReadings(int volume, bool muted) {
     QVERIFY2(QTest::qWaitFor([&] { return !m_runner->callbacks.isEmpty(); }, 15s),
              "the next device-info request never reached the fake runner");
     m_runner->complete(
@@ -1698,9 +1709,11 @@ void DaemonDbusTest::completePollReadings(int volume) {
         {0,
          QByteArrayLiteral(
              R"json({"success":true,"data":"<audio-device><volume>)json") +
-             QByteArray::number(volume)
-             + QByteArrayLiteral(
-                 R"json(</volume><mute-status>false</mute-status></audio-device>","status":200,"headers":{}})json"),
+         QByteArray::number(volume)
+         + QByteArrayLiteral(R"json(</volume><mute-status>)json")
+         + (muted ? QByteArrayLiteral("true") : QByteArrayLiteral("false"))
+         + QByteArrayLiteral(
+             R"json(</mute-status></audio-device>","status":200,"headers":{}})json"),
          {},
          false});
 }
@@ -2266,6 +2279,131 @@ void DaemonDbusTest::firstObservationIsBaselineAndNeverFires() {
                  .value(QStringLiteral("outcome"))
                  .toString(),
              QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::muteActionPressesVolumeMuteOnce() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.36")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    // Seed the snapshot the mute acts on: audible and unmuted.
+    completePollVersion();
+    completePollReadings(18);
+    QCOMPARE(keypressCount(QStringLiteral("VolumeMute")), 0);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Silence please","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"mute","muted":true}]})json"));
+
+    startRunnerCompleter();  // the run waits for its delivery verdict
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+
+    // One toggle press beyond the polling traffic, through the same pipeline.
+    QCOMPARE(keypressCount(QStringLiteral("VolumeMute")), 1);
+    QCOMPARE(m_runner->lastRequest.arguments.last(2),
+             QStringList({QStringLiteral("keypress"), QStringLiteral("VolumeMute")}));
+}
+
+void DaemonDbusTest::muteActionMatchingObservedStateIsANoOp() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.37")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    completePollVersion();
+    completePollReadings(18, true);  // already muted
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Stay quiet","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"mute","muted":true}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+
+    // The observed state already matches: a successful no-op, zero presses.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeMute")), 0);
+}
+
+void DaemonDbusTest::setVolumeWalksDownWithBoundedPresses() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.38")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    // Volume 18 down to 15 is a delta of -3: exactly three VolumeDown walks.
+    completePollVersion();
+    completePollReadings(18);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Softly","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":15}]})json"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 0);
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 3);
+    QCOMPARE(keypressCount(QStringLiteral("VolumeUp")), 0);
+    QCOMPARE(m_runner->lastRequest.arguments.last(2),
+             QStringList({QStringLiteral("keypress"), QStringLiteral("VolumeDown")}));
+}
+
+void DaemonDbusTest::volumeActionsWithoutObservedAudioFailWithoutDispatching() {
+    // Registered but never polled: no audio reading was ever observed.
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.90")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Blind tuning","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"setVolume","volume":15},{"type":"mute","muted":true}]})json"));
+
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
+    // Steering blind is forbidden: nothing may reach the device.
+    QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::mixedAudioStateAcrossTargetsYieldsPartial() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.39")});
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-B"), QStringLiteral("Kitchen TV"), QStringLiteral("192.0.2.40")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    // Only SERIAL-A ever reports audio; SERIAL-B stays unobserved.
+    completePollVersion();
+    completePollReadings(30);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Whole-house mute","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"mute","muted":true}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+
+    // SERIAL-A toggles once; SERIAL-B's rejection makes the run partial.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("partial"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeMute")), 1);
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

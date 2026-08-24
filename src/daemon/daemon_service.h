@@ -161,6 +161,15 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
     [[nodiscard]] ActionResult executeActions(const RuleDocument& rule,
                                               const QStringList& targets);
+    // Walks one authored action list against the consenting targets. Returns
+    // false only when an action type cannot be executed at all, failing the
+    // whole run; per-target rejections are counted instead. callStack carries
+    // the ancestor ids of nested runRule dispatches (unused until those land).
+    [[nodiscard]] bool dispatchActionList(const QList<ActionNode>& actions,
+                                          const QStringList& targets,
+                                          const QStringList& callStack, int& dispatched,
+                                          int& rejected, int& deliveryFailures,
+                                          QStringList& pendingRequests);
     void rearmScheduleTimer();
     [[nodiscard]] QString executeRuleRun(const QString& ruleId);
     void runStateChangeFirings(const QStringList& ruleIds);
