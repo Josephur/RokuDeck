@@ -1198,6 +1198,19 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
     Q_UNUSED(callStack)
     Q_UNUSED(deliveryFailures)
 
+    // Action types whose execution lands in later milestones abort the whole
+    // list up front, so a mixed list never half-executes (and an unknown type
+    // can never be mistaken for a launch).
+    static const QSet<QString> executableTypes{
+        QStringLiteral("delay"),     QStringLiteral("keypress"),
+        QStringLiteral("launchApp"), QStringLiteral("mute"),
+        QStringLiteral("setVolume")};
+    for (const ActionNode& action : actions) {
+        if (!executableTypes.contains(action.type)) {
+            return false;
+        }
+    }
+
     auto enqueue = [&](const QString& serial, const QJsonObject& command) {
         const QString commandJson =
             QString::fromUtf8(QJsonDocument(command).toJson(QJsonDocument::Compact));

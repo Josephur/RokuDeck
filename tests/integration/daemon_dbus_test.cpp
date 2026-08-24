@@ -96,6 +96,7 @@ class DaemonDbusTest final : public QObject {
     void setVolumeWalksDownWithBoundedPresses();
     void volumeActionsWithoutObservedAudioFailWithoutDispatching();
     void mixedAudioStateAcrossTargetsYieldsPartial();
+    void notYetExecutableActionsAbortTheWholeRunWithoutDispatching();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -2404,6 +2405,37 @@ void DaemonDbusTest::mixedAudioStateAcrossTargetsYieldsPartial() {
     // SERIAL-A toggles once; SERIAL-B's rejection makes the run partial.
     QCOMPARE(run.arguments().front().toString(), QStringLiteral("partial"));
     QCOMPARE(keypressCount(QStringLiteral("VolumeMute")), 1);
+}
+
+void DaemonDbusTest::notYetExecutableActionsAbortTheWholeRunWithoutDispatching() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.91")});
+
+    // A not-yet-executable step poisons its whole list: even the executable
+    // Home ahead of it must stay put until runRule/ifThenElse land.
+    const QString mixedId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Mixed macro","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"keypress","key":"Home"},)json"
+        R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"power",)json"
+        R"json("op":"is","value":"on"}},"then":[{"type":"keypress","key":"Back"}]}]})json"));
+    const QString macroId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Bare macro","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"runRule","id":"rCHILD"}]})json"));
+
+    startRunnerCompleter();  // keep any stray delivery wait short either way
+    const QDBusMessage mixedRun = waitForReply(m_proxy->RunRule(mixedId));
+    const QDBusMessage macroRun = waitForReply(m_proxy->RunRule(macroId));
+    stopRunnerCompleter();
+    QVERIFY2(mixedRun.type() != QDBusMessage::ErrorMessage,
+             qPrintable(mixedRun.errorMessage()));
+    QVERIFY2(macroRun.type() != QDBusMessage::ErrorMessage, qPrintable(macroRun.errorMessage()));
+    QCOMPARE(mixedRun.arguments().front().toString(), QStringLiteral("failed"));
+    QCOMPARE(macroRun.arguments().front().toString(), QStringLiteral("failed"));
+
+    // The deliberate abort guard: nothing reaches a device, not even the
+    // executable steps sharing the list (replaced by Tasks 5–6).
+    QVERIFY(m_runner->requests.isEmpty());
+    QCOMPARE(homeKeypressCount(), 0);
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)
