@@ -14,7 +14,7 @@ RokuDeckApplet::RokuDeckApplet(QObject* parent, const KPluginMetaData& data,
     : Plasma::Applet(parent, data, args), m_devices(this),
       m_daemon(&m_devices,
                QStringLiteral("plasmoid-") + QUuid::createUuid().toString(QUuid::WithoutBraces),
-               this) {
+               &m_automations, this) {
     connect(&m_devices, &QAbstractItemModel::rowsInserted, this,
             &RokuDeckApplet::ensureSelectedSerial);
     connect(&m_devices, &QAbstractItemModel::rowsRemoved, this,
@@ -55,6 +55,10 @@ RokuDeckApplet::~RokuDeckApplet() {
 
 DevicesModel* RokuDeckApplet::devices() {
     return &m_devices;
+}
+
+AutomationsModel* RokuDeckApplet::automations() {
+    return &m_automations;
 }
 
 QString RokuDeckApplet::selectedSerial() const {
@@ -116,6 +120,21 @@ void RokuDeckApplet::testDevice(const QString& address) {
 void RokuDeckApplet::discoverDevices() {
     setLastError({});
     m_daemon.discoverDevices();
+}
+
+void RokuDeckApplet::setRuleEnabled(const QString& ruleId, bool enabled) {
+    setLastError({});
+    m_daemon.setRuleEnabled(ruleId, enabled);
+}
+
+void RokuDeckApplet::deleteRule(const QString& ruleId) {
+    setLastError({});
+    m_daemon.deleteRule(ruleId);
+}
+
+void RokuDeckApplet::runRule(const QString& ruleId) {
+    setLastError({});
+    m_daemon.runRule(ruleId);
 }
 
 void RokuDeckApplet::ensureSelectedSerial() {

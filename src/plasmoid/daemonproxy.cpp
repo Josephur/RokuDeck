@@ -2,6 +2,8 @@
 
 #include "daemonproxy.h"
 
+#include "automationsmodel.h"
+#include "core/rule_summary.h"
 #include "devicesmodel.h"
 #include "rokudeck1_interface.h"
 
@@ -228,8 +230,10 @@ QJsonObject commandObject(const QString& action, const QVariant& value) {
 
 } // namespace
 
-DaemonProxy::DaemonProxy(DevicesModel* devices, QString clientId, QObject* parent)
-    : QObject(parent), m_devices(devices), m_clientId(std::move(clientId)),
+DaemonProxy::DaemonProxy(DevicesModel* devices, QString clientId, AutomationsModel* rules,
+                         QObject* parent)
+    : QObject(parent), m_devices(devices), m_rules(rules),
+      m_clientId(std::move(clientId)),
       m_interface(std::make_unique<IoGithubJosephurRokuDeck1Interface>(
           QString::fromLatin1(serviceName), QString::fromLatin1(objectPath),
           QDBusConnection::sessionBus())),
@@ -245,6 +249,10 @@ DaemonProxy::DaemonProxy(DevicesModel* devices, QString clientId, QObject* paren
             &DaemonProxy::applySnapshotJson);
     connect(m_interface.get(), &IoGithubJosephurRokuDeck1Interface::CommandFinished, this,
             &DaemonProxy::handleCommandFinished);
+    if (m_rules) {
+        connect(m_interface.get(), &IoGithubJosephurRokuDeck1Interface::RulesChanged, this,
+                &DaemonProxy::applyRulesJson);
+    }
 }
 
 DaemonProxy::~DaemonProxy() {
@@ -279,6 +287,10 @@ void DaemonProxy::stop() {
     m_registered = false;
     m_registeredSerials.clear();
     clearPendingCommands();
+    if (m_rules) {
+        // No daemon means no live list; keep nothing stale on screen.
+        m_rules->replaceRules({});
+    }
     setAvailable(false);
 }
 
@@ -302,6 +314,7 @@ void DaemonProxy::refresh() {
         applyDeviceListJson(reply.value());
         setAvailable(true);
     });
+    fetchRules();
 }
 
 void DaemonProxy::sendCommand(const QString& serial, const QString& action, const QVariant& value) {
@@ -396,6 +409,46 @@ void DaemonProxy::setDeviceOrder(const QStringList& serials) {
     watchDeviceCall(QStringLiteral("setDeviceOrder"), m_interface->SetDeviceOrder(serials));
 }
 
+void DaemonProxy::setRuleEnabled(const QString& ruleId, bool enabled) {
+    if (!m_active || ruleId.isEmpty()) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("setRuleEnabled"), m_interface->SetRuleEnabled(ruleId, enabled));
+}
+
+void DaemonProxy::deleteRule(const QString& ruleId) {
+    if (!m_active || ruleId.isEmpty()) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("deleteRule"), m_interface->DeleteRule(ruleId));
+}
+
+void DaemonProxy::runRule(const QString& ruleId) {
+    if (!m_active || ruleId.isEmpty()) {
+        return;
+    }
+    // RunRule carries the run's outcome as its reply payload, so it gets its
+    // own watcher rather than the void-reply device-call helper.
+    const quint64 generation = m_generation;
+    setBusyCount(m_busyCount + 1);
+    auto* watcher = new QDBusPendingCallWatcher(m_interface->RunRule(ruleId), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, watcher, generation, ruleId]() {
+                const QDBusPendingReply<QString> reply = *watcher;
+                watcher->deleteLater();
+                setBusyCount(m_busyCount - 1);
+                if (!m_active || generation != m_generation) {
+                    return;
+                }
+                if (reply.isError()) {
+                    Q_EMIT deviceOperationFailed(QStringLiteral("runRule"),
+                                                 reply.error().message());
+                    return;
+                }
+                Q_EMIT ruleRunFinished(ruleId, reply.value());
+            });
+}
+
 void DaemonProxy::testDevice(const QString& address) {
     if (!m_active || address.isEmpty()) {
         return;
@@ -488,6 +541,9 @@ void DaemonProxy::handleServiceOwnerChanged(const QString& service, const QStrin
     clearPendingCommands();
     if (newOwner.isEmpty()) {
         m_devices->markAllStale();
+        if (m_rules) {
+            m_rules->replaceRules({});
+        }
         setAvailable(false);
         return;
     }
@@ -511,6 +567,59 @@ void DaemonProxy::applyDeviceListJson(const QString& devicesJson) {
     for (const DeviceDescription& device : *devices) {
         requestSnapshot(device.serial);
     }
+}
+
+void DaemonProxy::fetchRules() {
+    if (!m_active || !m_rules) {
+        return;
+    }
+    const quint64 generation = m_generation;
+    auto* watcher = new QDBusPendingCallWatcher(m_interface->ListRules(), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation]() {
+        const QDBusPendingReply<QString> reply = *watcher;
+        watcher->deleteLater();
+        if (!m_active || generation != m_generation || reply.isError()) {
+            return;
+        }
+        applyRulesJson(reply.value());
+    });
+}
+
+void DaemonProxy::applyRulesJson(const QString& rulesJsonText) {
+    if (!m_active || !m_rules) {
+        return;
+    }
+    const std::optional<QJsonObject> envelope = parseEnvelope(rulesJsonText);
+    if (!envelope || !envelope->value(QStringLiteral("rules")).isArray()) {
+        // Keep the last good list visible: a bad announcement must not wipe
+        // what the user is looking at.
+        Q_EMIT errorOccurred(i18nc("@info", "The RokuDeck automation list is invalid"));
+        return;
+    }
+
+    QList<RuleEntry> entries;
+    const QJsonArray array = envelope->value(QStringLiteral("rules")).toArray();
+    for (const QJsonValue& value : array) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const QJsonObject object = value.toObject();
+        const QString id = object.value(QStringLiteral("id")).toString();
+        const QString name = object.value(QStringLiteral("name")).toString();
+        if (id.isEmpty() || name.isEmpty()) {
+            continue;
+        }
+        RuleEntry entry;
+        entry.id = id;
+        entry.name = name;
+        entry.enabled = object.value(QStringLiteral("enabled")).toBool(true);
+        entry.summary = ruleSummary(object);
+        const QJsonObject lastRun = object.value(QStringLiteral("lastRun")).toObject();
+        entry.outcome = lastRun.value(QStringLiteral("outcome")).toString();
+        entry.firedAt = lastRun.value(QStringLiteral("lastFiredAt")).toString();
+        entries.append(std::move(entry));
+    }
+    m_rules->replaceRules(entries);
 }
 
 void DaemonProxy::applySnapshotJson(const QString& expectedSerial, const QString& snapshotJson) {

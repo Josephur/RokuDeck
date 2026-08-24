@@ -113,6 +113,7 @@ add_executable(plasmoid-bridge-test
   ${PROJECT_SOURCE_DIR}/src/plasmoid/rokudeckapplet.cpp
   ${PROJECT_SOURCE_DIR}/src/plasmoid/daemonproxy.cpp
   ${PROJECT_SOURCE_DIR}/src/plasmoid/devicesmodel.cpp
+  ${PROJECT_SOURCE_DIR}/src/plasmoid/automationsmodel.cpp
 )
 target_include_directories(plasmoid-bridge-test
   PRIVATE
@@ -124,6 +125,7 @@ target_compile_definitions(plasmoid-bridge-test
 )
 target_link_libraries(plasmoid-bridge-test
   PRIVATE
+    RokuDeck::Core
     RokuDeck::DBusInterface
     KF6::ConfigCore
     KF6::I18n

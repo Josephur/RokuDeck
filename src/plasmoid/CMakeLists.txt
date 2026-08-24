@@ -24,6 +24,7 @@ plasma_add_applet(io.github.josephur.rokudeck
     rokudeckapplet.cpp
     daemonproxy.cpp
     devicesmodel.cpp
+    automationsmodel.cpp
   RESOURCES
     config/main.xml
 )
@@ -33,6 +34,7 @@ target_compile_definitions(io.github.josephur.rokudeck
 
 target_link_libraries(io.github.josephur.rokudeck
   PRIVATE
+    RokuDeck::Core
     RokuDeck::DBusInterface
     Qt6::DBus
     Qt6::Qml

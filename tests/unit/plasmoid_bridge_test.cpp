@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "plasmoid/automationsmodel.h"
 #include "plasmoid/daemonproxy.h"
 #include "plasmoid/devicesmodel.h"
 #include "plasmoid/rokudeckapplet.h"
@@ -22,6 +23,7 @@
 #include <memory>
 #include <type_traits>
 
+using RokuDeck::AutomationsModel;
 using RokuDeck::DaemonProxy;
 using RokuDeck::DevicesModel;
 using RokuDeck::RokuDeckApplet;
@@ -110,9 +112,15 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     QStringList removedDevices;
     QStringList testedAddresses;
     QStringList orderedSerials;
+    QString rulesJson = QStringLiteral(R"json({"schemaVersion":1,"rules":[]})json");
+    QStringList ruleEnabledCalls;
+    QStringList ruleDeletedCalls;
+    QStringList ruleRunCalls;
+    QString nextRunOutcome = QStringLiteral("ok");
     bool delayNextRegistration = false;
     bool delayNextDeviceCall = false;
     bool rejectNextCall = false;
+    bool rejectNextRuleCall = false;
 
     bool registerOnBus() {
         const bool objectRegistered = m_connection.registerObject(
@@ -147,6 +155,37 @@ class FakeDaemon final : public QObject, protected QDBusContext {
   public Q_SLOTS:
     QString ListDevices() const {
         return devicesJson();
+    }
+
+    QString ListRules() const {
+        return rulesJson;
+    }
+
+    void SetRuleEnabled(const QString& ruleId, bool enabled) {
+        ruleEnabledCalls.append(ruleId + (enabled ? QStringLiteral("|on")
+                                                  : QStringLiteral("|off")));
+        if (rejectNextRuleCall) {
+            rejectNextRuleCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("fixture rejection"));
+        }
+    }
+
+    void DeleteRule(const QString& ruleId) {
+        ruleDeletedCalls.append(ruleId);
+        if (rejectNextRuleCall) {
+            rejectNextRuleCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("fixture rejection"));
+        }
+    }
+
+    QString RunRule(const QString& ruleId) {
+        ruleRunCalls.append(ruleId);
+        if (rejectNextRuleCall) {
+            rejectNextRuleCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("fixture rejection"));
+            return {};
+        }
+        return nextRunOutcome;
     }
 
     QString GetSnapshot(const QString& serial) const {
@@ -246,6 +285,7 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
     void DeviceListChanged(const QString& devicesJson);
     void CommandFinished(const QString& requestId, const QString& resultJson);
+    void RulesChanged(const QString& rulesJson);
 
   private:
     const QString m_connectionName;
@@ -278,6 +318,10 @@ class PlasmoidBridgeTest : public QObject {
     void deviceManagementReachesTheDaemonAndReportsRejection();
     void testDeviceReportsTheProbedSnapshot();
     void anInFlightOperationIsReportedThroughPlasmasBusyProperty();
+    void automationsModelLoadsAndTracksRulesChanged();
+    void unknownFutureRuleTypesDegradeToCustomRule();
+    void malformedRuleListReportsAnErrorAndKeepsTheLastGoodList();
+    void ruleMutationsReachTheDaemonAndReportRejection();
 
   private:
     [[nodiscard]] QModelIndex firstIndex(const DevicesModel& model) const;
@@ -708,6 +752,122 @@ void PlasmoidBridgeTest::anInFlightOperationIsReportedThroughPlasmasBusyProperty
     QVERIFY(m_fake->completeDelayedDeviceCall());
     QTRY_VERIFY_WITH_TIMEOUT(!applet->isBusy(), 2000);
     QVERIFY(!applet->property("busy").toBool());
+}
+
+namespace {
+
+QString rulesFixtureJson() {
+    return QStringLiteral(
+        R"json({"schemaVersion":1,"rules":[)json"
+        R"json({"schemaVersion":1,"id":"rAAA11111","name":"Nightly home","enabled":true,)json"
+        R"json("mode":"queued","devices":[],"trigger":{"type":"time","kind":"daily","time":"23:00"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}],)json"
+        R"json("lastRun":{"lastFiredAt":"2026-08-24T03:00:00.000Z","outcome":"ok"}},)json"
+        R"json({"schemaVersion":1,"id":"rBBB22222","name":"Nudge","enabled":false,)json"
+        R"json("mode":"queued","devices":[],"trigger":{"type":"interval","minutes":30},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"
+        R"json(]})json");
+}
+
+} // namespace
+
+void PlasmoidBridgeTest::automationsModelLoadsAndTracksRulesChanged() {
+    DevicesModel devices;
+    AutomationsModel rules;
+    DaemonProxy proxy(&devices, QStringLiteral("PROXY-RULES"), &rules);
+    m_fake->rulesJson = rulesFixtureJson();
+    proxy.start();
+
+    QTRY_COMPARE(rules.rowCount(), 2);
+    const QModelIndex first(rules.index(0, 0));
+    QCOMPARE(first.data(AutomationsModel::IdRole).toString(), QStringLiteral("rAAA11111"));
+    QCOMPARE(first.data(AutomationsModel::NameRole).toString(), QStringLiteral("Nightly home"));
+    QCOMPARE(first.data(AutomationsModel::EnabledRole).toBool(), true);
+    QCOMPARE(first.data(AutomationsModel::SummaryRole).toString(),
+             QStringLiteral("Daily at 23:00 \u00b7 Press Home"));
+    QCOMPARE(first.data(AutomationsModel::OutcomeRole).toString(), QStringLiteral("ok"));
+    QCOMPARE(first.data(AutomationsModel::LastFiredRole).toString(),
+             QStringLiteral("2026-08-24T03:00:00.000Z"));
+
+    const QModelIndex second(rules.index(1, 0));
+    QCOMPARE(second.data(AutomationsModel::SummaryRole).toString(),
+             QStringLiteral("Every 30 minutes \u00b7 Press Home"));
+    QCOMPARE(second.data(AutomationsModel::EnabledRole).toBool(), false);
+    QCOMPARE(second.data(AutomationsModel::OutcomeRole).toString(), QString());
+
+    // The daemon's announcement replaces the whole list, not patches it.
+    m_fake->rulesJson = QStringLiteral(
+        R"json({"schemaVersion":1,"rules":[{"schemaVersion":1,"id":"rCCC33333",)json"
+        R"json("name":"Solo","enabled":true,"mode":"queued","devices":[],)json"
+        R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Back"}]})json"
+        R"json(]})json");
+    Q_EMIT m_fake->RulesChanged(m_fake->rulesJson);
+    QTRY_COMPARE(rules.rowCount(), 1);
+    QCOMPARE(rules.index(0, 0).data(AutomationsModel::IdRole).toString(),
+             QStringLiteral("rCCC33333"));
+}
+
+void PlasmoidBridgeTest::unknownFutureRuleTypesDegradeToCustomRule() {
+    DevicesModel devices;
+    AutomationsModel rules;
+    DaemonProxy proxy(&devices, QStringLiteral("PROXY-FUTURE"), &rules);
+    m_fake->rulesJson = QStringLiteral(
+        R"json({"schemaVersion":1,"rules":[{"schemaVersion":1,"id":"rFFF44444",)json"
+        R"json("name":"From the future","enabled":true,"mode":"queued","devices":[],)json"
+        R"json("trigger":{"type":"telepathy"},"actions":[{"type":"teleport","target":"sofa"}]})json"
+        R"json(]})json");
+    proxy.start();
+
+    QTRY_COMPARE(rules.rowCount(), 1);
+    const QModelIndex row(rules.index(0, 0));
+    QCOMPARE(row.data(AutomationsModel::NameRole).toString(), QStringLiteral("From the future"));
+    QCOMPARE(row.data(AutomationsModel::SummaryRole).toString(), QStringLiteral("Custom rule"));
+}
+
+void PlasmoidBridgeTest::malformedRuleListReportsAnErrorAndKeepsTheLastGoodList() {
+    DevicesModel devices;
+    AutomationsModel rules;
+    DaemonProxy proxy(&devices, QStringLiteral("PROXY-BADLIST"), &rules);
+    m_fake->rulesJson = rulesFixtureJson();
+    proxy.start();
+    QTRY_COMPARE(rules.rowCount(), 2);
+
+    QSignalSpy errors(&proxy, &DaemonProxy::errorOccurred);
+    Q_EMIT m_fake->RulesChanged(QStringLiteral("{not json"));
+    QTRY_COMPARE(errors.count(), 1);
+    // A bad announcement must not wipe what the user is looking at.
+    QCOMPARE(rules.rowCount(), 2);
+}
+
+void PlasmoidBridgeTest::ruleMutationsReachTheDaemonAndReportRejection() {
+    DevicesModel devices;
+    AutomationsModel rules;
+    DaemonProxy proxy(&devices, QStringLiteral("PROXY-MUTATE"), &rules);
+    m_fake->rulesJson = rulesFixtureJson();
+    proxy.start();
+    QTRY_COMPARE(rules.rowCount(), 2);
+
+    QSignalSpy succeeded(&proxy, &DaemonProxy::deviceOperationSucceeded);
+    QSignalSpy failures(&proxy, &DaemonProxy::deviceOperationFailed);
+    QSignalSpy runFinished(&proxy, &DaemonProxy::ruleRunFinished);
+
+    proxy.setRuleEnabled(QStringLiteral("rAAA11111"), false);
+    QTRY_VERIFY(succeeded.count() >= 1);
+    QCOMPARE(m_fake->ruleEnabledCalls, QStringList{QStringLiteral("rAAA11111|off")});
+
+    m_fake->nextRunOutcome = QStringLiteral("partial");
+    proxy.runRule(QStringLiteral("rAAA11111"));
+    QTRY_COMPARE(runFinished.count(), 1);
+    QCOMPARE(runFinished.at(0).at(0).toString(), QStringLiteral("rAAA11111"));
+    QCOMPARE(runFinished.at(0).at(1).toString(), QStringLiteral("partial"));
+    QCOMPARE(m_fake->ruleRunCalls, QStringList{QStringLiteral("rAAA11111")});
+
+    m_fake->rejectNextRuleCall = true;
+    proxy.deleteRule(QStringLiteral("rBBB22222"));
+    QTRY_COMPARE(failures.count(), 1);
+    QCOMPARE(failures.at(0).at(0).toString(), QStringLiteral("deleteRule"));
+    QVERIFY(failures.at(0).at(1).toString().contains(QStringLiteral("fixture rejection")));
+    QCOMPARE(m_fake->ruleDeletedCalls, QStringList{QStringLiteral("rBBB22222")});
 }
 
 QTEST_MAIN(PlasmoidBridgeTest)

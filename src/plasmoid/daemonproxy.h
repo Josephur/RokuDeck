@@ -17,13 +17,17 @@ class QDBusServiceWatcher;
 
 namespace RokuDeck {
 
+class AutomationsModel;
 class DevicesModel;
 
 class DaemonProxy final : public QObject {
     Q_OBJECT
 
   public:
-    explicit DaemonProxy(DevicesModel* devices, QString clientId, QObject* parent = nullptr);
+    // The automation model is optional so existing embedders (and tests that
+    // only exercise devices) can construct a proxy without one.
+    explicit DaemonProxy(DevicesModel* devices, QString clientId,
+                         AutomationsModel* rules = nullptr, QObject* parent = nullptr);
     ~DaemonProxy() override;
 
     [[nodiscard]] bool isAvailable() const;
@@ -38,6 +42,9 @@ class DaemonProxy final : public QObject {
     void setDeviceOrder(const QStringList& serials);
     void testDevice(const QString& address);
     void discoverDevices();
+    void setRuleEnabled(const QString& ruleId, bool enabled);
+    void deleteRule(const QString& ruleId);
+    void runRule(const QString& ruleId);
 
   Q_SIGNALS:
     void availableChanged(bool available);
@@ -47,12 +54,15 @@ class DaemonProxy final : public QObject {
     void deviceTestFinished(const QString& address, const QVariantMap& snapshot,
                             const QString& error);
     void discoveryFinished(const QString& error);
+    void ruleRunFinished(const QString& ruleId, const QString& outcome);
     void busyChanged();
 
   private:
     void handleServiceOwnerChanged(const QString& service, const QString& oldOwner,
                                    const QString& newOwner);
     void applyDeviceListJson(const QString& devicesJson);
+    void applyRulesJson(const QString& rulesJson);
+    void fetchRules();
     void applySnapshotJson(const QString& expectedSerial, const QString& snapshotJson);
     void requestSnapshot(const QString& serial);
     void updateRegistration();
@@ -68,6 +78,7 @@ class DaemonProxy final : public QObject {
   private:
 
     DevicesModel* const m_devices;
+    AutomationsModel* const m_rules;
     const QString m_clientId;
     std::unique_ptr<IoGithubJosephurRokuDeck1Interface> m_interface;
     std::unique_ptr<QDBusServiceWatcher> m_ownerWatcher;
