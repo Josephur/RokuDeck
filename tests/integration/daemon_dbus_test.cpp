@@ -82,6 +82,8 @@ class DaemonDbusTest final : public QObject {
     void runRuleReportsMixedDeliveryAsPartial();
     void runRuleReportsUnsupportedActionsAsFailed();
     void runRuleWithUnknownIdErrors();
+    void runRuleWithMatchingConditionsRunsAndReportsOk();
+    void runRuleWithFailingConditionsRecordsConditionFalse();
     void scheduledDailyRuleFiresThroughTheCommandPipeline();
     void disablingARuleUnschedulesItsNextFire();
     void onceRuleMissedByLessThanADayFiresAtStartup();
@@ -1974,6 +1976,74 @@ void DaemonDbusTest::runRuleWithUnknownIdErrors() {
     QVERIFY2(run.errorMessage().contains(QStringLiteral("unknownRule")),
              qPrintable(run.errorMessage()));
     QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::runRuleWithMatchingConditionsRunsAndReportsOk() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.33")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("cond-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    // Seed the snapshot the gate reads: volume 18 sits under the threshold.
+    completePollVersion();
+    completePollReadings(18);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Quiet movie","trigger":{"type":"manual"},)json"
+        R"json("conditions":{"leaf":{"device":"*","field":"volume","op":"lt","value":20}},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    startRunnerCompleter();  // the run waits for its delivery verdict
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(homeKeypressCount(), 1);
+}
+
+void DaemonDbusTest::runRuleWithFailingConditionsRecordsConditionFalse() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.34")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("cond-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    completePollVersion();
+    completePollReadings(18);  // volume 18 fails a "louder than 50" gate
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Loud movie","trigger":{"type":"manual"},)json"
+        R"json("conditions":{"leaf":{"device":"*","field":"volume","op":"gt","value":50}},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    // Before gating exists this call still dispatches, so keep the delivery
+    // pump alive around it either way.
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("condition-false"));
+
+    // A false tree must stop the pipeline before anything reaches a device,
+    // yet still land a last-run record on the announced rule.
+    QCOMPARE(homeKeypressCount(), 0);
+    const QJsonObject rule =
+        rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+    QCOMPARE(rule.value(QStringLiteral("id")).toString(), ruleId);
+    QCOMPARE(rule.value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("condition-false"));
+    QVERIFY2(!rule.value(QStringLiteral("lastRun"))
+                  .toObject()
+                  .value(QStringLiteral("lastFiredAt"))
+                  .toString()
+                  .isEmpty(),
+             "a recorded run must carry its timestamp");
 }
 
 void DaemonDbusTest::scheduledDailyRuleFiresThroughTheCommandPipeline() {

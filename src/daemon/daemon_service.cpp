@@ -1078,6 +1078,22 @@ QString DaemonService::executeRuleRun(const QString& ruleId) {
         }
     }
 
+    // Conditions gate any firing after consent has been resolved, so a
+    // consent-blocked run never reports condition-false (spec §4 order).
+    if (!targets.isEmpty() && rule.conditions &&
+        !conditionsMet(*rule.conditions, m_snapshots, targets)) {
+        rule.lastRun.firedAtIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+        rule.lastRun.outcome = QStringLiteral("condition-false");
+        // Delay steps pump the event loop, so D-Bus calls may have erased or
+        // rewritten the rule while we ran; never resurrect a deleted entry.
+        if (const auto record = findRule(rule.id); record != m_rules.end()) {
+            *record = rule;
+        }
+        announceRules();
+        evaluateDueRules();  // schedules that fell due while we evaluated
+        return QStringLiteral("condition-false");
+    }
+
     QString outcome;
     if (targets.isEmpty()) {
         outcome = QStringLiteral("consent-blocked");
