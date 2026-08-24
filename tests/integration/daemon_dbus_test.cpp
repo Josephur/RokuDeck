@@ -100,6 +100,7 @@ class DaemonDbusTest final : public QObject {
     void macroChainRunsChildAndReportsOk();
     void selfReferencingMacroReportsCycleError();
     void missingMacroTargetCountsAsFailure();
+    void disabledMacroChildIsRejectedWithoutRunning();
     void condTrueRunsThenBranch();
     void condFalseRunsElseBranch();
     void falseCondWithoutElseIsCleanNoOp();
@@ -2541,6 +2542,40 @@ void DaemonDbusTest::missingMacroTargetCountsAsFailure() {
              QStringLiteral("failed"));
     // A dangling target must not reach any device.
     QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::disabledMacroChildIsRejectedWithoutRunning() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.97")});
+    const QString childId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Sleeping step","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    const QString parentId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Disabled gate","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"runRule","id":"%1"}]})json").arg(childId));
+    const QDBusMessage disabled = waitForReply(
+        m_proxy->SetRuleEnabled(childId, false));
+    QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
+             qPrintable(disabled.errorMessage()));
+
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(parentId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    // A disabled child is exactly a dangling one: one rejected attempt.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
+
+    // The gated macro step must not reach any device.
+    QVERIFY(m_runner->requests.isEmpty());
+    QCOMPARE(homeKeypressCount(), 0);
+
+    // And the child itself never ran, so it records no outcome.
+    const QJsonObject child = rulesListing()
+                                  .value(QStringLiteral("rules"))
+                                  .toArray()
+                                  .at(0)
+                                  .toObject();
+    QCOMPARE(child.value(QStringLiteral("id")).toString(), childId);
+    QVERIFY2(!child.value(QStringLiteral("lastRun")).isObject(),
+             "a disabled macro target must never record a lastRun");
 }
 
 void DaemonDbusTest::condTrueRunsThenBranch() {

@@ -1085,9 +1085,12 @@ QString DaemonService::executeRuleRun(const QString& ruleId, const QStringList& 
         rule.lastRun.firedAtIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
         rule.lastRun.outcome = QStringLiteral("condition-false");
         // Delay steps pump the event loop, so D-Bus calls may have erased or
-        // rewritten the rule while we ran; never resurrect a deleted entry.
+        // rewritten the rule while we ran; never resurrect a deleted entry,
+        // and only write the fields this run owns so a concurrent rewrite
+        // (name, actions, enabled) is not reverted by a stale whole-struct.
         if (const auto record = findRule(rule.id); record != m_rules.end()) {
-            *record = rule;
+            record->lastRun.firedAtIso = rule.lastRun.firedAtIso;
+            record->lastRun.outcome = rule.lastRun.outcome;
         }
         announceRules();
         evaluateDueRules();  // schedules that fell due while we evaluated
@@ -1126,9 +1129,12 @@ QString DaemonService::executeRuleRun(const QString& ruleId, const QStringList& 
     rule.lastRun.firedAtIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     rule.lastRun.outcome = outcome;
     // Delay steps pump the event loop, so D-Bus calls may have erased or
-    // rewritten the rule while we ran; never resurrect a deleted entry.
+    // rewritten the rule while we ran; never resurrect a deleted entry,
+    // and only write the fields this run owns so a concurrent rewrite
+    // (name, actions, enabled) is not reverted by a stale whole-struct.
     if (const auto record = findRule(rule.id); record != m_rules.end()) {
-        *record = rule;
+        record->lastRun.firedAtIso = rule.lastRun.firedAtIso;
+        record->lastRun.outcome = rule.lastRun.outcome;
     }
     announceRules();
     evaluateDueRules();  // schedules that fell due during a delay step
@@ -1310,7 +1316,8 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                 continue;
             }
             // A dangling macro target is one rejected attempt, not an abort.
-            if (findRule(action.ruleId) == m_rules.end()) {
+            const auto child = findRule(action.ruleId);
+            if (child == m_rules.end() || !child->enabled) {
                 ++rejected;
                 continue;
             }
