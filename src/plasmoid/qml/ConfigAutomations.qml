@@ -87,7 +87,7 @@ KCM.SimpleKCM {
                 text: KI18n.i18nc("@title:group", "Automation rules")
             }
 
-            PlasmaExtras.ToolButton {
+            PlasmaComponents.ToolButton {
                 objectName: "addRuleButton"
 
                 enabled: root.daemonReachable && !(root.bridge?.busy ?? false)
