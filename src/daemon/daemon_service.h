@@ -9,12 +9,14 @@
 #include "core/process_runner.h"
 #include "core/rds_client.h"
 #include "core/rule_model.h"
+#include "core/rule_scheduler.h"
 
 #include <QDBusConnection>
 #include <QDBusContext>
 #include <QDBusMessage>
 #include <QDBusServiceWatcher>
 #include <QDeadlineTimer>
+#include <QDateTime>
 #include <QHash>
 #include <QJsonObject>
 #include <QObject>
@@ -36,6 +38,7 @@ class DaemonService final : public QObject, protected QDBusContext {
 
   public:
     using DeadlineRemaining = std::function<qint64(const QDeadlineTimer&)>;
+    using WallClock = std::function<QDateTime()>;
 
     explicit DaemonService(
         QDBusConnection connection = QDBusConnection::sessionBus(),
@@ -43,7 +46,8 @@ class DaemonService final : public QObject, protected QDBusContext {
         std::unique_ptr<ProcessRunner> processRunner = {},
         std::unique_ptr<ConfigStore> configStore = {},
         std::chrono::milliseconds idleGrace = std::chrono::seconds(30),
-        DeadlineRemaining deadlineRemaining = {}, QObject* parent = nullptr);
+        DeadlineRemaining deadlineRemaining = {}, WallClock wallClock = {},
+        QObject* parent = nullptr);
     ~DaemonService() override;
 
     [[nodiscard]] bool registerOnBus();
@@ -57,6 +61,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] QString lastRegistrationError() const;
     [[nodiscard]] bool pollingEnabled() const;
     [[nodiscard]] QString pollingDiagnostic() const;
+    void evaluateDueRules();
 
   public Q_SLOTS:
     [[nodiscard]] QString ListDevices() const;
@@ -150,6 +155,8 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
     [[nodiscard]] ActionResult executeActions(const RuleDocument& rule,
                                               const QStringList& targets);
+    void rearmScheduleTimer();
+    [[nodiscard]] QString executeRuleRun(const QString& ruleId);
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,
@@ -166,9 +173,12 @@ class DaemonService final : public QObject, protected QDBusContext {
     RdsClient m_rdsClient;
     ClientRegistry m_clients;
     QDBusServiceWatcher m_ownerWatcher;
+    WallClock m_wallClock;
     QTimer m_idleTimer;
     QTimer m_pollTimer;
+    QTimer m_scheduleTimer;
     QList<RuleDocument> m_rules;
+    RuleScheduler m_ruleScheduler;
     QHash<QString, DeviceSnapshot> m_snapshots;
     QHash<QString, quint64> m_addressGenerations;
     QList<QDBusMessage> m_discoveryReplies;
@@ -179,6 +189,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     bool m_discoveryActive = false;
     bool m_pollingEnabled = true;
     bool m_shuttingDown = false;
+    bool m_dispatchActive = false;
     QString m_lastRegistrationError;
     QString m_pollingDiagnostic;
 };

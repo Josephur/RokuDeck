@@ -13,6 +13,7 @@
 #include <QDBusMessage>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QJsonArray>
@@ -79,6 +80,8 @@ class DaemonDbusTest final : public QObject {
     void runRuleDispatchesKeypressThroughTheCommandPipeline();
     void runRuleReportsUnsupportedActionsAsFailed();
     void runRuleWithUnknownIdErrors();
+    void scheduledDailyRuleFiresThroughTheCommandPipeline();
+    void disablingARuleUnschedulesItsNextFire();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -90,7 +93,8 @@ class DaemonDbusTest final : public QObject {
     [[nodiscard]] static QJsonObject jsonResult(const QDBusMessage& reply);
     [[nodiscard]] static bool waitForHelperRegistration(QProcess& client);
     void recreateDaemon(std::chrono::milliseconds idleGrace = 30s,
-                        DaemonService::DeadlineRemaining deadlineRemaining = {});
+                        DaemonService::DeadlineRemaining deadlineRemaining = {},
+                        DaemonService::WallClock wallClock = {});
     QString addManualRule(const QString& name);
     QString addRuleReturningId(const QString& payload);
     QJsonObject rulesListing() const;
@@ -98,6 +102,7 @@ class DaemonDbusTest final : public QObject {
     QTemporaryDir m_configDirectory;
     QString m_configPath;
     bool m_automationEnabled = true;
+    QDateTime m_now;
     FakeProcessRunner* m_runner = nullptr;
     std::unique_ptr<DaemonService> m_daemon;
     QString m_clientConnectionName;
@@ -113,11 +118,13 @@ void DaemonDbusTest::init() {
     m_configPath = m_configDirectory.filePath(QString::fromLatin1(QTest::currentTestFunction()) +
                                               QStringLiteral(".rc"));
 
-    recreateDaemon();
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(8, 0));
+    recreateDaemon(30s, {}, [this] { return m_now; });
 }
 
 void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
-                                    DaemonService::DeadlineRemaining deadlineRemaining) {
+                                    DaemonService::DeadlineRemaining deadlineRemaining,
+                                    DaemonService::WallClock wallClock) {
     m_proxy.reset();
     m_daemon.reset();
     auto runner = std::make_unique<FakeProcessRunner>();
@@ -126,7 +133,7 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
     auto configStore = std::make_unique<ConfigStore>(std::move(config));
     m_daemon = std::make_unique<DaemonService>(
         QDBusConnection::sessionBus(), [this] { return m_automationEnabled; }, std::move(runner),
-        std::move(configStore), idleGrace, std::move(deadlineRemaining));
+        std::move(configStore), idleGrace, std::move(deadlineRemaining), std::move(wallClock));
     QVERIFY2(m_daemon->registerOnBus(),
              "the test daemon could not own its private session-bus name");
     if (!m_clientConnection) {
@@ -1814,6 +1821,59 @@ void DaemonDbusTest::runRuleWithUnknownIdErrors() {
     QCOMPARE(run.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
     QVERIFY2(run.errorMessage().contains(QStringLiteral("unknownRule")),
              qPrintable(run.errorMessage()));
+    QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::scheduledDailyRuleFiresThroughTheCommandPipeline() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.80")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Nightly home","trigger":{"type":"time","kind":"daily","time":"09:00"})json"
+        R"json(,"actions":[{"type":"keypress","key":"Home"}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+    const int announcementsBefore = changed.size();
+
+    // A minute early: no firing.
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(8, 59));
+    m_daemon->evaluateDueRules();
+    QVERIFY(m_runner->requests.isEmpty());
+
+    // At the wall-clock time the rule runs through the real pipeline.
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(9, 0));
+    m_daemon->evaluateDueRules();
+    QCOMPARE(m_runner->requests.size(), 1);
+    QCOMPARE(m_runner->lastRequest.arguments.last(2),
+             QStringList({QStringLiteral("keypress"), QStringLiteral("Home")}));
+    QCOMPARE(changed.size(), announcementsBefore + 1);
+    const QJsonObject stored = rulesListing()
+                                   .value(QStringLiteral("rules"))
+                                   .toArray()
+                                   .at(0)
+                                   .toObject();
+    QCOMPARE(stored.value(QStringLiteral("id")).toString(), ruleId);
+    QCOMPARE(stored.value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
+
+    // The same evaluation instant must not fire the occurrence twice.
+    m_daemon->evaluateDueRules();
+    QCOMPARE(m_runner->requests.size(), 1);
+}
+
+void DaemonDbusTest::disablingARuleUnschedulesItsNextFire() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.81")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Nightly home","trigger":{"type":"time","kind":"daily","time":"09:00"})json"
+        R"json(,"actions":[{"type":"keypress","key":"Home"}]})json"));
+    const QDBusMessage disabled = waitForReply(m_proxy->SetRuleEnabled(ruleId, false));
+    QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
+             qPrintable(disabled.errorMessage()));
+
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(9, 0));
+    m_daemon->evaluateDueRules();
     QVERIFY(m_runner->requests.isEmpty());
 }
 

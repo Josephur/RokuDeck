@@ -235,7 +235,8 @@ DaemonService::DaemonService(QDBusConnection connection,
                              std::unique_ptr<ProcessRunner> processRunner,
                              std::unique_ptr<ConfigStore> configStore,
                              std::chrono::milliseconds idleGrace,
-                             DeadlineRemaining deadlineRemaining, QObject* parent)
+                             DeadlineRemaining deadlineRemaining, WallClock wallClock,
+                             QObject* parent)
     : QObject(parent), m_connection(std::move(connection)),
       m_hasEnabledAutomations(hasEnabledAutomations ? std::move(hasEnabledAutomations)
                                                     : [] { return false; }),
@@ -247,7 +248,9 @@ DaemonService::DaemonService(QDBusConnection connection,
       m_configStore(configStore ? std::move(configStore) : std::make_unique<ConfigStore>()),
       m_processRunner(processRunner ? std::move(processRunner)
                                     : std::make_unique<QProcessRunner>()),
-      m_rdsClient(m_processRunner.get()), m_ownerWatcher(this) {
+      m_rdsClient(m_processRunner.get()), m_ownerWatcher(this),
+      m_wallClock(wallClock ? std::move(wallClock)
+                            : [] { return QDateTime::currentDateTime(); }) {
     new RokuDeck1Adaptor(this);
     m_ownerWatcher.setConnection(m_connection);
     m_ownerWatcher.setWatchMode(QDBusServiceWatcher::WatchForUnregistration);
@@ -257,6 +260,10 @@ DaemonService::DaemonService(QDBusConnection connection,
         m_addressGenerations.insert(device.serial, 1);
     }
     m_rules = m_configStore->loadRules();
+    m_ruleScheduler.updateRules(m_rules, m_wallClock());
+    m_scheduleTimer.setSingleShot(true);
+    connect(&m_scheduleTimer, &QTimer::timeout, this, &DaemonService::evaluateDueRules);
+    rearmScheduleTimer();
 
     m_idleTimer.setSingleShot(true);
     m_idleTimer.setInterval(static_cast<int>(std::min<std::chrono::milliseconds::rep>(
@@ -898,7 +905,36 @@ QString DaemonService::rulesJson() const {
 
 void DaemonService::announceRules() {
     m_configStore->saveRules(m_rules);
+    m_ruleScheduler.updateRules(m_rules, m_wallClock());
+    rearmScheduleTimer();
     Q_EMIT RulesChanged(rulesJson());
+}
+
+void DaemonService::rearmScheduleTimer() {
+    const QDateTime deadline = m_ruleScheduler.nextDeadline();
+    if (!deadline.isValid()) {
+        m_scheduleTimer.stop();
+        updateIdleTimer();
+        return;
+    }
+    const qint64 until = std::max<qint64>(0, m_wallClock().msecsTo(deadline));
+    // Cap the arm at 60s: a re-evaluation every minute re-anchors schedules
+    // in local time and absorbs system sleep/wake without a second timer.
+    m_scheduleTimer.start(static_cast<int>(std::min<qint64>(until, 60000)));
+    updateIdleTimer();
+}
+
+void DaemonService::evaluateDueRules() {
+    if (m_dispatchActive) {
+        return;  // a run is mid-delay; the tail call re-evaluates when done
+    }
+    const QStringList due = m_ruleScheduler.dueRuleIds(m_wallClock());
+    for (const QString& ruleId : due) {
+        m_dispatchActive = true;
+        static_cast<void>(executeRuleRun(ruleId));
+        m_dispatchActive = false;
+    }
+    rearmScheduleTimer();
 }
 
 QString DaemonService::nextRuleId() const {
@@ -1001,6 +1037,14 @@ QString DaemonService::RunRule(const QString& ruleId) {
         sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknownRule"));
         return {};
     }
+    return executeRuleRun(ruleId);
+}
+
+QString DaemonService::executeRuleRun(const QString& ruleId) {
+    const auto existing = findRule(ruleId);
+    if (existing == m_rules.end()) {
+        return {};
+    }
     RuleDocument rule = *existing;
 
     // Resolve the consenting target set. An empty device list means every
@@ -1039,6 +1083,7 @@ QString DaemonService::RunRule(const QString& ruleId) {
     rule.lastRun.outcome = outcome;
     *findRule(rule.id) = rule;
     announceRules();
+    evaluateDueRules();  // schedules that fell due during a delay step
     return outcome;
 }
 
