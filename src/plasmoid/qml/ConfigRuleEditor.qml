@@ -26,10 +26,18 @@ Kirigami.Dialog {
     property var formState: null
     property bool saveAttempted: false
 
+    // Structural edits rebuild plain-JS Repeaters: bumping this tracked int
+    // re-evaluates their models against the replaced arrays.
+    property int formRevision: 0
+
     readonly property bool editing: editingRule !== null
     readonly property bool daemonReachable: bridge !== null && bridge.available
-    readonly property var problems: formState === null
-        ? [] : RulePayload.validate(formState)
+    // Reads formRevision so structural edits re-run validation even though
+    // the underlying form state is plain JS data.
+    readonly property var problems: {
+        void root.formRevision;
+        return formState === null ? [] : RulePayload.validate(formState);
+    }
 
     title: editing
         ? KI18n.i18nc("@title:window", "Edit Automation")
@@ -98,6 +106,11 @@ Kirigami.Dialog {
         }
     }
 
+    function touchForm() {
+        root.formRevision++;
+        conditionsEditor.refreshGates();
+    }
+
     function syncFromForm() {
         if (root.formState === null) {
             return;
@@ -136,6 +149,9 @@ Kirigami.Dialog {
         for (let row = 0; row < deviceChecks.count; ++row) {
             const entry = deviceChecks.itemAt(row);
             entry.checked = root.formState.devices.indexOf(entry.serial) >= 0;
+        }
+        if (root.formState.conditions !== null) {
+            conditionsEditor.syncFromNode();
         }
     }
 
@@ -445,6 +461,58 @@ Kirigami.Dialog {
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 text: KI18n.i18nc("@info",
                     "This trigger watches every device; narrow it to specific devices with extra conditions.")
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+            }
+
+            PlasmaExtras.Heading {
+                level: 4
+                text: KI18n.i18nc("@title:group", "Extra conditions")
+            }
+
+            QQC2.Button {
+                objectName: "addConditionsButton"
+
+                visible: root.formRevision >= 0 && root.formState !== null
+                         && root.formState.conditions === null
+                icon.name: "list-add"
+                text: KI18n.i18nc("@action:button", "Require device conditions")
+                onClicked: {
+                    root.formState.conditions = RulePayload.blankLeaf();
+                    root.touchForm();
+                }
+            }
+
+            ConditionNodeEditor {
+                id: conditionsEditor
+
+                objectName: "conditionsEditor"
+
+                visible: root.formRevision >= 0 && root.formState !== null
+                         && root.formState.conditions !== null
+                Layout.fillWidth: true
+                bridge: root.bridge
+                node: root.formRevision >= 0 && root.formState !== null
+                      ? root.formState.conditions : null
+                depth: 0
+                revision: root.formRevision
+                onChanged: root.touchForm()
+                onStructureChanged: root.touchForm()
+            }
+
+            QQC2.Button {
+                objectName: "removeConditionsButton"
+
+                visible: root.formRevision >= 0 && root.formState !== null
+                         && root.formState.conditions !== null
+                icon.name: "list-remove"
+                text: KI18n.i18nc("@action:button", "Drop extra conditions")
+                onClicked: {
+                    root.formState.conditions = null;
+                    root.touchForm();
+                }
             }
         }
     }

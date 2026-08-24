@@ -80,6 +80,9 @@ class DevicesModel final : public QAbstractListModel {
     [[nodiscard]] QStringList serials() const;
     [[nodiscard]] bool containsSerial(const QString& serial) const;
 
+    // QML pickers need the roster as plain data: [{serial, name}, ...].
+    Q_INVOKABLE QVariantList deviceEntries() const;
+
   private:
     struct DeviceItem {
         QString serial;

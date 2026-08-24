@@ -254,6 +254,16 @@ QStringList DevicesModel::serials() const {
     return result;
 }
 
+QVariantList DevicesModel::deviceEntries() const {
+    QVariantList entries;
+    entries.reserve(m_devices.size());
+    for (const DeviceItem& device : m_devices) {
+        entries.append(QVariantMap{{QStringLiteral("serial"), device.serial},
+                                   {QStringLiteral("name"), device.name}});
+    }
+    return entries;
+}
+
 bool DevicesModel::containsSerial(const QString& serial) const {
     return indexOfSerial(serial) >= 0;
 }

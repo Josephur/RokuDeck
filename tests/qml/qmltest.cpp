@@ -214,6 +214,16 @@ class FixtureDevicesModel final : public QAbstractListModel {
         }
     }
 
+    [[nodiscard]] QVariantList deviceEntries() const {
+        QVariantList entries;
+        entries.reserve(m_devices.size());
+        for (const Device& device : m_devices) {
+            entries.append(QVariantMap{{QStringLiteral("serial"), device.serial},
+                                       {QStringLiteral("name"), device.name}});
+        }
+        return entries;
+    }
+
   private:
     QList<Device> m_devices;
 };
@@ -336,6 +346,11 @@ class BridgeFixture : public QObject {
         setSelectedSerial(entries.isEmpty()
                               ? QString()
                               : entries.first().toMap().value(QStringLiteral("serial")).toString());
+    }
+
+    // Mirrors DevicesModel::deviceEntries for QML pickers.
+    Q_INVOKABLE QVariantList deviceEntries() const {
+        return m_devices.deviceEntries();
     }
 
   Q_SIGNALS:
