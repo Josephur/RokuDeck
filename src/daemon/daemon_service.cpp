@@ -950,7 +950,7 @@ void DaemonService::evaluateDueRules() {
     const QStringList due = m_ruleScheduler.dueRuleIds(m_wallClock());
     for (const QString& ruleId : due) {
         m_dispatchActive = true;
-        static_cast<void>(executeRuleRun(ruleId));
+        static_cast<void>(requestRuleFire(ruleId));
         m_dispatchActive = false;
     }
     rearmScheduleTimer();
@@ -962,7 +962,7 @@ void DaemonService::runStateChangeFirings(const QStringList& ruleIds) {
     }
     for (const QString& ruleId : ruleIds) {
         m_dispatchActive = true;
-        static_cast<void>(executeRuleRun(ruleId));
+        static_cast<void>(requestRuleFire(ruleId));
         m_dispatchActive = false;
     }
 }
@@ -1067,10 +1067,88 @@ QString DaemonService::RunRule(const QString& ruleId) {
         sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknownRule"));
         return {};
     }
-    return executeRuleRun(ruleId);
+    // Manual runs pass the same mode gate as every other firing origin.
+    return requestRuleFire(ruleId);
 }
 
-QString DaemonService::executeRuleRun(const QString& ruleId, const QStringList& callStack) {
+QString DaemonService::requestRuleFire(const QString& ruleId) {
+    const auto existing = findRule(ruleId);
+    if (existing == m_rules.end()) {
+        return {};
+    }
+    const QString mode = existing->mode;
+
+    // The §4 mode gate: one Active run per rule, plus a single queued slot in
+    // queued mode. Macro children never register here — an action is not a
+    // firing — so gating stays trigger-side only.
+    QString outcome;
+    const int state = m_runStates.value(ruleId, kRunIdle);
+    if (state != kRunIdle) {
+        if (state == kRunQueued) {
+            // Both slots busy (single/queued), or restart merely replaces the
+            // coalesced pending firing with this fresher one — still one slot.
+            if (mode != QStringLiteral("restart")) {
+                recordDroppedFiring(ruleId);
+                return QStringLiteral("dropped");
+            }
+            return {};
+        }
+        if (mode == QStringLiteral("single")) {
+            recordDroppedFiring(ruleId);
+            return QStringLiteral("dropped");
+        }
+        if (mode != QStringLiteral("restart")) {  // queued, active run in flight
+            m_runStates.insert(ruleId, kRunQueued);
+            return {};
+        }
+        // restart: supersede the active run; it unwinds without recording as
+        // soon as its current wait yields, while this fresh run starts now.
+        if (const auto token = m_runTokens.value(ruleId)) {
+            token->store(true);
+        }
+    }
+
+    for (;;) {
+        m_runStates.insert(ruleId, kRunActive);
+        auto token = std::make_shared<std::atomic_bool>(false);
+        m_runTokens.insert(ruleId, token);
+        outcome = executeRuleRun(ruleId, {}, token);
+        const bool cancelled = token->load();
+        finishRuleRun(ruleId, cancelled);
+        if (cancelled) {
+            return {};  // superseded: the replacement owns the state fields
+        }
+        if (m_runStates.value(ruleId, kRunIdle) != kRunQueued) {
+            break;
+        }
+        // A firing arrived while this run ran: take it from queued to active
+        // and go again (the drain loop, not recursion).
+        m_runStates.insert(ruleId, kRunActive);
+    }
+    m_runStates.remove(ruleId);
+    return outcome;
+}
+
+void DaemonService::finishRuleRun(const QString& ruleId, bool cancelled) {
+    m_runTokens.remove(ruleId);
+    if (cancelled) {
+        // Superseded mid-run: newer runs always complete (and clean up)
+        // before an older unwind resumes, so clearing here can never clobber
+        // a live replacement.
+        m_runStates.remove(ruleId);
+    }
+}
+
+void DaemonService::recordDroppedFiring(const QString& ruleId) {
+    if (const auto record = findRule(ruleId); record != m_rules.end()) {
+        record->lastRun.firedAtIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+        record->lastRun.outcome = QStringLiteral("dropped");
+    }
+    announceRules();
+}
+
+QString DaemonService::executeRuleRun(const QString& ruleId, const QStringList& callStack,
+                                      const std::shared_ptr<std::atomic_bool>& cancelToken) {
     const auto existing = findRule(ruleId);
     if (existing == m_rules.end()) {
         return {};
@@ -1118,7 +1196,14 @@ QString DaemonService::executeRuleRun(const QString& ruleId, const QStringList& 
     if (targets.isEmpty()) {
         outcome = QStringLiteral("consent-blocked");
     } else {
-        const ActionResult result = executeActions(rule, targets, callStack, rule.id);
+        const ActionResult result =
+            executeActions(rule, targets, callStack, rule.id, cancelToken);
+        if (cancelToken && cancelToken->load()) {
+            // A restart superseded this run mid-flight: its partial effects
+            // already dispatched stay, but it records no lastRun and announces
+            // nothing — the replacing run owns the rule's history.
+            return {};
+        }
         // Attempts cover both dispatch-time rejections and commands that went
         // out but were not acknowledged by rds; a run only earns "ok" when
         // everything it attempted actually landed.
@@ -1161,14 +1246,17 @@ QString DaemonService::executeRuleRun(const QString& ruleId, const QStringList& 
 DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& rule,
                                                            const QStringList& targets,
                                                            const QStringList& callStack,
-                                                           const QString& currentRuleId) {
+                                                           const QString& currentRuleId,
+                                                           const std::shared_ptr<
+                                                               std::atomic_bool>& cancelToken) {
     int dispatched = 0;
     int rejected = 0;
     int deliveryFailures = 0;
     bool cycleDetected = false;
     QStringList pendingRequests;
     if (!dispatchActionList(rule.actions, targets, callStack, currentRuleId, dispatched,
-                            rejected, deliveryFailures, pendingRequests, cycleDetected)) {
+                            rejected, deliveryFailures, pendingRequests, cycleDetected,
+                            cancelToken)) {
         return {false, QStringLiteral("unsupportedAction"), 0, 0, 0, false};
     }
 
@@ -1221,11 +1309,12 @@ DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& ru
 }
 
 bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
-                                       const QStringList& targets,
-                                       const QStringList& callStack,
-                                       const QString& currentRuleId, int& dispatched,
-                                       int& rejected, int& deliveryFailures,
-                                       QStringList& pendingRequests, bool& cycleDetected) {
+                                        const QStringList& targets,
+                                        const QStringList& callStack,
+                                        const QString& currentRuleId, int& dispatched,
+                                        int& rejected, int& deliveryFailures,
+                                        QStringList& pendingRequests, bool& cycleDetected,
+                                        const std::shared_ptr<std::atomic_bool>& cancelToken) {
     // The effective ancestry for cycle detection: every enclosing macro run
     // plus this rule itself. Naming any of them would never terminate.
     QStringList ancestry = callStack;
@@ -1271,12 +1360,27 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
     };
 
     for (const ActionNode& action : actions) {
+        // Cooperative cancellation checkpoint: once the owning run is
+        // superseded, remaining actions are skipped without erroring — the
+        // run's caller drops its record entirely.
+        if (cancelToken && cancelToken->load()) {
+            return true;
+        }
         if (action.type == QStringLiteral("delay")) {
             // parseRule already bounds this to 1..600 seconds; sleeping here
-            // keeps sequential actions ordered exactly as authored.
-            QEventLoop pause;
-            QTimer::singleShot(action.delaySeconds * 1000, &pause, &QEventLoop::quit);
-            pause.exec();
+            // keeps sequential actions ordered exactly as authored. Ticking
+            // in 100 ms slices lets a superseded run bail out promptly.
+            const QDeadlineTimer remaining(action.delaySeconds * 1000);
+            while (!remaining.hasExpired()) {
+                if (cancelToken && cancelToken->load()) {
+                    return true;
+                }
+                QEventLoop pause;
+                QTimer::singleShot(
+                    static_cast<int>(std::min<qint64>(100, remaining.remainingTime())),
+                    &pause, &QEventLoop::quit);
+                pause.exec();
+            }
             continue;
         }
         if (action.type == QStringLiteral("mute")) {
@@ -1352,7 +1456,11 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                 ++rejected;
                 continue;
             }
-            const QString childOutcome = executeRuleRun(action.ruleId, ancestry);
+            // The child run inherits this run's token: superseding the root
+            // stops the whole in-flight macro tree, and a cancelled child
+            // records nothing (its root will not record either).
+            const QString childOutcome =
+                executeRuleRun(action.ruleId, ancestry, cancelToken);
             if (childOutcome != QStringLiteral("ok")) {
                 ++deliveryFailures;
                 cycleDetected = cycleDetected || childOutcome == QStringLiteral("cycle-error");
@@ -1368,7 +1476,7 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
             if (!dispatchActionList(taken ? action.thenActions : action.elseActions,
                                     targets, callStack, currentRuleId, dispatched,
                                     rejected, deliveryFailures, pendingRequests,
-                                    cycleDetected)) {
+                                    cycleDetected, cancelToken)) {
                 return false;
             }
             continue;

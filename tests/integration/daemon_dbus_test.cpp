@@ -111,6 +111,9 @@ class DaemonDbusTest final : public QObject {
     void condFalseRunsElseBranch();
     void falseCondWithoutElseIsCleanNoOp();
     void ifThenElseBranchRecursionCarriesCycleContext();
+    void singleModeDropsOverlappingFiring();
+    void restartModeSupersedesActiveRun();
+    void queuedModeCoalescesThenDrains();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -127,6 +130,10 @@ class DaemonDbusTest final : public QObject {
     QString addManualRule(const QString& name);
     QString addRuleReturningId(const QString& payload);
     QJsonObject rulesListing() const;
+    // The last-run outcome of the sole rule in every RulesChanged announcement
+    // a spy captured, in order — the only way to observe an intermediate
+    // record (a drop) that a later run overwrites in storage.
+    QStringList announcedLastRunOutcomes(const QSignalSpy& spy) const;
     // Completes pending fake-runner callbacks while the daemon blocks inside
     // a rule run waiting for delivery verdicts. `script` drives per-callback
     // exit codes (0 = delivered, non-zero = transport failure); it defaults
@@ -2890,6 +2897,100 @@ void DaemonDbusTest::ifThenElseBranchRecursionCarriesCycleContext() {
     // traffic may share the request log, but never a keypress.
     QCOMPARE(homeKeypressCount(), 0);
     QCOMPARE(keypressCount(QStringLiteral("Back")), 0);
+}
+
+QStringList DaemonDbusTest::announcedLastRunOutcomes(const QSignalSpy& spy) const {
+    QStringList outcomes;
+    for (const QList<QVariant>& arguments : spy) {
+        const QJsonArray rules =
+            QJsonDocument::fromJson(arguments.front().toString().toUtf8())
+                .object()
+                .value(QStringLiteral("rules"))
+                .toArray();
+        outcomes.append(rules.isEmpty()
+                            ? QString()
+                            : rules.last().toObject()
+                                  .value(QStringLiteral("lastRun"))
+                                  .toObject()
+                                  .value(QStringLiteral("outcome"))
+                                  .toString());
+    }
+    return outcomes;
+}
+
+void DaemonDbusTest::singleModeDropsOverlappingFiring() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.40")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Solo","mode":"single","devices":[],)json"
+        R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
+        R"json({"type":"delay","seconds":1}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    // The nested firing lands inside the delay's event pump while the first
+    // run is Active: single mode must drop it without disturbing that run.
+    QTimer::singleShot(50ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    startRunnerCompleter();  // the run waits for its delivery verdict
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    // Exactly one device pass: the suppressed firing dispatched nothing.
+    QCOMPARE(homeKeypressCount(), 1);
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    QCOMPARE(outcomes.count(QStringLiteral("dropped")), 1);
+    QCOMPARE(outcomes.last(), QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::restartModeSupersedesActiveRun() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.41")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Chaser","mode":"restart","devices":[],)json"
+        R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
+        R"json({"type":"delay","seconds":1},{"type":"keypress","key":"Select"}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    // Mid-delay the restart arrives: the active run is cancelled (its Select
+    // step never dispatches and it records nothing), then a fresh full run
+    // executes — both Homes land, exactly one Select does.
+    QTimer::singleShot(150ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    startRunnerCompleter();
+    m_daemon->requestRuleFire(ruleId);
+    stopRunnerCompleter();
+
+    QCOMPARE(homeKeypressCount(), 2);
+    QCOMPARE(keypressCount(QStringLiteral("Select")), 1);
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    // The cancelled run records nothing: only the fresh run's ok appears.
+    QCOMPARE(outcomes.count(QStringLiteral("ok")), 1);
+    QCOMPARE(outcomes.last(), QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::queuedModeCoalescesThenDrains() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.42")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Cohort","mode":"queued","devices":[],)json"
+        R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
+        R"json({"type":"delay","seconds":1}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    // Fire #2 during the active delay takes the single queued slot; fire #3
+    // finds both slots busy and is dropped; when the active run finishes the
+    // queued slot drains as a second full run with no further prompting.
+    QTimer::singleShot(50ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    QTimer::singleShot(120ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    startRunnerCompleter();
+    m_daemon->requestRuleFire(ruleId);
+    stopRunnerCompleter();
+
+    QCOMPARE(homeKeypressCount(), 2);
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    QCOMPARE(outcomes.count(QStringLiteral("dropped")), 1);
+    QCOMPARE(outcomes.count(QStringLiteral("ok")), 2);
+    QCOMPARE(outcomes.last(), QStringLiteral("ok"));
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

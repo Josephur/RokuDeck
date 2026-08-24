@@ -26,6 +26,7 @@
 #include <QStringList>
 #include <QTimer>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -62,6 +63,14 @@ class DaemonService final : public QObject, protected QDBusContext {
     [[nodiscard]] bool pollingEnabled() const;
     [[nodiscard]] QString pollingDiagnostic() const;
     void evaluateDueRules();
+    // Fires one rule through the §4 mode gate (single/restart/queued) and, if
+    // admitted, runs it to completion — draining a queued firing when one
+    // arrived mid-run. Public because it is the seam the mode tests drive
+    // re-entrantly; every trigger origin (scheduled, stateChange, D-Bus
+    // RunRule) routes through here. Returns the most recent executed run's
+    // outcome, "dropped" when this firing was suppressed, empty when it was
+    // parked in the queued slot and returned before running.
+    QString requestRuleFire(const QString& ruleId);
 
   public Q_SLOTS:
     [[nodiscard]] QString ListDevices() const;
@@ -162,28 +171,45 @@ class DaemonService final : public QObject, protected QDBusContext {
     void announceRules();
     [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
     [[nodiscard]] ActionResult executeActions(const RuleDocument& rule,
-                                              const QStringList& targets,
-                                              const QStringList& callStack,
-                                              const QString& currentRuleId);
+                                               const QStringList& targets,
+                                               const QStringList& callStack,
+                                               const QString& currentRuleId,
+                                               const std::shared_ptr<std::atomic_bool>& cancelToken
+                                                   = {});
     // Walks one authored action list against the consenting targets. Returns
     // false when an action type cannot be executed yet, failing the whole run
     // before anything dispatches; per-target rejections are counted instead.
     // currentRuleId owns `actions`; callStack carries the ancestor ids of
     // nested runRule dispatches, so a macro naming any of them (or this rule)
     // is a cycle: that branch counts as one failure and reports cycleDetected.
+    // cancelToken (the owning run's) is checked between actions and inside
+    // delay waits; once set, the remaining actions are skipped without error.
     [[nodiscard]] bool dispatchActionList(const QList<ActionNode>& actions,
-                                          const QStringList& targets,
-                                          const QStringList& callStack,
-                                          const QString& currentRuleId, int& dispatched,
-                                          int& rejected, int& deliveryFailures,
-                                          QStringList& pendingRequests, bool& cycleDetected);
+                                           const QStringList& targets,
+                                           const QStringList& callStack,
+                                           const QString& currentRuleId, int& dispatched,
+                                           int& rejected, int& deliveryFailures,
+                                           QStringList& pendingRequests, bool& cycleDetected,
+                                           const std::shared_ptr<std::atomic_bool>& cancelToken
+                                               = {});
     void rearmScheduleTimer();
     // Runs one rule to completion and records its outcome. callStack carries
     // the ids of the enclosing macro runs; runRule steps recurse synchronously
-    // with the ancestry extended by this rule's own id.
-    [[nodiscard]] QString executeRuleRun(const QString& ruleId,
-                                         const QStringList& callStack = {});
+    // with the ancestry extended by this rule's own id. A set cancelToken (a
+    // restart superseded this run) aborts the remainder and skips both the
+    // last-run writeback and the announcement — the replacing run owns the
+    // rule's observable history.
+    QString executeRuleRun(const QString& ruleId, const QStringList& callStack = {},
+                           const std::shared_ptr<std::atomic_bool>& cancelToken = {});
     void runStateChangeFirings(const QStringList& ruleIds);
+    // Bookends one gated run: drops the cancellation token, and on a
+    // cancelled unwind also clears the per-rule state so the superseding run
+    // (already running deeper in the stack) owns the fields alone.
+    void finishRuleRun(const QString& ruleId, bool cancelled);
+    // Records a mode-suppressed firing: only the lastRun fields are written
+    // behind the find-rule guard (never a whole-struct clobber), then the
+    // rules are announced — mirroring the targeted-writeback pattern.
+    void recordDroppedFiring(const QString& ruleId);
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,
@@ -209,6 +235,12 @@ class DaemonService final : public QObject, protected QDBusContext {
     // by finishCommand/finishCommandWithError and consumed by rule runs so a
     // run's outcome reflects what actually happened on the devices.
     QHash<QString, bool> m_deliveryOutcomes;
+    // Per-rule run-state machine for the §4 mode gate: 0 = idle, 1 = active,
+    // 2 = one firing queued behind the active run. Each active run also owns
+    // a cancellation token a restart firing flips to supersede it.
+    enum { kRunIdle = 0, kRunActive = 1, kRunQueued = 2 };
+    QHash<QString, int> m_runStates;
+    QHash<QString, std::shared_ptr<std::atomic_bool>> m_runTokens;
     RuleScheduler m_ruleScheduler;
     QHash<QString, DeviceSnapshot> m_snapshots;
     QHash<QString, quint64> m_addressGenerations;
