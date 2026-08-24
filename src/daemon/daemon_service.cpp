@@ -1302,13 +1302,18 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
         if (action.type == QStringLiteral("setVolume")) {
             // ECP offers no absolute volume: walk relative from the last
             // observed reading, bounded at 30 presses (~1 unit per press).
+            // The per-device ceiling is an always-on policy: it clamps the
+            // authored target before the delta math, so a walk can never aim
+            // past it (spec §2).
             for (const QString& serial : targets) {
+                const auto device = findDevice(serial);
                 const DeviceSnapshot snapshot = m_snapshots.value(serial);
-                if (!snapshot.volume.has_value()) {
+                if (!device || !snapshot.volume.has_value()) {
                     ++rejected;
                     continue;
                 }
-                const int delta = action.volume - *snapshot.volume;
+                const int target = std::min(action.volume, device->volumeCeiling);
+                const int delta = target - *snapshot.volume;
                 if (delta == 0) {
                     continue;
                 }
@@ -1319,6 +1324,15 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                     delta > 0 ? QStringLiteral("VolumeUp") : QStringLiteral("VolumeDown"));
                 const int presses = std::min(qAbs(delta), 30);
                 for (int press = 0; press < presses; ++press) {
+                    if (delta > 0) {
+                        // Relative keys cannot be clamped by the protocol, so
+                        // each upward nudge re-checks the latest observation
+                        // and stops at the ceiling (best-effort, spec §2).
+                        const DeviceSnapshot latest = m_snapshots.value(serial);
+                        if (latest.volume.has_value() && *latest.volume >= device->volumeCeiling) {
+                            break;
+                        }
+                    }
                     enqueue(serial, command);
                 }
             }

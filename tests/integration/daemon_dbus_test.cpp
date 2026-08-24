@@ -98,6 +98,10 @@ class DaemonDbusTest final : public QObject {
     void setVolumeWalksDownWithBoundedPresses();
     void volumeActionsWithoutObservedAudioFailWithoutDispatching();
     void mixedAudioStateAcrossTargetsYieldsPartial();
+    void ceilingClampsAnUpwardVolumeWalk();
+    void downwardWalksIgnoreTheCeiling();
+    void setVolumeAtTheCeilingIsACleanNoOp();
+    void mixedCeilingsKeepPartialOutcomesTruthful();
     void mixedListWithIfThenElseRunsToCompletion();
     void macroChainRunsChildAndReportsOk();
     void selfReferencingMacroReportsCycleError();
@@ -2467,6 +2471,127 @@ void DaemonDbusTest::mixedAudioStateAcrossTargetsYieldsPartial() {
     // SERIAL-A toggles once; SERIAL-B's rejection makes the run partial.
     QCOMPARE(run.arguments().front().toString(), QStringLiteral("partial"));
     QCOMPARE(keypressCount(QStringLiteral("VolumeMute")), 1);
+}
+
+void DaemonDbusTest::ceilingClampsAnUpwardVolumeWalk() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.41")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    const QDBusMessage ceiling =
+        waitForReply(m_proxy->UpdateDevice(QStringLiteral("SERIAL-A"),
+                                           QStringLiteral(R"json({"volumeCeiling":50})json")));
+    QVERIFY2(ceiling.type() != QDBusMessage::ErrorMessage, qPrintable(ceiling.errorMessage()));
+
+    // Observed 46 walking toward 90 stops at the 50 ceiling: a delta of 4
+    // presses, not the 30-press walk an unclamped target would attempt.
+    completePollVersion();
+    completePollReadings(46);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Loud but legal","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":90}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeUp")), 4);
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 0);
+}
+
+void DaemonDbusTest::downwardWalksIgnoreTheCeiling() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.42")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    const QDBusMessage ceiling =
+        waitForReply(m_proxy->UpdateDevice(QStringLiteral("SERIAL-A"),
+                                           QStringLiteral(R"json({"volumeCeiling":50})json")));
+    QVERIFY2(ceiling.type() != QDBusMessage::ErrorMessage, qPrintable(ceiling.errorMessage()));
+
+    // Lowering the volume is none of the ceiling's business.
+    completePollVersion();
+    completePollReadings(24);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Softly","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":20}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 4);
+    QCOMPARE(keypressCount(QStringLiteral("VolumeUp")), 0);
+}
+
+void DaemonDbusTest::setVolumeAtTheCeilingIsACleanNoOp() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.43")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    const QDBusMessage ceiling =
+        waitForReply(m_proxy->UpdateDevice(QStringLiteral("SERIAL-A"),
+                                           QStringLiteral(R"json({"volumeCeiling":50})json")));
+    QVERIFY2(ceiling.type() != QDBusMessage::ErrorMessage, qPrintable(ceiling.errorMessage()));
+
+    // Observed at the ceiling, a request for 60 clamps to 50: nothing to do.
+    completePollVersion();
+    completePollReadings(50);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Already loud enough","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":60}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeUp")), 0);
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 0);
+}
+
+void DaemonDbusTest::mixedCeilingsKeepPartialOutcomesTruthful() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.44")});
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-B"), QStringLiteral("Kitchen TV"), QStringLiteral("192.0.2.45")});
+    // Interest tracks SERIAL-A only, so SERIAL-B never reports audio.
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    const QDBusMessage ceiling =
+        waitForReply(m_proxy->UpdateDevice(QStringLiteral("SERIAL-A"),
+                                           QStringLiteral(R"json({"volumeCeiling":50})json")));
+    QVERIFY2(ceiling.type() != QDBusMessage::ErrorMessage, qPrintable(ceiling.errorMessage()));
+
+    completePollVersion();
+    completePollReadings(50);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Whole house","trigger":{"type":"manual"},"devices":["SERIAL-A","SERIAL-B"],)json"
+        R"json("actions":[{"type":"setVolume","volume":60},{"type":"keypress","key":"Select"}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    // The ceiling no-op on A must not paper over B's rejection: the keypresses
+    // landed (two devices), the blind setVolume did not.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("partial"));
+    QCOMPARE(keypressCount(QStringLiteral("Select")), 2);
+    QCOMPARE(keypressCount(QStringLiteral("VolumeUp")), 0);
 }
 
 void DaemonDbusTest::mixedListWithIfThenElseRunsToCompletion() {
