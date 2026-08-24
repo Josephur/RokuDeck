@@ -6,6 +6,8 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- The Automations page gains a full structured editor — create and edit every trigger,
+  condition, and action type without touching a terminal.
 - Added a per-device volume ceiling as an always-on automation policy: the daemon stores and
   validates it (0–100), every device JSON surface echoes it, and automation volume actions
   honour the ceiling — absolute `setVolume` targets clamp into range, and relative `VolumeUp`
@@ -21,8 +23,7 @@ All notable changes to RokuDeck are documented in this file.
   the latest observed state (best-effort by protocol).
 - The widget's settings dialog gains an **Automations** page: every daemon-owned rule appears
   live with its plain-language summary, an enable switch, the last-run outcome, and Run-now /
-  Delete controls. Rules are still created from the command line; a structured in-widget editor
-  comes later.
+  Delete controls.
 - The daemon now fires `time` (daily/weekdays/once) and `interval` automation triggers on
   its own — no widget or CLI session needs to be running, and pending schedules keep the
   daemon alive.

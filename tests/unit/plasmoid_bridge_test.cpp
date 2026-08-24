@@ -116,11 +116,40 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     QStringList ruleEnabledCalls;
     QStringList ruleDeletedCalls;
     QStringList ruleRunCalls;
+    QStringList addedRules;
+    QStringList updatedRules;
+    QList<QJsonObject> storedRules;
     QString nextRunOutcome = QStringLiteral("ok");
     bool delayNextRegistration = false;
     bool delayNextDeviceCall = false;
     bool rejectNextCall = false;
     bool rejectNextRuleCall = false;
+
+    // Minimal stand-in for the daemon's own contract behavior.
+    void storeRule(QJsonObject object, const QString& id) {
+        object.insert(QStringLiteral("id"), id);
+        if (!object.contains(QStringLiteral("enabled"))) {
+            object.insert(QStringLiteral("enabled"), true);
+        }
+        object.insert(QStringLiteral("schemaVersion"), 1);
+        storedRules.append(std::move(object));
+    }
+
+    QString ruleId(int number) const {
+        return QStringLiteral("rFIXTURE%1").arg(number, 5, 10, QChar(u'0'));
+    }
+
+    void announceRules() {
+        QJsonArray array;
+        for (const QJsonObject& rule : storedRules) {
+            array.append(rule);
+        }
+        rulesJson = QString::fromUtf8(QJsonDocument(
+            QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                        {QStringLiteral("rules"), array}})
+                                          .toJson(QJsonDocument::Compact));
+        Q_EMIT RulesChanged(rulesJson);
+    }
 
     bool registerOnBus() {
         const bool objectRegistered = m_connection.registerObject(
@@ -186,6 +215,39 @@ class FakeDaemon final : public QObject, protected QDBusContext {
             return {};
         }
         return nextRunOutcome;
+    }
+
+    QString AddRule(const QString& ruleJson) {
+        addedRules.append(ruleJson);
+        if (rejectNextRuleCall) {
+            rejectNextRuleCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("invalidRule"));
+            return {};
+        }
+        const QJsonDocument document = QJsonDocument::fromJson(ruleJson.toUtf8());
+        storeRule(document.object(), ruleId(storedRules.size() + 1));
+        announceRules();
+        return QString::fromUtf8(
+            QJsonDocument(storedRules.last()).toJson(QJsonDocument::Compact));
+    }
+
+    void UpdateRule(const QString& ruleJson) {
+        updatedRules.append(ruleJson);
+        if (rejectNextRuleCall) {
+            rejectNextRuleCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknownRule"));
+            return;
+        }
+        const QJsonObject object =
+            QJsonDocument::fromJson(ruleJson.toUtf8()).object();
+        const QString id = object.value(QStringLiteral("id")).toString();
+        for (int i = 0; i < storedRules.size(); ++i) {
+            if (storedRules.at(i).value(QStringLiteral("id")).toString() == id) {
+                storedRules[i] = object;
+                break;
+            }
+        }
+        announceRules();
     }
 
     QString GetSnapshot(const QString& serial) const {
@@ -323,6 +385,9 @@ class PlasmoidBridgeTest : public QObject {
     void unknownFutureRuleTypesDegradeToCustomRule();
     void malformedRuleListReportsAnErrorAndKeepsTheLastGoodList();
     void ruleMutationsReachTheDaemonAndReportRejection();
+    void editorFlowAddsARuleThroughTheDaemonAndSurfacesItsSummary();
+    void anEditedRenamePersistsAcrossProxyRecreation();
+    void aRejectedAddRuleExplainsItselfWithoutAdding();
 
   private:
     [[nodiscard]] QModelIndex firstIndex(const DevicesModel& model) const;
@@ -892,6 +957,107 @@ void PlasmoidBridgeTest::ruleMutationsReachTheDaemonAndReportRejection() {
     QCOMPARE(failures.at(0).at(0).toString(), QStringLiteral("deleteRule"));
     QVERIFY(failures.at(0).at(1).toString().contains(QStringLiteral("fixture rejection")));
     QCOMPARE(m_fake->ruleDeletedCalls, QStringList{QStringLiteral("rBBB22222")});
+}
+
+namespace {
+
+// The exact payload shape rulepayload.js assembles for a manual keypress
+// rule; pinned byte-for-byte by the QML golden tests.
+constexpr auto goldenManualKeypressPayload =
+    R"json({"name":"Movie time","mode":"single","devices":["X001"],)json"
+    R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"}]})json";
+
+QString storedRuleJson(int number) {
+    return QStringLiteral(
+               R"json({"schemaVersion":1,"id":"rFIXTURE%1","name":"Nightly home",)json"
+               R"json("enabled":true,"mode":"queued","devices":[],"trigger":{"type":"time",)json"
+               R"json("kind":"daily","time":"23:00"},"actions":[{"type":"keypress","key":"Home"}]})json")
+        .arg(number, 5, 10, QChar(u'0'));
+}
+
+} // namespace
+
+void PlasmoidBridgeTest::editorFlowAddsARuleThroughTheDaemonAndSurfacesItsSummary() {
+    auto applet = createApplet<RokuDeckApplet>();
+    AutomationsModel* rules = applet->automations();
+    QTRY_COMPARE(rules->rowCount(), 0);
+
+    QSignalSpy succeeded(applet.get(), &RokuDeckApplet::deviceOperationSucceeded);
+
+    applet->addRule(QString::fromLatin1(goldenManualKeypressPayload));
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->addedRules.size(), 1, 2000);
+    QCOMPARE(m_fake->addedRules.first(),
+             QString::fromLatin1(goldenManualKeypressPayload));
+    QTRY_COMPARE_WITH_TIMEOUT(succeeded.size(), 1, 2000);
+    QCOMPARE(succeeded.first().at(0).toString(), QStringLiteral("addRule"));
+
+    // The RulesChanged announcement drives the row in, daemon-normalized.
+    QTRY_COMPARE_WITH_TIMEOUT(rules->rowCount(), 1, 2000);
+    const QModelIndex row(rules->index(0, 0));
+    QCOMPARE(row.data(AutomationsModel::IdRole).toString(),
+             m_fake->ruleId(1));
+    QCOMPARE(row.data(AutomationsModel::NameRole).toString(),
+             QStringLiteral("Movie time"));
+    QCOMPARE(row.data(AutomationsModel::EnabledRole).toBool(), true);
+    QCOMPARE(row.data(AutomationsModel::SummaryRole).toString(),
+             QStringLiteral("Manually run \u00b7 Press Home"));
+}
+
+void PlasmoidBridgeTest::anEditedRenamePersistsAcrossProxyRecreation() {
+    m_fake->storeRule(
+        QJsonDocument::fromJson(storedRuleJson(1).toUtf8()).object(),
+        m_fake->ruleId(1));
+    m_fake->rulesJson = QStringLiteral(
+        R"json({"schemaVersion":1,"rules":[%1]})json").arg(storedRuleJson(1));
+
+    DevicesModel devicesA;
+    AutomationsModel rulesA;
+    DaemonProxy proxyA(&devicesA, QStringLiteral("PROXY-EDIT-A"), &rulesA);
+    proxyA.start();
+    QTRY_COMPARE(rulesA.rowCount(), 1);
+    QCOMPARE(rulesA.index(0, 0).data(AutomationsModel::NameRole).toString(),
+             QStringLiteral("Nightly home"));
+
+    // A complete UpdateRule document: same id and enabled, new name only.
+    const QString renamed = QStringLiteral(
+        R"json({"schemaVersion":1,"id":"%1","name":"Renamed nightly","enabled":true,)json"
+        R"json("mode":"queued","devices":[],"trigger":{"type":"time",)json"
+        R"json("kind":"daily","time":"23:00"},"actions":[{"type":"keypress","key":"Home"}]})json")
+        .arg(m_fake->ruleId(1));
+    proxyA.updateRule(renamed);
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->updatedRules.size(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(
+        rulesA.index(0, 0).data(AutomationsModel::NameRole).toString(),
+        QStringLiteral("Renamed nightly"), 2000);
+
+    // A fresh proxy reads the renamed rule back from storage.
+    proxyA.stop();
+    DevicesModel devicesB;
+    AutomationsModel rulesB;
+    DaemonProxy proxyB(&devicesB, QStringLiteral("PROXY-EDIT-B"), &rulesB);
+    proxyB.start();
+    QTRY_COMPARE(rulesB.rowCount(), 1);
+    QCOMPARE(rulesB.index(0, 0).data(AutomationsModel::IdRole).toString(),
+             m_fake->ruleId(1));
+    QCOMPARE(rulesB.index(0, 0).data(AutomationsModel::NameRole).toString(),
+             QStringLiteral("Renamed nightly"));
+}
+
+void PlasmoidBridgeTest::aRejectedAddRuleExplainsItselfWithoutAdding() {
+    auto applet = createApplet<RokuDeckApplet>();
+    AutomationsModel* rules = applet->automations();
+    QTRY_COMPARE(rules->rowCount(), 0);
+
+    QSignalSpy failed(applet.get(), &RokuDeckApplet::deviceOperationFailed);
+    m_fake->rejectNextRuleCall = true;
+    applet->addRule(QString::fromLatin1(goldenManualKeypressPayload));
+
+    QTRY_COMPARE_WITH_TIMEOUT(failed.size(), 1, 2000);
+    QCOMPARE(failed.first().at(0).toString(), QStringLiteral("addRule"));
+    QVERIFY(!failed.first().at(1).toString().isEmpty());
+    QTest::qWait(50);
+    QCOMPARE(rules->rowCount(), 0);
 }
 
 QTEST_MAIN(PlasmoidBridgeTest)
