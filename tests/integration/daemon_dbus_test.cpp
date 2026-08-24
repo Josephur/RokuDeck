@@ -114,6 +114,8 @@ class DaemonDbusTest final : public QObject {
     void singleModeDropsOverlappingFiring();
     void restartModeSupersedesActiveRun();
     void queuedModeCoalescesThenDrains();
+    void suppressedFiringAnnouncesDroppedRecord();
+    void macroInvocationBypassesModeGate();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -2990,6 +2992,77 @@ void DaemonDbusTest::queuedModeCoalescesThenDrains() {
     const QStringList outcomes = announcedLastRunOutcomes(changed);
     QCOMPARE(outcomes.count(QStringLiteral("dropped")), 1);
     QCOMPARE(outcomes.count(QStringLiteral("ok")), 2);
+    QCOMPARE(outcomes.last(), QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::suppressedFiringAnnouncesDroppedRecord() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.43")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Gatekeeper","mode":"single","devices":[],)json"
+        R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
+        R"json({"type":"delay","seconds":1}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    QTimer::singleShot(50ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+
+    // The suppression is a first-class record: its own announcement carries
+    // outcome "dropped" with a timestamp, and it dispatches nothing itself.
+    QCOMPARE(homeKeypressCount(), 1);
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    const int droppedAt = outcomes.indexOf(QStringLiteral("dropped"));
+    QVERIFY2(droppedAt >= 0, "a suppressed firing must be announced as dropped");
+    const QJsonObject droppedAnnouncement =
+        QJsonDocument::fromJson(changed.at(droppedAt).at(0).toString().toUtf8())
+            .object()
+            .value(QStringLiteral("rules"))
+            .toArray()
+            .last()
+            .toObject();
+    QCOMPARE(droppedAnnouncement.value(QStringLiteral("id")).toString(), ruleId);
+    QVERIFY2(!droppedAnnouncement.value(QStringLiteral("lastRun"))
+                  .toObject()
+                  .value(QStringLiteral("lastFiredAt"))
+                  .toString()
+                  .isEmpty(),
+             "a dropped record must carry its timestamp");
+    QCOMPARE(outcomes.last(), QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::macroInvocationBypassesModeGate() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.44")});
+    const QString slowId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Slowpoke","mode":"single","devices":[],)json"
+        R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Back"},)json"
+        R"json({"type":"delay","seconds":1}]})json"));
+    const QString invokerId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Invoker","devices":[],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"runRule","id":"%1"}]})json").arg(slowId));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    startRunnerCompleter();
+    // While Slowpoke's own firing sits Active in its delay, Invoker's macro
+    // step names it: an action is not a firing, so the gate must not apply —
+    // the nested invocation dispatches even though the target is Active.
+    QTimer::singleShot(150ms, this, [this, invokerId] {
+        const QDBusMessage mid = waitForReply(m_proxy->RunRule(invokerId));
+        QCOMPARE(mid.type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(mid.arguments().front().toString(), QStringLiteral("ok"));
+    });
+    m_daemon->requestRuleFire(slowId);  // blocks until Slowpoke's own run ends
+    stopRunnerCompleter();
+
+    // Two Back presses: Slowpoke's own run plus the ungated macro invocation.
+    QCOMPARE(keypressCount(QStringLiteral("Back")), 2);
+    QCOMPARE(homeKeypressCount(), 0);
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    QVERIFY2(!outcomes.contains(QStringLiteral("dropped")),
+             "a macro child must never be gated into a drop");
     QCOMPARE(outcomes.last(), QStringLiteral("ok"));
 }
 
