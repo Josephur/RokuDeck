@@ -6,6 +6,13 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- Added a per-device volume ceiling as an always-on automation policy: the daemon stores and
+  validates it (0–100), every device JSON surface echoes it, and automation volume actions
+  honour the ceiling — absolute `setVolume` targets clamp into range, and relative `VolumeUp`
+  walks stop at the latest observed level (best-effort by ECP protocol). Remote-control
+  presses are not gated yet.
+- The device detail page gains a "Volume ceiling" control with a caption explaining that
+  automations never set the volume above it.
 - Automation rules can now trigger themselves off device state: `stateChange` triggers fire on
   snapshot transitions (rising edge, baseline-safe), and condition trees (`all`/`any`/`not`) gate
   any firing with a `condition-false` outcome.
