@@ -106,6 +106,7 @@ Item {
             required property var capabilities
             required property bool stale
             required property bool pendingCommand
+            required property int volumeCeiling
 
             readonly property bool selected: root.bridge
                 && serial === root.bridge.selectedSerial
@@ -256,6 +257,7 @@ Item {
                 capabilities: root.selectedDevice?.capabilities ?? []
                 stale: root.selectedDevice?.stale ?? true
                 pendingCommand: root.selectedDevice?.pendingCommand ?? false
+                volumeCeiling: root.selectedDevice?.volumeCeiling ?? 100
             }
         }
     }

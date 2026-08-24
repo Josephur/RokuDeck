@@ -76,6 +76,8 @@ QVariant DevicesModel::data(const QModelIndex& index, int role) const {
         return device.wakeOnWlan;
     case RefreshPolicyRole:
         return device.refreshPolicy;
+    case VolumeCeilingRole:
+        return device.volumeCeiling;
     case PendingCommandRole:
         return !device.pendingRequests.isEmpty();
     default:
@@ -98,6 +100,7 @@ QHash<int, QByteArray> DevicesModel::roleNames() const {
             {AllowAutomationsRole, "allowAutomations"},
             {WakeOnWlanRole, "wakeOnWlan"},
             {RefreshPolicyRole, "refreshPolicy"},
+            {VolumeCeilingRole, "volumeCeiling"},
             {PendingCommandRole, "pendingCommand"}};
 }
 
@@ -116,6 +119,7 @@ void DevicesModel::replaceDevices(const QList<DeviceDescription>& devices) {
             item.allowAutomations = description.allowAutomations;
             item.wakeOnWlan = description.wakeOnWlan;
             item.refreshPolicy = description.refreshPolicy;
+            item.volumeCeiling = description.volumeCeiling;
             m_devices.insert(destination, item);
             endInsertRows();
             source = destination;
@@ -138,6 +142,8 @@ void DevicesModel::replaceDevices(const QList<DeviceDescription>& devices) {
                    changedRoles);
         updateRole(current.wakeOnWlan, description.wakeOnWlan, WakeOnWlanRole, changedRoles);
         updateRole(current.refreshPolicy, description.refreshPolicy, RefreshPolicyRole,
+                   changedRoles);
+        updateRole(current.volumeCeiling, description.volumeCeiling, VolumeCeilingRole,
                    changedRoles);
         if (!changedRoles.isEmpty()) {
             const QModelIndex changedIndex = index(static_cast<int>(source));

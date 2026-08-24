@@ -78,10 +78,21 @@ std::optional<QList<DeviceDescription>> parseDevices(const QString& json) {
         const QJsonValue allowAutomations = object.value(QStringLiteral("allowAutomations"));
         const QJsonValue wakeOnWlan = object.value(QStringLiteral("wakeOnWlan"));
         const QJsonValue refreshPolicy = object.value(QStringLiteral("refreshPolicy"));
+        const QJsonValue volumeCeiling = object.value(QStringLiteral("volumeCeiling"));
         if ((!allowAutomations.isUndefined() && !allowAutomations.isBool()) ||
             (!wakeOnWlan.isUndefined() && !wakeOnWlan.isBool()) ||
             (!refreshPolicy.isUndefined() && !refreshPolicy.isString())) {
             return std::nullopt;
+        }
+        if (!volumeCeiling.isUndefined()) {
+            // JSON numbers are doubles; only a finite integral 0..100 is a
+            // ceiling, so "50" or 50.5 from a misbehaving daemon is rejected
+            // like every other malformed device key.
+            if (!volumeCeiling.isDouble() || !std::isfinite(volumeCeiling.toDouble()) ||
+                volumeCeiling.toDouble() < 0 || volumeCeiling.toDouble() > 100 ||
+                volumeCeiling.toDouble() != std::trunc(volumeCeiling.toDouble())) {
+                return std::nullopt;
+            }
         }
         DeviceDescription device{serial.toString(), name.toString(), address.toString()};
         // An older daemon omits these keys entirely; its devices behave as they
@@ -89,6 +100,8 @@ std::optional<QList<DeviceDescription>> parseDevices(const QString& json) {
         device.allowAutomations = allowAutomations.toBool(true);
         device.wakeOnWlan = wakeOnWlan.toBool(false);
         device.refreshPolicy = refreshPolicy.toString(QStringLiteral("balanced"));
+        device.volumeCeiling =
+            volumeCeiling.isUndefined() ? 100 : volumeCeiling.toInt();
         devices.append(device);
         serials.insert(device.serial);
     }

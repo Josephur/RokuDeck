@@ -3,6 +3,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 
 import org.kde.ki18n
@@ -26,6 +27,8 @@ Item {
     required property var capabilities
     required property bool stale
     required property bool pendingCommand
+    // Daemon-owned automation policy echoed through the device JSON.
+    property int volumeCeiling: 100
     property var visibleInformation: ["status", "activeApp", "volume", "screensaver"]
     property var visibleControls: ["power", "volume", "mute", "navigation", "playback"]
 
@@ -169,6 +172,45 @@ Item {
             capabilities: root.capabilities
             stale: root.stale
             pendingCommand: root.pendingCommand
+        }
+
+        RowLayout {
+            objectName: "volumeCeilingRow"
+            Layout.fillWidth: true
+            visible: root.serial.length > 0
+            spacing: Kirigami.Units.smallSpacing
+
+            PlasmaComponents.Label {
+                text: KI18n.i18n("Volume ceiling")
+                opacity: 0.75
+            }
+
+            QQC2.SpinBox {
+                id: ceilingBox
+
+                objectName: "volumeCeilingSpinbox"
+                from: 0
+                to: 100
+                editable: true
+                Accessible.name: KI18n.i18n("Volume ceiling")
+                // Programmatic updates never emit valueModified, so echoing
+                // the daemon's stored choice cannot loop back into a write.
+                Component.onCompleted: value = root.volumeCeiling
+                Connections {
+                    target: root
+                    function onVolumeCeilingChanged() {
+                        ceilingBox.value = root.volumeCeiling;
+                    }
+                }
+                onValueModified: root.bridge.updateDevice(root.serial, { volumeCeiling: value })
+            }
+
+            PlasmaComponents.Label {
+                objectName: "volumeCeilingCaption"
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+                text: KI18n.i18n("Automations never set the volume above this")
+            }
         }
 
         Item {

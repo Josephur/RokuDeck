@@ -30,6 +30,7 @@ class FixtureDevicesModel final : public QAbstractListModel {
         AllowAutomationsRole,
         WakeOnWlanRole,
         RefreshPolicyRole,
+        VolumeCeilingRole,
     };
 
     struct Device {
@@ -48,6 +49,7 @@ class FixtureDevicesModel final : public QAbstractListModel {
         bool allowAutomations = true;
         bool wakeOnWlan = false;
         QString refreshPolicy = QStringLiteral("balanced");
+        int volumeCeiling = 100;
     };
 
     using QAbstractListModel::QAbstractListModel;
@@ -90,6 +92,8 @@ class FixtureDevicesModel final : public QAbstractListModel {
             return device.wakeOnWlan;
         case RefreshPolicyRole:
             return device.refreshPolicy;
+        case VolumeCeilingRole:
+            return device.volumeCeiling;
         case PendingCommandRole:
             return device.pendingCommand;
         default:
@@ -112,7 +116,8 @@ class FixtureDevicesModel final : public QAbstractListModel {
                 {PendingCommandRole, "pendingCommand"},
                 {AllowAutomationsRole, "allowAutomations"},
                 {WakeOnWlanRole, "wakeOnWlan"},
-                {RefreshPolicyRole, "refreshPolicy"}};
+                {RefreshPolicyRole, "refreshPolicy"},
+                {VolumeCeilingRole, "volumeCeiling"}};
     }
 
     void replace(const QVariantList& entries) {
@@ -156,6 +161,7 @@ class FixtureDevicesModel final : public QAbstractListModel {
                                        .value(QStringLiteral("refreshPolicy"),
                                               QStringLiteral("balanced"))
                                        .toString();
+            device.volumeCeiling = values.value(QStringLiteral("volumeCeiling"), 100).toInt();
             m_devices.append(device);
         }
         endResetModel();
@@ -198,6 +204,9 @@ class FixtureDevicesModel final : public QAbstractListModel {
         } else if (roleName == QStringLiteral("refreshPolicy")) {
             device.refreshPolicy = value.toString();
             role = RefreshPolicyRole;
+        } else if (roleName == QStringLiteral("volumeCeiling")) {
+            device.volumeCeiling = value.toInt();
+            role = VolumeCeilingRole;
         }
         if (role >= 0) {
             const QModelIndex changed = index(row, 0);

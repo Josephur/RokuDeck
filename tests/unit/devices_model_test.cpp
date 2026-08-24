@@ -74,6 +74,7 @@ void DevicesModelTest::exposesTheCompleteStableRoleContract() {
         {Qt::UserRole + 13, "allowAutomations"},
         {Qt::UserRole + 14, "wakeOnWlan"},
         {Qt::UserRole + 15, "refreshPolicy"},
+        {Qt::UserRole + 16, "volumeCeiling"},
     };
 
     QCOMPARE(model.roleNames(), expected);

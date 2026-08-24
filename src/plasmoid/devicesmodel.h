@@ -21,6 +21,8 @@ struct DeviceDescription {
     bool allowAutomations = true;
     bool wakeOnWlan = false;
     QString refreshPolicy = QStringLiteral("balanced");
+    // Always-on automation policy echoed by the daemon; 100 = unrestricted.
+    int volumeCeiling = 100;
 };
 
 struct DeviceStateSnapshot {
@@ -58,6 +60,7 @@ class DevicesModel final : public QAbstractListModel {
         AllowAutomationsRole,
         WakeOnWlanRole,
         RefreshPolicyRole,
+        VolumeCeilingRole,
     };
     Q_ENUM(Role)
 
@@ -93,6 +96,7 @@ class DevicesModel final : public QAbstractListModel {
         bool allowAutomations = true;
         bool wakeOnWlan = false;
         QString refreshPolicy = QStringLiteral("balanced");
+        int volumeCeiling = 100;
         QSet<QString> pendingRequests;
     };
 

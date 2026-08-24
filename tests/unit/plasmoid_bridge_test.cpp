@@ -40,7 +40,7 @@ QString devicesJson(bool includeSecond = true) {
                   R"json(,{"serial":"SERIAL-B","displayName":"Office","address":"198.51.100.20","allowAutomations":true,"wakeOnWlan":false,"refreshPolicy":"balanced"})json")
             : QString();
     return QStringLiteral(
-               R"json({"schemaVersion":1,"devices":[{"serial":"SERIAL-A","displayName":"Living Room","address":"192.0.2.10","allowAutomations":false,"wakeOnWlan":true,"refreshPolicy":"battery"}%1]})json")
+               R"json({"schemaVersion":1,"devices":[{"serial":"SERIAL-A","displayName":"Living Room","address":"192.0.2.10","allowAutomations":false,"wakeOnWlan":true,"refreshPolicy":"battery","volumeCeiling":50}%1]})json")
         .arg(second);
 }
 
@@ -315,6 +315,7 @@ class PlasmoidBridgeTest : public QObject {
     void aLateStaleSnapshotCannotUndoNewerState();
     void staleRegistrationReplyCannotUnregisterReplacementOwner();
     void deviceListExposesDaemonOwnedPreferences();
+    void aMalformedVolumeCeilingKeepsTheStrictListRejection();
     void deviceManagementReachesTheDaemonAndReportsRejection();
     void testDeviceReportsTheProbedSnapshot();
     void anInFlightOperationIsReportedThroughPlasmasBusyProperty();
@@ -645,17 +646,40 @@ void PlasmoidBridgeTest::deviceListExposesDaemonOwnedPreferences() {
     QVERIFY(model->data(first, DevicesModel::WakeOnWlanRole).toBool());
     QCOMPARE(model->data(first, DevicesModel::RefreshPolicyRole).toString(),
              QStringLiteral("battery"));
+    QCOMPARE(model->data(first, DevicesModel::VolumeCeilingRole).toInt(), 50);
 
     const QModelIndex second = model->index(1);
     QVERIFY(model->data(second, DevicesModel::AllowAutomationsRole).toBool());
     QVERIFY(!model->data(second, DevicesModel::WakeOnWlanRole).toBool());
     QCOMPARE(model->data(second, DevicesModel::RefreshPolicyRole).toString(),
              QStringLiteral("balanced"));
+    // An older daemon omits the key entirely: unrestricted by default.
+    QCOMPARE(model->data(second, DevicesModel::VolumeCeilingRole).toInt(), 100);
 
     const QHash<int, QByteArray> roles = model->roleNames();
     QCOMPARE(roles.value(DevicesModel::AllowAutomationsRole), QByteArrayLiteral("allowAutomations"));
     QCOMPARE(roles.value(DevicesModel::WakeOnWlanRole), QByteArrayLiteral("wakeOnWlan"));
     QCOMPARE(roles.value(DevicesModel::RefreshPolicyRole), QByteArrayLiteral("refreshPolicy"));
+    QCOMPARE(roles.value(DevicesModel::VolumeCeilingRole), QByteArrayLiteral("volumeCeiling"));
+}
+
+void PlasmoidBridgeTest::aMalformedVolumeCeilingKeepsTheStrictListRejection() {
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-CEILING"));
+    QSignalSpy errors(&proxy, &DaemonProxy::errorOccurred);
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex index = firstIndex(model);
+    QTRY_COMPARE(model.data(index, DevicesModel::StaleRole).toBool(), false);
+
+    // A string ceiling is not a ceiling: the same strictness that rejects
+    // other malformed device keys keeps the last good list but marks it stale.
+    Q_EMIT m_fake->DeviceListChanged(QStringLiteral(
+        R"json({"schemaVersion":1,"devices":[{"serial":"SERIAL-A","displayName":"Living Room","address":"192.0.2.10","volumeCeiling":"50"}]})json"));
+    QTRY_COMPARE(errors.count(), 1);
+    for (int row = 0; row < model.rowCount(); ++row) {
+        QCOMPARE(model.data(model.index(row), DevicesModel::StaleRole).toBool(), true);
+    }
 }
 
 void PlasmoidBridgeTest::deviceManagementReachesTheDaemonAndReportsRejection() {
