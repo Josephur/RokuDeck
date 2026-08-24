@@ -6,6 +6,12 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- Automation rules can now trigger themselves off device state: `stateChange` triggers fire on
+  snapshot transitions (rising edge, baseline-safe), and condition trees (`all`/`any`/`not`) gate
+  any firing with a `condition-false` outcome.
+- `setVolume`, `mute`, `runRule` macros (with runtime cycle detection → `cycle-error`) and recursive
+  `ifThenElse` actions are now executed — `setVolume`/`mute` work through relative volume keys using
+  the latest observed state (best-effort by protocol).
 - The widget's settings dialog gains an **Automations** page: every daemon-owned rule appears
   live with its plain-language summary, an enable switch, the last-run outcome, and Run-now /
   Delete controls. Rules are still created from the command line; a structured in-widget editor
