@@ -21,6 +21,11 @@ ConfigModel {
         source: "ConfigControls.qml"
     }
     ConfigCategory {
+        name: i18nc("@title", "Automations")
+        icon: "chronometer"
+        source: "ConfigAutomations.qml"
+    }
+    ConfigCategory {
         name: i18nc("@title", "Advanced")
         icon: "configure"
         source: "ConfigAdvanced.qml"
