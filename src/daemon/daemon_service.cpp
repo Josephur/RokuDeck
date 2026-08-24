@@ -1214,7 +1214,8 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
     static const QSet<QString> executableTypes{
         QStringLiteral("delay"),     QStringLiteral("keypress"),
         QStringLiteral("launchApp"), QStringLiteral("mute"),
-        QStringLiteral("setVolume"), QStringLiteral("runRule")};
+        QStringLiteral("setVolume"), QStringLiteral("runRule"),
+        QStringLiteral("ifThenElse")};
     for (const ActionNode& action : actions) {
         if (!executableTypes.contains(action.type)) {
             return false;
@@ -1317,6 +1318,20 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
             if (childOutcome != QStringLiteral("ok")) {
                 ++deliveryFailures;
                 cycleDetected = cycleDetected || childOutcome == QStringLiteral("cycle-error");
+            }
+            continue;
+        }
+        if (action.type == QStringLiteral("ifThenElse")) {
+            // Branch lists re-enter this dispatcher, so the recursive call's
+            // pre-scan still aborts on unsupported steps and an empty branch
+            // is a clean no-op. callStack/currentRuleId pass through intact,
+            // keeping macro cycle detection honest inside branches.
+            const bool taken = conditionsMet(action.condition, m_snapshots, targets);
+            if (!dispatchActionList(taken ? action.thenActions : action.elseActions,
+                                    targets, callStack, currentRuleId, dispatched,
+                                    rejected, deliveryFailures, pendingRequests,
+                                    cycleDetected)) {
+                return false;
             }
             continue;
         }

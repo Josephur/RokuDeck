@@ -96,10 +96,14 @@ class DaemonDbusTest final : public QObject {
     void setVolumeWalksDownWithBoundedPresses();
     void volumeActionsWithoutObservedAudioFailWithoutDispatching();
     void mixedAudioStateAcrossTargetsYieldsPartial();
-    void notYetExecutableActionsAbortTheWholeRunWithoutDispatching();
+    void mixedListWithIfThenElseRunsToCompletion();
     void macroChainRunsChildAndReportsOk();
     void selfReferencingMacroReportsCycleError();
     void missingMacroTargetCountsAsFailure();
+    void condTrueRunsThenBranch();
+    void condFalseRunsElseBranch();
+    void falseCondWithoutElseIsCleanNoOp();
+    void ifThenElseBranchRecursionCarriesCycleContext();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -2410,35 +2414,30 @@ void DaemonDbusTest::mixedAudioStateAcrossTargetsYieldsPartial() {
     QCOMPARE(keypressCount(QStringLiteral("VolumeMute")), 1);
 }
 
-void DaemonDbusTest::notYetExecutableActionsAbortTheWholeRunWithoutDispatching() {
+void DaemonDbusTest::mixedListWithIfThenElseRunsToCompletion() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
                             QStringLiteral("198.51.100.91")});
 
-    // A not-yet-executable step poisons its whole list: even the executable
-    // Home ahead of it must stay put until runRule/ifThenElse land.
+    // Every parseable action type is now executable, so a mixed list no
+    // longer aborts: the Home ahead of the branch must land, and the
+    // unobservable power gate cleanly skips to its (empty) else.
     const QString mixedId = addRuleReturningId(QStringLiteral(
         R"json({"name":"Mixed macro","trigger":{"type":"manual"},"actions":[)json"
         R"json({"type":"keypress","key":"Home"},)json"
         R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"power",)json"
         R"json("op":"is","value":"on"}},"then":[{"type":"keypress","key":"Back"}]}]})json"));
-    const QString macroId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Bare macro","trigger":{"type":"manual"},"actions":[)json"
-        R"json({"type":"runRule","id":"rCHILD"}]})json"));
 
-    startRunnerCompleter();  // keep any stray delivery wait short either way
+    startRunnerCompleter();
     const QDBusMessage mixedRun = waitForReply(m_proxy->RunRule(mixedId));
-    const QDBusMessage macroRun = waitForReply(m_proxy->RunRule(macroId));
     stopRunnerCompleter();
     QVERIFY2(mixedRun.type() != QDBusMessage::ErrorMessage,
              qPrintable(mixedRun.errorMessage()));
-    QVERIFY2(macroRun.type() != QDBusMessage::ErrorMessage, qPrintable(macroRun.errorMessage()));
-    QCOMPARE(mixedRun.arguments().front().toString(), QStringLiteral("failed"));
-    QCOMPARE(macroRun.arguments().front().toString(), QStringLiteral("failed"));
+    QCOMPARE(mixedRun.arguments().front().toString(), QStringLiteral("ok"));
 
-    // The deliberate abort guard: nothing reaches a device, not even the
-    // executable steps sharing the list (ifThenElse lands in Task 6).
-    QVERIFY(m_runner->requests.isEmpty());
-    QCOMPARE(homeKeypressCount(), 0);
+    // The plain step dispatches; the missing-snapshot gate matches nothing,
+    // so the then-branch Back never does.
+    QCOMPARE(homeKeypressCount(), 1);
+    QCOMPARE(keypressCount(QStringLiteral("Back")), 0);
 }
 
 void DaemonDbusTest::macroChainRunsChildAndReportsOk() {
@@ -2542,6 +2541,149 @@ void DaemonDbusTest::missingMacroTargetCountsAsFailure() {
              QStringLiteral("failed"));
     // A dangling target must not reach any device.
     QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::condTrueRunsThenBranch() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.41")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("branch-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    // Seed the snapshot both the volume walk and the branch gate read:
+    // 18 sits under the threshold, so the then-branch must win.
+    completePollVersion();
+    completePollReadings(18);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Quiet branch","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"setVolume","volume":15},)json"
+        R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"volume",)json"
+        R"json("op":"lt","value":20}},)json"
+        R"json("then":[{"type":"keypress","key":"Home"}],)json"
+        R"json("else":[{"type":"keypress","key":"Back"}]}]})json"));
+
+    startRunnerCompleter();  // the run waits for its delivery verdict
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+
+    // Three VolumeDown presses land the walk, then exactly one Home from the
+    // taken branch; the untaken else never dispatches anything.
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 3);
+    QCOMPARE(homeKeypressCount(), 1);
+    QCOMPARE(keypressCount(QStringLiteral("Back")), 0);
+}
+
+void DaemonDbusTest::condFalseRunsElseBranch() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.42")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("branch-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    completePollVersion();
+    completePollReadings(18);  // volume 18 fails a "louder than 50" gate
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Loud branch","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"setVolume","volume":15},)json"
+        R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"volume",)json"
+        R"json("op":"gt","value":50}},)json"
+        R"json("then":[{"type":"keypress","key":"Home"}],)json"
+        R"json("else":[{"type":"keypress","key":"Back"}]}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+
+    // The false gate routes to else: one Back, and no Home ever fires.
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 3);
+    QCOMPARE(keypressCount(QStringLiteral("Back")), 1);
+    QCOMPARE(homeKeypressCount(), 0);
+}
+
+void DaemonDbusTest::falseCondWithoutElseIsCleanNoOp() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.43")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("branch-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    completePollVersion();
+    completePollReadings(18);  // volume 18 fails a "louder than 50" gate
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Silent branch","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"volume",)json"
+        R"json("op":"gt","value":50}},)json"
+        R"json("then":[{"type":"keypress","key":"Home"}]}]})json"));
+
+    const int requestsBeforeRun = m_runner->requests.size();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    // A false condition with no else is a successful nothing: no attempts, so
+    // the run earns ok without touching a device.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(m_runner->requests.size(), requestsBeforeRun);
+    QCOMPARE(homeKeypressCount(), 0);
+}
+
+void DaemonDbusTest::ifThenElseBranchRecursionCarriesCycleContext() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.44")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("branch-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    // The branch gate needs an observed snapshot to evaluate true; without
+    // one the else path would silently skip the macro step under test.
+    completePollVersion();
+    completePollReadings(18);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Bootstrap","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    // Self-reference is only expressible after creation: nest the macro call
+    // inside a then-branch so recursion must carry the cycle context in.
+    const QString rewritten = QStringLiteral(
+        R"json({"id":"%1","name":"Ouroboros branch","enabled":true,"mode":"restart",)json"
+        R"json("devices":[],"trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"volume",)json"
+        R"json("op":"lt","value":20}},)json"
+        R"json("then":[{"type":"runRule","id":"%1"}]}]})json").arg(ruleId);
+    const QDBusMessage update = waitForReply(m_proxy->UpdateRule(rewritten));
+    QVERIFY2(update.type() != QDBusMessage::ErrorMessage,
+             qPrintable(update.errorMessage()));
+
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    // The branch's macro call names its own enclosing rule: only honest
+    // call-stack plumbing through the recursive dispatcher ends this run as
+    // cycle-error instead of looping forever.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("cycle-error"));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+              QStringLiteral("cycle-error"));
+
+    // Cutting the branch means nothing ever reaches a device; stray poll
+    // traffic may share the request log, but never a keypress.
+    QCOMPARE(homeKeypressCount(), 0);
+    QCOMPARE(keypressCount(QStringLiteral("Back")), 0);
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)
