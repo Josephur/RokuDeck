@@ -19,6 +19,8 @@ plasma_add_applet(io.github.josephur.rokudeck
     qml/ConfigDisplay.qml
     qml/ConfigControls.qml
     qml/ConfigAutomations.qml
+    qml/ConfigRuleEditor.qml
+    qml/RuleValueInput.qml
     qml/ConfigAdvanced.qml
     qml/address.js
   CPP_SOURCES

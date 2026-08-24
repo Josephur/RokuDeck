@@ -303,6 +303,7 @@ void DaemonProxy::stop() {
     if (m_rules) {
         // No daemon means no live list; keep nothing stale on screen.
         m_rules->replaceRules({});
+        m_ruleDocuments.clear();
     }
     setAvailable(false);
 }
@@ -542,6 +543,45 @@ void DaemonProxy::discoverDevices() {
             });
 }
 
+void DaemonProxy::addRule(const QString& ruleJson) {
+    if (!m_active || ruleJson.isEmpty()) {
+        return;
+    }
+    // AddRule carries the stored rule back as its reply payload, so unlike the
+    // void device calls it gets its own watcher.
+    const quint64 generation = m_generation;
+    setBusyCount(m_busyCount + 1);
+    auto* watcher = new QDBusPendingCallWatcher(m_interface->AddRule(ruleJson), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, watcher, generation]() {
+                const QDBusPendingReply<QString> reply = *watcher;
+                watcher->deleteLater();
+                setBusyCount(m_busyCount - 1);
+                if (!m_active || generation != m_generation) {
+                    return;
+                }
+                if (reply.isError()) {
+                    Q_EMIT deviceOperationFailed(QStringLiteral("addRule"),
+                                                 reply.error().message());
+                    return;
+                }
+                Q_EMIT deviceOperationSucceeded(QStringLiteral("addRule"));
+                refresh();
+            });
+}
+
+void DaemonProxy::updateRule(const QString& ruleJson) {
+    if (!m_active || ruleJson.isEmpty()) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("updateRule"), m_interface->UpdateRule(ruleJson));
+}
+
+QVariantMap DaemonProxy::ruleDocument(const QString& ruleId) const {
+    const auto document = m_ruleDocuments.constFind(ruleId);
+    return document == m_ruleDocuments.cend() ? QVariantMap{} : document->toVariantMap();
+}
+
 void DaemonProxy::handleServiceOwnerChanged(const QString& service, const QString& oldOwner,
                                             const QString& newOwner) {
     Q_UNUSED(service)
@@ -557,6 +597,7 @@ void DaemonProxy::handleServiceOwnerChanged(const QString& service, const QStrin
         if (m_rules) {
             m_rules->replaceRules({});
         }
+        m_ruleDocuments.clear();
         setAvailable(false);
         return;
     }
@@ -612,6 +653,7 @@ void DaemonProxy::applyRulesJson(const QString& rulesJsonText) {
 
     QList<RuleEntry> entries;
     const QJsonArray array = envelope->value(QStringLiteral("rules")).toArray();
+    m_ruleDocuments.clear();
     for (const QJsonValue& value : array) {
         if (!value.isObject()) {
             continue;
@@ -622,6 +664,7 @@ void DaemonProxy::applyRulesJson(const QString& rulesJsonText) {
         if (id.isEmpty() || name.isEmpty()) {
             continue;
         }
+        m_ruleDocuments.insert(id, object);
         RuleEntry entry;
         entry.id = id;
         entry.name = name;

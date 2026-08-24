@@ -224,6 +224,22 @@ TestCase {
                 '{"lastFiredAt":"2026-08-24T03:00:00Z","outcome":"ok"}');
     }
 
+    function test_theEnabledSwitchIsAnEditedField() {
+        const document = JSON.parse(daemonDocument);
+        const state = RulePayload.toFormState(document);
+        verify(state.enabled);
+        state.enabled = false;
+        const updated = JSON.parse(RulePayload.buildPayload(state, document));
+        compare(updated.enabled, false, "a flipped switch must reach the document");
+        compare(updated.id, "rRoundTrip1");
+        compare(updated.lastRun.outcome, "ok");
+
+        const added = JSON.parse(
+            RulePayload.buildPayload(RulePayload.toFormState(document), null));
+        verify(added.enabled === undefined,
+               "the enabled choice belongs to the daemon on add");
+    }
+
     function test_addingFromAnEditedRuleDropsDaemonOwnedFields() {
         const document = JSON.parse(daemonDocument);
         const payload = RulePayload.buildPayload(RulePayload.toFormState(document), null);

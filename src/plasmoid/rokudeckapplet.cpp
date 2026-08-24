@@ -127,6 +127,20 @@ void RokuDeckApplet::setRuleEnabled(const QString& ruleId, bool enabled) {
     m_daemon.setRuleEnabled(ruleId, enabled);
 }
 
+void RokuDeckApplet::addRule(const QString& ruleJson) {
+    setLastError({});
+    m_daemon.addRule(ruleJson);
+}
+
+void RokuDeckApplet::updateRule(const QString& ruleJson) {
+    setLastError({});
+    m_daemon.updateRule(ruleJson);
+}
+
+QVariantMap RokuDeckApplet::ruleDocument(const QString& ruleId) const {
+    return m_daemon.ruleDocument(ruleId);
+}
+
 void RokuDeckApplet::deleteRule(const QString& ruleId) {
     setLastError({});
     m_daemon.deleteRule(ruleId);

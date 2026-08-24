@@ -50,6 +50,9 @@ class RokuDeckApplet final : public Plasma::Applet {
     Q_INVOKABLE void setRuleEnabled(const QString& ruleId, bool enabled);
     Q_INVOKABLE void deleteRule(const QString& ruleId);
     Q_INVOKABLE void runRule(const QString& ruleId);
+    Q_INVOKABLE void addRule(const QString& ruleJson);
+    Q_INVOKABLE void updateRule(const QString& ruleJson);
+    Q_INVOKABLE QVariantMap ruleDocument(const QString& ruleId) const;
 
   Q_SIGNALS:
     void selectedSerialChanged();

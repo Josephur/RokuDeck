@@ -41,6 +41,11 @@ KCM.SimpleKCM {
 
         function onDeviceOperationSucceeded(operation) {
             root.operationError = "";
+            // The editor stays open through the round trip so a rejection
+            // never loses the user's edits; success closes it.
+            if (operation === "addRule" || operation === "updateRule") {
+                ruleEditor.close();
+            }
         }
 
         function onRuleRunFinished(ruleId, outcome) {
@@ -50,11 +55,41 @@ KCM.SimpleKCM {
         }
     }
 
+    function openRuleEditor(ruleId) {
+        ruleEditor.openForEdit(root.bridge !== null ? root.bridge.ruleDocument(ruleId) : {});
+    }
+
     property string operationError: ""
     property string runFeedback: ""
 
+    ConfigRuleEditor {
+        id: ruleEditor
+
+        bridge: root.bridge
+    }
+
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
+
+            PlasmaExtras.Heading {
+                Layout.fillWidth: true
+                level: 3
+                text: KI18n.i18nc("@title:group", "Automation rules")
+            }
+
+            PlasmaExtras.ToolButton {
+                objectName: "addRuleButton"
+
+                enabled: root.daemonReachable && !(root.bridge?.busy ?? false)
+                icon.name: "list-add"
+                text: KI18n.i18nc("@action:button", "Add rule")
+                onClicked: ruleEditor.openForAdd()
+            }
+        }
 
         Kirigami.InlineMessage {
             objectName: "daemonUnavailableMessage"
@@ -188,8 +223,17 @@ KCM.SimpleKCM {
                     }
 
                     ColumnLayout {
+                        id: ruleEditArea
+
+                        objectName: "ruleEditArea"
+
                         Layout.fillWidth: true
                         spacing: Kirigami.Units.smallSpacing
+
+                        TapHandler {
+                            cursorShape: Qt.PointingHandCursor
+                            onTapped: root.openRuleEditor(ruleCard.ruleId)
+                        }
 
                         RowLayout {
                             Layout.fillWidth: true

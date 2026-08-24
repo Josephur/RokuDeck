@@ -42,9 +42,15 @@ class DaemonProxy final : public QObject {
     void setDeviceOrder(const QStringList& serials);
     void testDevice(const QString& address);
     void discoverDevices();
+    void addRule(const QString& ruleJson);
+    void updateRule(const QString& ruleJson);
     void setRuleEnabled(const QString& ruleId, bool enabled);
     void deleteRule(const QString& ruleId);
     void runRule(const QString& ruleId);
+
+    // The complete definition the daemon last announced for a rule, so
+    // editors can round-trip documents without owning any rule state.
+    [[nodiscard]] QVariantMap ruleDocument(const QString& ruleId) const;
 
   Q_SIGNALS:
     void availableChanged(bool available);
@@ -84,6 +90,7 @@ class DaemonProxy final : public QObject {
     std::unique_ptr<QDBusServiceWatcher> m_ownerWatcher;
     QHash<QString, QString> m_requestSerials;
     QHash<QString, QDateTime> m_lastSnapshotAt;
+    QHash<QString, QJsonObject> m_ruleDocuments;
     QStringList m_registeredSerials;
     quint64 m_generation = 0;
     int m_busyCount = 0;

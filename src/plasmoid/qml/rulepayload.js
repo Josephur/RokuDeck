@@ -43,6 +43,7 @@ function dateIsValid(date) {
 function blankRule() {
     return {
         name: "",
+        enabled: true,
         mode: "queued",
         devices: [],
         trigger: {
@@ -208,6 +209,7 @@ function toFormState(rule) {
     const source = rule && typeof rule === "object" ? rule : {};
     const state = blankRule();
     state.name = String(source.name === undefined ? "" : source.name);
+    state.enabled = source.enabled !== false;
     state.mode = modes.indexOf(String(source.mode)) >= 0 ? String(source.mode) : state.mode;
     state.devices = Array.isArray(source.devices) ? source.devices.map(String) : [];
     // Unknown trigger kinds ride along verbatim; validate() flags the rule so
@@ -326,6 +328,11 @@ function buildPayload(formState, existingRule) {
         ? Object.assign({}, existingRule) : {};
     payload.name = String(formState.name);
     payload.mode = String(formState.mode);
+    if (payload.id !== undefined) {
+        // UpdateRule documents carry the daemon-owned fields; the editor's
+        // enabled switch is an edited field, id and lastRun stay untouched.
+        payload.enabled = formState.enabled === true;
+    }
     payload.devices = (Array.isArray(formState.devices) ? formState.devices : []).map(String);
     payload.trigger = triggerJson(formState.trigger);
     if (formState.conditions) {

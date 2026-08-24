@@ -1,0 +1,451 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import QtQuick.Controls as QQC2
+import QtQuick.Layouts
+
+import org.kde.ki18n
+import org.kde.kirigami as Kirigami
+import org.kde.plasma.components as PlasmaComponents
+import org.kde.plasma.extras as PlasmaExtras
+
+import "rulepayload.js" as RulePayload
+
+// Structured automation editor: every trigger, condition, and action is built
+// from pickers, never free-form JSON. Payload assembly lives in
+// rulepayload.js so the exact daemon grammar is pinned by unit tests.
+Kirigami.Dialog {
+    id: root
+
+    required property var bridge
+
+    // Complete rule document when editing, null when adding.
+    property var editingRule: null
+    property var formState: null
+    property bool saveAttempted: false
+
+    readonly property bool editing: editingRule !== null
+    readonly property bool daemonReachable: bridge !== null && bridge.available
+    readonly property var problems: formState === null
+        ? [] : RulePayload.validate(formState)
+
+    title: editing
+        ? KI18n.i18nc("@title:window", "Edit Automation")
+        : KI18n.i18nc("@title:window", "New Automation")
+
+    preferredWidth: Kirigami.Units.gridUnit * 28
+
+    function openForAdd() {
+        root.editingRule = null;
+        root.formState = RulePayload.blankRule();
+        root.saveAttempted = false;
+        root.syncFromForm();
+        root.open();
+    }
+
+    function openForEdit(document) {
+        root.editingRule = document && typeof document === "object" ? document : null;
+        root.formState = root.editing
+            ? RulePayload.toFormState(root.editingRule) : RulePayload.blankRule();
+        root.saveAttempted = false;
+        root.syncFromForm();
+        root.open();
+    }
+
+    function problemText(code) {
+        switch (code) {
+        case "nameEmpty":
+            return KI18n.i18nc("@info", "Give the automation a name.");
+        case "nameTooLong":
+            return KI18n.i18nc("@info", "The name is limited to 80 characters.");
+        case "timeMalformed":
+            return KI18n.i18nc("@info", "Enter the time of day as HH:MM.");
+        case "dateMissing":
+            return KI18n.i18nc("@info",
+                "Pick the date for a one-time schedule as YYYY-MM-DD.");
+        case "intervalRange":
+            return KI18n.i18nc("@info", "Repeat every 5 to 1440 minutes.");
+        case "actionsEmpty":
+            return KI18n.i18nc("@info", "Add at least one action to run.");
+        case "betweenNeedsTwoNumbers":
+            return KI18n.i18nc("@info", "\"Between\" needs a low and a high number.");
+        case "valueRequired":
+            return KI18n.i18nc("@info", "Choose a value to compare against.");
+        case "volumeRange":
+            return KI18n.i18nc("@info", "Volume must stay between 0 and 100.");
+        case "keyInvalid":
+            return KI18n.i18nc("@info", "Choose a remote button from the list.");
+        case "appIdInvalid":
+            return KI18n.i18nc("@info",
+                "App ids start with a letter or number, then letters, numbers, dots, dashes, or underscores.");
+        case "delayRange":
+            return KI18n.i18nc("@info", "Delays run between 1 and 600 seconds.");
+        case "ruleTargetInvalid":
+            return KI18n.i18nc("@info", "Pick which rule this step runs.");
+        case "branchEmpty":
+            return KI18n.i18nc("@info", "The \"then\" branch needs at least one action.");
+        case "conditionIncomplete":
+            return KI18n.i18nc("@info", "Finish or remove the unfinished condition.");
+        case "tooDeep":
+            return KI18n.i18nc("@info", "Conditions nest at most 12 levels deep.");
+        case "unsupportedContent":
+            return KI18n.i18nc("@info",
+                "This rule contains parts the editor cannot change; editing it here would drop them.");
+        default:
+            return KI18n.i18nc("@info", "Fix the highlighted entries.");
+        }
+    }
+
+    function syncFromForm() {
+        if (root.formState === null) {
+            return;
+        }
+        nameField.text = String(root.formState.name ?? "");
+        enabledSwitch.checked = root.formState.enabled === true;
+        for (let mode = 0; mode < modeCombo.model.length; ++mode) {
+            if (modeCombo.model[mode].value === root.formState.mode) {
+                modeCombo.currentIndex = mode;
+            }
+        }
+        for (let choice = 0; choice < triggerTypeCombo.model.length; ++choice) {
+            const candidate = triggerTypeCombo.model[choice].value;
+            const actual = root.formState.trigger.type === "time"
+                ? root.formState.trigger.kind : root.formState.trigger.type;
+            if (candidate === actual) {
+                triggerTypeCombo.currentIndex = choice;
+            }
+        }
+        timeField.text = String(root.formState.trigger.time ?? "");
+        dateField.text = String(root.formState.trigger.date ?? "");
+        intervalMinutesSpin.value = Number(root.formState.trigger.minutes);
+        for (let field = 0; field < stateChangeFieldCombo.model.length; ++field) {
+            if (stateChangeFieldCombo.model[field] === root.formState.trigger.field) {
+                stateChangeFieldCombo.currentIndex = field;
+            }
+        }
+        for (let op = 0; op < stateChangeOpCombo.model.length; ++op) {
+            if (stateChangeOpCombo.model[op] === root.formState.trigger.op) {
+                stateChangeOpCombo.currentIndex = op;
+            }
+        }
+        stateChangeValue.field = root.formState.trigger.field;
+        stateChangeValue.op = root.formState.trigger.op;
+        stateChangeValue.value = root.formState.trigger.value;
+        for (let row = 0; row < deviceChecks.count; ++row) {
+            const entry = deviceChecks.itemAt(row);
+            entry.checked = root.formState.devices.indexOf(entry.serial) >= 0;
+        }
+    }
+
+    function save() {
+        root.saveAttempted = true;
+        if (RulePayload.validate(root.formState).length > 0 || !root.daemonReachable) {
+            return;
+        }
+        const payload = RulePayload.buildPayload(root.formState, root.editingRule);
+        if (root.editing) {
+            root.bridge.updateRule(payload);
+        } else {
+            root.bridge.addRule(payload);
+        }
+    }
+
+    readonly property var modeChoices: [
+        { value: "queued", label: KI18n.i18nc("@option", "Queue while busy") },
+        { value: "restart", label: KI18n.i18nc("@option", "Restart while busy") },
+        { value: "single", label: KI18n.i18nc("@option", "Skip while busy") }
+    ]
+
+    readonly property var triggerChoices: [
+        { value: "daily", label: KI18n.i18nc("@option", "Every day at…") },
+        { value: "weekdays", label: KI18n.i18nc("@option", "Weekdays at…") },
+        { value: "once", label: KI18n.i18nc("@option", "Once on a date…") },
+        { value: "interval", label: KI18n.i18nc("@option", "Every N minutes") },
+        { value: "stateChange", label: KI18n.i18nc("@option", "When a device state changes") },
+        { value: "manual", label: KI18n.i18nc("@option", "Only when run by hand") }
+    ]
+
+    function applyTriggerChoice(choice) {
+        const trigger = root.formState.trigger;
+        if (choice === "interval") {
+            trigger.type = "interval";
+        } else if (choice === "stateChange") {
+            trigger.type = "stateChange";
+        } else if (choice === "manual") {
+            trigger.type = "manual";
+        } else {
+            trigger.type = "time";
+            trigger.kind = choice;
+            if (choice === "once" && !RulePayload.dateIsValid(trigger.date)) {
+                trigger.date = "";
+            }
+        }
+        root.syncFromForm();
+    }
+
+    footer: QQC2.DialogButtonBox {
+        QQC2.Button {
+            objectName: "ruleEditorCancelButton"
+
+            icon.name: "dialog-cancel"
+            text: KI18n.i18nc("@action:button", "Cancel")
+            QQC2.DialogButtonBox.buttonRole: QQC2.DialogButtonBox.RejectRole
+        }
+
+        QQC2.Button {
+            objectName: "ruleEditorSaveButton"
+
+            icon.name: "dialog-ok-apply"
+            text: KI18n.i18nc("@action:button", "Save")
+            enabled: root.daemonReachable && root.problems.length === 0
+                     && !(root.bridge?.busy ?? false)
+            QQC2.DialogButtonBox.buttonRole: QQC2.DialogButtonBox.AcceptRole
+            QQC2.ToolTip.text: root.problems.length > 0
+                ? root.problemText(root.problems[0].code)
+                : ""
+            QQC2.ToolTip.visible: !enabled && root.problems.length > 0 && hovered
+        }
+
+        onAccepted: root.save()
+        onRejected: root.close()
+    }
+
+    contentItem: Flickable {
+        id: editorScroll
+
+        clip: true
+        contentHeight: editorColumn.implicitHeight
+        implicitHeight: Math.min(editorColumn.implicitHeight,
+                                 Kirigami.Units.gridUnit * 24)
+        interactive: contentHeight > height
+
+        ColumnLayout {
+            id: editorColumn
+
+            width: editorScroll.width
+            spacing: Kirigami.Units.largeSpacing
+
+            Kirigami.InlineMessage {
+                objectName: "editorValidationMessage"
+
+                Layout.fillWidth: true
+                type: Kirigami.MessageType.Error
+                visible: root.saveAttempted && root.problems.length > 0
+                text: {
+                    const lines = [];
+                    for (let i = 0; i < root.problems.length; ++i) {
+                        lines.push("• " + root.problemText(root.problems[i].code));
+                    }
+                    return lines.join("\n");
+                }
+            }
+
+            Kirigami.FormLayout {
+                Layout.fillWidth: true
+
+                QQC2.TextField {
+                    id: nameField
+
+                    objectName: "nameField"
+
+                    Kirigami.FormData.label: KI18n.i18nc("@label:textbox", "Name:")
+                    placeholderText: KI18n.i18nc("@info:placeholder", "Night volume")
+                    onTextEdited: root.formState.name = text
+                }
+
+                QQC2.Switch {
+                    id: enabledSwitch
+
+                    objectName: "enabledSwitch"
+
+                    visible: root.editing
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "Active:")
+                    onToggled: root.formState.enabled = checked
+                }
+
+                PlasmaComponents.ComboBox {
+                    id: modeCombo
+
+                    objectName: "modeCombo"
+
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "If already running:")
+                    textRole: "label"
+                    model: root.modeChoices
+                    onActivated: index => root.formState.mode = model[index].value
+                }
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+            }
+
+            PlasmaComponents.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Kirigami.Theme.disabledTextColor
+                text: root.formState !== null && root.formState.devices.length === 0
+                    ? KI18n.i18nc("@info", "No devices selected, so this rule watches every device.")
+                    : ""
+            }
+
+            Repeater {
+                id: deviceChecks
+
+                objectName: "deviceChecksRepeater"
+
+                model: root.bridge !== null ? root.bridge.devices : null
+
+                delegate: QQC2.CheckBox {
+                    id: deviceCheckDelegate
+
+                    required property int index
+                    required property string serial
+                    required property string name
+
+                    objectName: "deviceCheck-" + serial
+
+                    Layout.fillWidth: true
+                    text: name
+                    onToggled: {
+                        const next = root.formState.devices.filter(
+                            entry => entry !== deviceCheckDelegate.serial);
+                        if (checked) {
+                            next.push(deviceCheckDelegate.serial);
+                        }
+                        root.formState.devices = next;
+                    }
+                }
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+            }
+
+            PlasmaExtras.Heading {
+                level: 4
+                text: KI18n.i18nc("@title:group", "When")
+            }
+
+            Kirigami.FormLayout {
+                Layout.fillWidth: true
+
+                PlasmaComponents.ComboBox {
+                    id: triggerTypeCombo
+
+                    objectName: "triggerTypeCombo"
+
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "Fires:")
+                    textRole: "label"
+                    model: root.triggerChoices
+                    onActivated: index => root.applyTriggerChoice(model[index].value)
+                }
+
+                QQC2.TextField {
+                    id: timeField
+
+                    objectName: "timeField"
+
+                    visible: root.formState !== null
+                             && root.formState.trigger.type === "time"
+                    inputMask: "99:99"
+                    inputMethodHints: Qt.ImhPreferNumbers
+                    Kirigami.FormData.label: KI18n.i18nc("@label:textbox", "Time of day:")
+                    placeholderText: "23:00"
+                    onTextEdited: root.formState.trigger.time = text
+                }
+
+                QQC2.TextField {
+                    id: dateField
+
+                    objectName: "dateField"
+
+                    visible: root.formState !== null && root.formState.trigger.type === "time"
+                             && root.formState.trigger.kind === "once"
+                    inputMask: "9999-99-99"
+                    inputMethodHints: Qt.ImhPreferNumbers
+                    Kirigami.FormData.label: KI18n.i18nc("@label:textbox", "Date:")
+                    placeholderText: "2026-12-31"
+                    onTextEdited: root.formState.trigger.date = text
+                }
+
+                QQC2.SpinBox {
+                    id: intervalMinutesSpin
+
+                    objectName: "intervalMinutesSpin"
+
+                    visible: root.formState !== null
+                             && root.formState.trigger.type === "interval"
+                    from: 5
+                    to: 1440
+                    editable: true
+                    Kirigami.FormData.label:
+                        KI18n.i18nc("@label spinbox minutes", "Every (minutes):")
+                    onValueModified: root.formState.trigger.minutes = value
+                }
+
+                PlasmaComponents.ComboBox {
+                    id: stateChangeFieldCombo
+
+                    objectName: "stateChangeFieldCombo"
+
+                    visible: root.formState !== null
+                             && root.formState.trigger.type === "stateChange"
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "Watch:")
+                    model: RulePayload.fields
+                    onActivated: index => {
+                        root.formState.trigger.field = model[index];
+                        root.formState.trigger.value =
+                            RulePayload.canonicalValue(model[index],
+                                                       root.formState.trigger.op,
+                                                       root.formState.trigger.value);
+                        stateChangeValue.field = model[index];
+                        stateChangeValue.value = root.formState.trigger.value;
+                    }
+                }
+
+                PlasmaComponents.ComboBox {
+                    id: stateChangeOpCombo
+
+                    objectName: "stateChangeOpCombo"
+
+                    visible: root.formState !== null
+                             && root.formState.trigger.type === "stateChange"
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "Changes:")
+                    model: RulePayload.ops
+                    onActivated: index => {
+                        root.formState.trigger.op = model[index];
+                        stateChangeValue.op = model[index];
+                    }
+                }
+
+                RuleValueInput {
+                    id: stateChangeValue
+
+                    objectName: "stateChangeValue"
+
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "To:")
+                    visible: root.formState !== null
+                             && root.formState.trigger.type === "stateChange"
+                    onValueEdited: value => {
+                        root.formState.trigger.value = value;
+                    }
+                }
+            }
+
+            PlasmaComponents.Label {
+                objectName: "stateChangeScopeCaption"
+
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                visible: root.formState !== null
+                         && root.formState.trigger.type === "stateChange"
+                color: Kirigami.Theme.disabledTextColor
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+                text: KI18n.i18nc("@info",
+                    "This trigger watches every device; narrow it to specific devices with extra conditions.")
+            }
+        }
+    }
+}
