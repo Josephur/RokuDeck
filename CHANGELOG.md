@@ -6,6 +6,11 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- The daemon now fires `time` (daily/weekdays/once) and `interval` automation triggers on
+  its own — no widget or CLI session needs to be running, and pending schedules keep the
+  daemon alive.
+- `once` rules missed while the daemon was down fire once at startup if less than 24 hours
+  late; older ones are skipped as stale.
 - Added daemon-owned automation rules: a typed JSON rule model with strict validation, persistent
   `[Rules]` storage that survives daemon restarts, and full CRUD over D-Bus (`ListRules`,
   `AddRule`, `UpdateRule`, `DeleteRule`, `SetRuleEnabled`) with `RulesChanged` announcements so
