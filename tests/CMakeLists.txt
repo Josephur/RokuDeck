@@ -48,6 +48,14 @@ target_include_directories(rule-summary-test
 target_link_libraries(rule-summary-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
 add_test(NAME rule-summary COMMAND rule-summary-test)
 
+add_executable(rule-conditions-test unit/rule_conditions_test.cpp)
+target_include_directories(rule-conditions-test
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(rule-conditions-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)
+add_test(NAME rule-conditions COMMAND rule-conditions-test)
+
 add_executable(rds-process-helper support/process_helper.cpp)
 target_link_libraries(rds-process-helper PRIVATE Qt6::Core)
 
