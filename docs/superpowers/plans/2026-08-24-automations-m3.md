@@ -110,7 +110,7 @@ Field extraction: `power` → `on|standby|unknown` via enum switch; `screensaver
   const QStringList due = dueStateChangeRuleIds(m_rules, claim.serial, previous, snapshot);
   runStateChangeFirings(due);
   ```
-  `previous` on first observation is a default `DeviceSnapshot` (all Unknown) — predicates never match Unknown, so baseline cannot fire (ruling 3). `runStateChangeFirings` mirrors `evaluateDueRules`: guard on `m_dispatchActive`, loop `executeRuleRun(id)`, tail-safe. Note: `executeRuleRun`'s tail `evaluateDueRules()` already exists; do not double-dispatch.
+  `previous` on first observation is a default `DeviceSnapshot`: skip evaluation entirely when the serial was absent from `m_snapshots` before the insert (`hadPrevious` guard) — spec §4.1 baseline without firing. `runStateChangeFirings` mirrors `evaluateDueRules`: guard on `m_dispatchActive`, loop `executeRuleRun(id)`, tail-safe. Note: `executeRuleRun`'s tail `evaluateDueRules()` already exists; do not double-dispatch.
 - [ ] **Step 4: GREEN + full suite**, commit `feat(daemon): fire stateChange triggers off snapshot diffs`.
 
 ---
