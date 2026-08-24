@@ -163,6 +163,7 @@ class DaemonService final : public QObject, protected QDBusContext {
                                               const QStringList& targets);
     void rearmScheduleTimer();
     [[nodiscard]] QString executeRuleRun(const QString& ruleId);
+    void runStateChangeFirings(const QStringList& ruleIds);
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,

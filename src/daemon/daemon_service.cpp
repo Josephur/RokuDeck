@@ -4,6 +4,7 @@
 #include "command_contract.h"
 #include "config_store.h"
 #include "core/qprocess_runner.h"
+#include "core/rule_conditions.h"
 #include "dbus_error_contract.h"
 #include "rokudeck1_adaptor.h"
 
@@ -938,6 +939,17 @@ void DaemonService::evaluateDueRules() {
     rearmScheduleTimer();
 }
 
+void DaemonService::runStateChangeFirings(const QStringList& ruleIds) {
+    if (m_dispatchActive) {
+        return;  // a run is mid-delay; dropping keeps the pipeline sequential
+    }
+    for (const QString& ruleId : ruleIds) {
+        m_dispatchActive = true;
+        static_cast<void>(executeRuleRun(ruleId));
+        m_dispatchActive = false;
+    }
+}
+
 QString DaemonService::nextRuleId() const {
     static const QString alphabet =
         QStringLiteral("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
@@ -1476,6 +1488,10 @@ void DaemonService::pollDueDevices() {
                     snapshot.displayName = mergedDevice->displayName;
                     snapshot.address = mergedDevice->address;
                 }
+                // The pre-insert snapshot is the diff baseline; a serial never
+                // seen before only establishes it and must not fire (§4.1).
+                const bool hadPrevious = service->m_snapshots.contains(claim.serial);
+                const DeviceSnapshot previous = service->m_snapshots.value(claim.serial);
                 service->m_snapshots.insert(claim.serial, snapshot);
                 if (deviceChanged) {
                     service->m_configStore->saveDevices(service->m_deviceRegistry.devices());
@@ -1483,6 +1499,10 @@ void DaemonService::pollDueDevices() {
                 }
                 static_cast<void>(service->m_pollScheduler.recordResult(claim, true));
                 Q_EMIT service->DeviceSnapshotChanged(claim.serial, snapshotJson(snapshot));
+                if (hadPrevious) {
+                    service->runStateChangeFirings(
+                        dueStateChangeRuleIds(service->m_rules, claim.serial, previous, snapshot));
+                }
             });
     }
 }

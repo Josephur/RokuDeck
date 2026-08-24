@@ -87,6 +87,8 @@ class DaemonDbusTest final : public QObject {
     void onceRuleMissedByLessThanADayFiresAtStartup();
     void intervalRuleReanchorsAcrossDaemonRestarts();
     void pendingScheduleKeepsTheDaemonAwake();
+    void stateChangeRuleFiresOnRisingEdgeOnly();
+    void firstObservationIsBaselineAndNeverFires();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -109,6 +111,18 @@ class DaemonDbusTest final : public QObject {
     // to every command succeeding.
     void startRunnerCompleter(const QList<int>& script = {});
     void stopRunnerCompleter();
+    // Home keypress requests seen by the fake runner, i.e. stateChange
+    // firings that reached a device.
+    [[nodiscard]] int homeKeypressCount() const;
+    // Serves the one-time rds --version probe that precedes the very first
+    // device query of a daemon's lifetime.
+    void completePollVersion();
+    // Waits for the next device-info request, then serves it plus the
+    // active-app/player/audio-device readings. Only one poll can be in flight
+    // per serial, so this consumes exactly one cycle no matter how eagerly the
+    // scheduler re-arms. A firing triggered by the audio response dispatches
+    // synchronously inside this call.
+    void completePollReadings(int volume);
 
     QTemporaryDir m_configDirectory;
     QString m_configPath;
@@ -1631,6 +1645,62 @@ void DaemonDbusTest::startRunnerCompleter(const QList<int>& script) {
 void DaemonDbusTest::stopRunnerCompleter() {
     m_runnerCompleter.stop();
     m_completerScript.clear();
+    // A stray poll may have started while a firing's delivery wait pumped the
+    // loop; drain it so later cycles sync on a clean pending queue. The junk
+    // payload fails cleanly wherever it lands.
+    while (m_runner != nullptr && !m_runner->callbacks.isEmpty()) {
+        m_runner->complete({0, QByteArrayLiteral("{}\n"), {}, false});
+    }
+}
+
+int DaemonDbusTest::homeKeypressCount() const {
+    int count = 0;
+    for (const ProcessRequest& request : m_runner->requests) {
+        if (request.arguments.size() >= 2
+            && request.arguments.last(2)
+                == QStringList({QStringLiteral("keypress"), QStringLiteral("Home")})) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void DaemonDbusTest::completePollVersion() {
+    QVERIFY2(QTest::qWaitFor([&] { return !m_runner->callbacks.isEmpty(); }, 15s),
+             "the rds --version probe never reached the fake runner");
+    m_runner->complete({0, QByteArrayLiteral("1.0.0\n"), {}, false});
+}
+
+void DaemonDbusTest::completePollReadings(int volume) {
+    QVERIFY2(QTest::qWaitFor([&] { return !m_runner->callbacks.isEmpty(); }, 15s),
+             "the next device-info request never reached the fake runner");
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"deviceName":"Fixture Room","serialNumber":"SERIAL-A","powerMode":"PowerOn"})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<active-app><app id=\"fixture-app\" type=\"appl\">Fixture App</app></active-app>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<player state=\"idle\"/>","status":200,"headers":{}})json"),
+         {},
+         false});
+    m_runner->complete(
+        {0,
+         QByteArrayLiteral(
+             R"json({"success":true,"data":"<audio-device><volume>)json") +
+             QByteArray::number(volume)
+             + QByteArrayLiteral(
+                 R"json(</volume><mute-status>false</mute-status></audio-device>","status":200,"headers":{}})json"),
+         {},
+         false});
 }
 
 QString DaemonDbusTest::addRuleReturningId(const QString& payload) {
@@ -2029,6 +2099,103 @@ void DaemonDbusTest::pendingScheduleKeepsTheDaemonAwake() {
     QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
              qPrintable(disabled.errorMessage()));
     QVERIFY(m_daemon->idleTimerActive());   // released
+}
+
+void DaemonDbusTest::stateChangeRuleFiresOnRisingEdgeOnly() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.30")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("sc-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    QSignalSpy snapshots(m_daemon.get(), &DaemonService::DeviceSnapshotChanged);
+
+    // First full poll: volume 25 sits above the rule's threshold, making it
+    // the observation baseline outside the predicate; nothing may fire.
+    completePollVersion();
+    completePollReadings(25);
+    QCOMPARE(snapshots.size(), 1);
+    QCOMPARE(homeKeypressCount(), 0);
+
+    // The rule joins after the baseline: dropping below 20 must fire it.
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Volume watchdog","trigger":{"type":"stateChange","field":"volume",)json"
+        R"json("op":"lt","value":20},"actions":[{"type":"keypress","key":"Home"}]})json"));
+    startRunnerCompleter();  // the firing waits for its delivery verdict
+    completePollReadings(5);
+    stopRunnerCompleter();
+    QCOMPARE(homeKeypressCount(), 1);
+    const QJsonObject fired =
+        rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+    QCOMPARE(fired.value(QStringLiteral("id")).toString(), ruleId);
+    QCOMPARE(fired.value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
+
+    // Same reading again: old == new never re-fires.
+    completePollReadings(5);
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 1);
+
+    // Back above the threshold: the falling edge must stay silent too.
+    completePollReadings(25);
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 1);
+    QCOMPARE(snapshots.size(), 4);
+}
+
+void DaemonDbusTest::firstObservationIsBaselineAndNeverFires() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.31")});
+    // The rule exists before the daemon ever observes the device: even a first
+    // reading that already matches stays silent (spec §4.1 baseline).
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Quiet watcher","trigger":{"type":"stateChange","field":"volume",)json"
+        R"json("op":"lt","value":20},"actions":[{"type":"keypress","key":"Home"}]})json"));
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("baseline-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    auto neverRan = [this, &ruleId]() {
+        const QJsonObject rule =
+            rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+        QCOMPARE(rule.value(QStringLiteral("id")).toString(), ruleId);
+        QVERIFY2(!rule.contains(QStringLiteral("lastRun")),
+                 "a rule that never fired must carry no last-run record");
+    };
+
+    completePollVersion();
+    completePollReadings(5);  // matches the predicate, but it is only the baseline
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 0);
+    neverRan();
+
+    completePollReadings(5);  // stable readings never fire
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 0);
+    neverRan();
+
+    completePollReadings(25);  // leaving the predicate is the falling edge: silent
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 0);
+
+    startRunnerCompleter();  // re-entering below 20 is a genuine rising edge
+    completePollReadings(5);
+    stopRunnerCompleter();
+    QCOMPARE(homeKeypressCount(), 1);
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)
