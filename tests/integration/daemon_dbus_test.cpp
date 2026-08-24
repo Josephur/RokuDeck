@@ -117,6 +117,10 @@ class DaemonDbusTest final : public QObject {
     void suppressedFiringAnnouncesDroppedRecord();
     void macroInvocationBypassesModeGate();
     void stateChangeFiringGatedByConditionsRecordsConditionFalse();
+    void restartThenThirdFiringDuringReplacementIsGated();
+    void singleModeThirdFiringDuringActiveRunIsDropped();
+    void runRuleOnDisabledRuleIsTypedRejected();
+    void stateChangeEdgeOnDisabledRuleDoesNotFire();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -3119,6 +3123,115 @@ void DaemonDbusTest::stateChangeFiringGatedByConditionsRecordsConditionFalse() {
                  .value(QStringLiteral("outcome"))
                  .toString(),
              QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::restartThenThirdFiringDuringReplacementIsGated() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.46")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Relay","mode":"restart","devices":[],)json"
+        R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
+        R"json({"type":"delay","seconds":5},{"type":"keypress","key":"Select"}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    // F1 runs and is superseded by F2 at 50 ms; F3 lands at 150 ms inside
+    // F2's pumps — exactly the window where a stale frame's cleanup used to
+    // be able to erase the replacement's live state. The machine must stay
+    // coherent: F3 finds the Active state and valid token of F2 and, per the
+    // restart mode, supersedes it; only F3 completes with a record.
+    QTimer::singleShot(50ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    QTimer::singleShot(150ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    startRunnerCompleter();
+    static_cast<void>(m_daemon->requestRuleFire(ruleId));
+    stopRunnerCompleter();
+
+    QCOMPARE(homeKeypressCount(), 3);  // one Home per firing: no duplicate runs
+    QCOMPARE(keypressCount(QStringLiteral("Select")), 1);  // only the final run's
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    QCOMPARE(outcomes.count(QStringLiteral("ok")), 1);
+    QCOMPARE(outcomes.count(QStringLiteral("dropped")), 0);
+    QCOMPARE(outcomes.last(), QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::singleModeThirdFiringDuringActiveRunIsDropped() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.47")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Anchor","mode":"single","devices":[],)json"
+        R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
+        R"json({"type":"delay","seconds":1}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    // Two overlapping firings during one active run: both must be dropped,
+    // never started, whatever cleanup ordering the unwinding frames use.
+    QTimer::singleShot(50ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    QTimer::singleShot(150ms, this, [this, ruleId] { m_daemon->requestRuleFire(ruleId); });
+    startRunnerCompleter();
+    static_cast<void>(m_daemon->requestRuleFire(ruleId));
+    stopRunnerCompleter();
+
+    QCOMPARE(homeKeypressCount(), 1);
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    QCOMPARE(outcomes.count(QStringLiteral("dropped")), 2);
+    QCOMPARE(outcomes.last(), QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::runRuleOnDisabledRuleIsTypedRejected() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.48")});
+    const QString ruleId = addManualRule(QStringLiteral("Sleeping"));
+    const QDBusMessage disabled = waitForReply(m_proxy->SetRuleEnabled(ruleId, false));
+    QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
+             qPrintable(disabled.errorMessage()));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+
+    // Spec §4.3: only enabled rules fire. The manual caller gets the typed
+    // rejection, nothing reaches a device, and no last-run record appears.
+    QCOMPARE(run.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(run.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    QVERIFY2(run.errorMessage().contains(QStringLiteral("disabledRule")),
+             qPrintable(run.errorMessage()));
+    QVERIFY(m_runner->requests.isEmpty());
+    QVERIFY2(!rulesListing()
+                  .value(QStringLiteral("rules"))
+                  .toArray()
+                  .at(0)
+                  .toObject()
+                  .contains(QStringLiteral("lastRun")),
+             "a refused firing must not record a last-run entry");
+}
+
+void DaemonDbusTest::stateChangeEdgeOnDisabledRuleDoesNotFire() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.49")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("sc-off-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    completePollVersion();
+    completePollReadings(25);  // baseline above the threshold
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Muted watcher","trigger":{"type":"stateChange","field":"volume",)json"
+        R"json("op":"lt","value":20},"actions":[{"type":"keypress","key":"Home"}]})json"));
+    const QDBusMessage disabled = waitForReply(m_proxy->SetRuleEnabled(ruleId, false));
+    QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
+             qPrintable(disabled.errorMessage()));
+
+    // An edge into the predicate after the rule was disabled fires nothing.
+    completePollReadings(5);
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 0);
+    QVERIFY2(!rulesListing()
+                  .value(QStringLiteral("rules"))
+                  .toArray()
+                  .at(0)
+                  .toObject()
+                  .contains(QStringLiteral("lastRun")),
+             "a skipped firing must not record a last-run entry");
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

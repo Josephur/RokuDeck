@@ -1067,14 +1067,19 @@ QString DaemonService::RunRule(const QString& ruleId) {
         sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknownRule"));
         return {};
     }
+    // Spec §4.3: only enabled rules fire — manual runs included.
+    if (!existing->enabled) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("disabledRule"));
+        return {};
+    }
     // Manual runs pass the same mode gate as every other firing origin.
     return requestRuleFire(ruleId);
 }
 
 QString DaemonService::requestRuleFire(const QString& ruleId) {
     const auto existing = findRule(ruleId);
-    if (existing == m_rules.end()) {
-        return {};
+    if (existing == m_rules.end() || !existing->enabled) {
+        return {};  // erased or disabled between scheduling and firing
     }
     const QString mode = existing->mode;
 
@@ -1114,9 +1119,9 @@ QString DaemonService::requestRuleFire(const QString& ruleId) {
         m_runTokens.insert(ruleId, token);
         outcome = executeRuleRun(ruleId, {}, token);
         const bool cancelled = token->load();
-        finishRuleRun(ruleId, cancelled);
+        finishRuleRun(ruleId, token);
         if (cancelled) {
-            return {};  // superseded: the replacement owns the state fields
+            return {};  // superseded: the replacement owns the fields now
         }
         if (m_runStates.value(ruleId, kRunIdle) != kRunQueued) {
             break;
@@ -1129,14 +1134,21 @@ QString DaemonService::requestRuleFire(const QString& ruleId) {
     return outcome;
 }
 
-void DaemonService::finishRuleRun(const QString& ruleId, bool cancelled) {
-    m_runTokens.remove(ruleId);
-    if (cancelled) {
-        // Superseded mid-run: newer runs always complete (and clean up)
-        // before an older unwind resumes, so clearing here can never clobber
-        // a live replacement.
-        m_runStates.remove(ruleId);
+void DaemonService::finishRuleRun(const QString& ruleId,
+                                  const std::shared_ptr<std::atomic_bool>& token) {
+    // Ownership-aware cleanup: a superseded frame unwinds through its
+    // replacement's event pumps, so it must never touch entries a newer run
+    // has already replaced — erasing them would leave that replacement
+    // un-supersedeable (lost token) or invisible to the gate (lost state).
+    if (m_runTokens.value(ruleId) != token) {
+        return;
     }
+    m_runTokens.remove(ruleId);
+    if (!token->load()) {
+        return;  // normal completion; the drain loop consumes any queued slot
+    }
+    // Superseded while still the registered owner: clear the field.
+    m_runStates.remove(ruleId);
 }
 
 void DaemonService::recordDroppedFiring(const QString& ruleId) {

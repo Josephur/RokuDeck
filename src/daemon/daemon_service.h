@@ -202,10 +202,12 @@ class DaemonService final : public QObject, protected QDBusContext {
     QString executeRuleRun(const QString& ruleId, const QStringList& callStack = {},
                            const std::shared_ptr<std::atomic_bool>& cancelToken = {});
     void runStateChangeFirings(const QStringList& ruleIds);
-    // Bookends one gated run: drops the cancellation token, and on a
-    // cancelled unwind also clears the per-rule state so the superseding run
-    // (already running deeper in the stack) owns the fields alone.
-    void finishRuleRun(const QString& ruleId, bool cancelled);
+    // Bookends one gated run. Cleanup is ownership-aware: a superseded frame
+    // unwinds through its replacement's event pumps, so the shared entries
+    // are only released when this run's own token is still the registered
+    // one — otherwise they describe the live replacement.
+    void finishRuleRun(const QString& ruleId,
+                       const std::shared_ptr<std::atomic_bool>& token);
     // Records a mode-suppressed firing: only the lastRun fields are written
     // behind the find-rule guard (never a whole-struct clobber), then the
     // rules are announced — mirroring the targeted-writeback pattern.
