@@ -5,6 +5,7 @@
 #include <QAbstractListModel>
 #include <QList>
 #include <QString>
+#include <QVariant>
 
 namespace RokuDeck {
 
@@ -43,6 +44,10 @@ class AutomationsModel final : public QAbstractListModel {
     [[nodiscard]] QHash<int, QByteArray> roleNames() const override;
 
     void replaceRules(const QList<RuleEntry>& rules);
+
+    // QML runRule pickers need [{id, name}, ...]; the rule being edited is
+    // excluded so a macro cannot target itself.
+    Q_INVOKABLE QVariantList ruleEntries(const QString& excludingId = {}) const;
 
   private:
     QList<RuleEntry> m_rules;

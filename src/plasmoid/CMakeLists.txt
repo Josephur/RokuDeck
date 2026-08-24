@@ -22,6 +22,8 @@ plasma_add_applet(io.github.josephur.rokudeck
     qml/ConfigRuleEditor.qml
     qml/ConditionNodeEditor.qml
     qml/ConditionNodeInner.qml
+    qml/ActionListEditor.qml
+    qml/ActionStepEditor.qml
     qml/RuleValueInput.qml
     qml/ConfigAdvanced.qml
     qml/address.js

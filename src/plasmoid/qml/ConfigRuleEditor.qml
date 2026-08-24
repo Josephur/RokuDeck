@@ -153,6 +153,9 @@ Kirigami.Dialog {
         if (root.formState.conditions !== null) {
             conditionsEditor.syncFromNode();
         }
+        thenActionsEditor.storeObject = root.formState;
+        thenActionsEditor.storeKey = "actions";
+        thenActionsEditor.actions = root.formState.actions;
     }
 
     function save() {
@@ -513,6 +516,37 @@ Kirigami.Dialog {
                     root.formState.conditions = null;
                     root.touchForm();
                 }
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+            }
+
+            PlasmaExtras.Heading {
+                level: 4
+                text: KI18n.i18nc("@title:group", "Then")
+            }
+
+            PlasmaComponents.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Kirigami.Theme.disabledTextColor
+                text: KI18n.i18nc("@info",
+                    "What the automation does when it fires.")
+            }
+
+            ActionListEditor {
+                id: thenActionsEditor
+
+                objectName: "thenActionsEditor"
+
+                Layout.fillWidth: true
+                bridge: root.bridge
+                depth: 0
+                revision: root.formRevision
+                editingRuleId: root.editing ? String(root.editingRule.id ?? "") : ""
+                onChanged: root.touchForm()
+                onStructureChanged: root.touchForm()
             }
         }
     }

@@ -47,4 +47,17 @@ void AutomationsModel::replaceRules(const QList<RuleEntry>& rules) {
     endResetModel();
 }
 
+QVariantList AutomationsModel::ruleEntries(const QString& excludingId) const {
+    QVariantList entries;
+    entries.reserve(m_rules.size());
+    for (const RuleEntry& rule : m_rules) {
+        if (rule.id == excludingId) {
+            continue;
+        }
+        entries.append(QVariantMap{{QStringLiteral("id"), rule.id},
+                                   {QStringLiteral("name"), rule.name}});
+    }
+    return entries;
+}
+
 } // namespace RokuDeck
