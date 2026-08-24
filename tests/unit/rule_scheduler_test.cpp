@@ -47,6 +47,10 @@ class RuleSchedulerTest final : public QObject {
     void consumedOnceRuleNeverRefires();
     void overdueOnceRuleAddedMidSessionNeverFires();
     void disabledAndUnscheduledRulesAreIgnored();
+    void intervalRuleFiresOnCadenceAndReanchorsToTheFireInstant();
+    void intervalRuleNeverBurstsAfterLongGaps();
+    void intervalRuleReanchorsAcrossRestart();
+    void unchangedTriggersKeepAnchorsAcrossUpdates();
 };
 
 void RuleSchedulerTest::dailyRuleFiresAtItsWallClockTimeAndRepeats() {
@@ -147,6 +151,76 @@ void RuleSchedulerTest::disabledAndUnscheduledRulesAreIgnored() {
         QStringLiteral("Manual"), QJsonObject{{"type"_L1, "manual"_L1}});
     scheduler.updateRules({disabled, manual}, at(QDate(2026, 1, 5), QStringLiteral("22:00")));
     QVERIFY(!scheduler.nextDeadline().isValid());
+}
+
+void RuleSchedulerTest::intervalRuleFiresOnCadenceAndReanchorsToTheFireInstant() {
+    RuleScheduler scheduler;
+    const RuleDocument cadence = rule(QStringLiteral("cadence"),
+        QStringLiteral("Nudge"), QJsonObject{{"type"_L1, "interval"_L1},
+                                             {"minutes"_L1, 30}});
+    const QDateTime boot = at(QDate(2026, 1, 5), QStringLiteral("08:00"));
+    scheduler.updateRules({cadence}, boot);
+    QVERIFY(scheduler.dueRuleIds(boot).isEmpty());   // not due at boot
+    QCOMPARE(scheduler.nextDeadline(), boot.addSecs(30 * 60));
+
+    const QDateTime firstFire = boot.addSecs(30 * 60);
+    QCOMPARE(scheduler.dueRuleIds(firstFire), QStringList{"cadence"_L1});
+    QVERIFY(scheduler.dueRuleIds(firstFire).isEmpty());  // idempotent
+    QCOMPARE(scheduler.nextDeadline(), firstFire.addSecs(30 * 60));
+}
+
+void RuleSchedulerTest::intervalRuleNeverBurstsAfterLongGaps() {
+    RuleScheduler scheduler;
+    const RuleDocument cadence = rule(QStringLiteral("cadence"),
+        QStringLiteral("Nudge"), QJsonObject{{"type"_L1, "interval"_L1},
+                                             {"minutes"_L1, 30}});
+    const QDateTime boot = at(QDate(2026, 1, 5), QStringLiteral("08:00"));
+    scheduler.updateRules({cadence}, boot);
+
+    // The daemon sleeps 3 intervals: exactly one firing, then the cadence
+    // restarts from the evaluation instant (anti-burst).
+    const QDateTime late = boot.addSecs(3 * 30 * 60);
+    QCOMPARE(scheduler.dueRuleIds(late), QStringList{"cadence"_L1});
+    QVERIFY(scheduler.dueRuleIds(late).isEmpty());
+    QCOMPARE(scheduler.nextDeadline(), late.addSecs(30 * 60));
+}
+
+void RuleSchedulerTest::intervalRuleReanchorsAcrossRestart() {
+    const RuleDocument cadence = rule(QStringLiteral("cadence"),
+        QStringLiteral("Nudge"), QJsonObject{{"type"_L1, "interval"_L1},
+                                             {"minutes"_L1, 30}});
+    RuleScheduler first;
+    first.updateRules({cadence}, at(QDate(2026, 1, 5), QStringLiteral("08:00")));
+
+    // Restart: a fresh scheduler instance sees the same rule list. No
+    // catch-up, the cadence starts over from boot.
+    RuleScheduler second;
+    const QDateTime restart = at(QDate(2026, 1, 5), QStringLiteral("09:10"));
+    second.updateRulesAtStartup({cadence}, restart);
+    QVERIFY(second.dueRuleIds(restart).isEmpty());
+    QCOMPARE(second.nextDeadline(), restart.addSecs(30 * 60));
+}
+
+void RuleSchedulerTest::unchangedTriggersKeepAnchorsAcrossUpdates() {
+    RuleScheduler scheduler;
+    const RuleDocument cadence = rule(QStringLiteral("cadence"),
+        QStringLiteral("Nudge"), QJsonObject{{"type"_L1, "interval"_L1},
+                                             {"minutes"_L1, 30}});
+    QDateTime now = at(QDate(2026, 1, 5), QStringLiteral("08:00"));
+    scheduler.updateRules({cadence}, now);
+    QCOMPARE(scheduler.nextDeadline(), now.addSecs(30 * 60));
+
+    // Announce-time reseeds (e.g. after a lastRun record is written) must not
+    // re-anchor an unchanged trigger.
+    now = at(QDate(2026, 1, 5), QStringLiteral("08:10"));
+    scheduler.updateRules({cadence}, now);
+    QCOMPARE(scheduler.nextDeadline(), at(QDate(2026, 1, 5), QStringLiteral("08:30")));
+
+    // Changing the trigger reseeds from the new evaluation instant.
+    RuleDocument faster = cadence;
+    faster.trigger.minutes = 5;
+    scheduler.updateRules({faster}, now);
+    QCOMPARE(scheduler.nextDeadline(), now.addSecs(5 * 60));
 }
 
 QTEST_MAIN(RuleSchedulerTest)
