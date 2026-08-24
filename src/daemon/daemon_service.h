@@ -101,6 +101,9 @@ class DaemonService final : public QObject, protected QDBusContext {
         QString serial;
         QStringList arguments;
         QDeadlineTimer deadline;
+        // Automation dispatches wait on their delivery verdicts to build an
+        // honest last-run outcome; widget-issued commands have no waiter.
+        bool trackDelivery = false;
     };
 
     struct ValidatedCommand {
@@ -123,6 +126,9 @@ class DaemonService final : public QObject, protected QDBusContext {
     struct ActionResult {
         bool accepted;
         QString reason;
+        int dispatched = 0;
+        int rejected = 0;
+        int deliveryFailures = 0;
     };
 
     [[nodiscard]] QString callerOwner() const;
@@ -147,7 +153,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     void processNextCommand(const QString& serial);
     void finishCommand(const QueuedCommand& command, const ProcessResult& result);
     void finishCommandWithError(const QString& requestId, const QString& serial,
-                                const QString& errorCode);
+                                const QString& errorCode, bool trackDelivery = false);
 
     [[nodiscard]] QString rulesJson() const;
     [[nodiscard]] QString nextRuleId() const;
@@ -178,6 +184,10 @@ class DaemonService final : public QObject, protected QDBusContext {
     QTimer m_pollTimer;
     QTimer m_scheduleTimer;
     QList<RuleDocument> m_rules;
+    // Delivery verdicts (true = rds acknowledged) keyed by requestId, written
+    // by finishCommand/finishCommandWithError and consumed by rule runs so a
+    // run's outcome reflects what actually happened on the devices.
+    QHash<QString, bool> m_deliveryOutcomes;
     RuleScheduler m_ruleScheduler;
     QHash<QString, DeviceSnapshot> m_snapshots;
     QHash<QString, quint64> m_addressGenerations;

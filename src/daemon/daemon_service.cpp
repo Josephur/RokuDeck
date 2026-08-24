@@ -1071,9 +1071,18 @@ QString DaemonService::executeRuleRun(const QString& ruleId) {
         outcome = QStringLiteral("consent-blocked");
     } else {
         const ActionResult result = executeActions(rule, targets);
+        // Attempts cover both dispatch-time rejections and commands that went
+        // out but were not acknowledged by rds; a run only earns "ok" when
+        // everything it attempted actually landed.
+        const int attempts = result.dispatched + result.rejected;
+        const int failures = result.rejected + result.deliveryFailures;
         if (!result.accepted) {
             outcome = QStringLiteral("failed");
-        } else if (result.reason == QStringLiteral("partial")) {
+        } else if (attempts == 0) {
+            outcome = QStringLiteral("ok");
+        } else if (failures >= attempts) {
+            outcome = QStringLiteral("failed");
+        } else if (failures > 0) {
             outcome = QStringLiteral("partial");
         } else {
             outcome = QStringLiteral("ok");
@@ -1093,7 +1102,7 @@ QString DaemonService::executeRuleRun(const QString& ruleId) {
 }
 
 DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& rule,
-                                                          const QStringList& targets) {
+                                                           const QStringList& targets) {
     // M1 executes the device-touching subset; the remaining action types land
     // with the scheduler milestones and fail the run loudly until then.
     static const QSet<QString> deferredTypes{QStringLiteral("setVolume"), QStringLiteral("mute"),
@@ -1101,9 +1110,11 @@ DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& ru
                                              QStringLiteral("ifThenElse")};
     int dispatched = 0;
     int rejected = 0;
+    int deliveryFailures = 0;
+    QStringList pendingRequests;
     for (const ActionNode& action : rule.actions) {
         if (deferredTypes.contains(action.type)) {
-            return {false, QStringLiteral("unsupportedAction")};
+            return {false, QStringLiteral("unsupportedAction"), 0, 0, 0};
         }
         if (action.type == QStringLiteral("delay")) {
             // parseRule already bounds this to 1..600 seconds; sleeping here
@@ -1136,21 +1147,63 @@ DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& ru
                 ++rejected;
                 continue;
             }
-            queue.enqueue({QUuid::createUuid().toString(QUuid::WithoutBraces), serial,
-                           validated.arguments,
+            const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            queue.enqueue({requestId, serial, validated.arguments,
                            QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs,
-                                          Qt::PreciseTimer)});
+                                          Qt::PreciseTimer),
+                           true});
+            pendingRequests.append(requestId);
             ++dispatched;
             processNextCommand(serial);
         }
     }
-    if (dispatched == 0 && rejected > 0) {
-        return {false, QStringLiteral("allRejected")};
+
+    // A queued command is an attempt, not a result: wait (bounded by each
+    // command's own completion deadline, which always emits a verdict) until
+    // every dispatch this run made has either been acknowledged by rds or
+    // expired, so the outcome reflects what actually happened on the devices.
+    if (!pendingRequests.isEmpty()) {
+        QStringList remaining = std::move(pendingRequests);
+        QEventLoop wait;
+        QTimer backstop;
+        backstop.setSingleShot(true);
+        backstop.start(CommandContract::daemonCompletionDeadlineMs + 5000);
+        auto harvest = [&]() {
+            for (auto it = remaining.begin(); it != remaining.end();) {
+                const auto verdict = m_deliveryOutcomes.constFind(*it);
+                if (verdict == m_deliveryOutcomes.cend()) {
+                    ++it;
+                    continue;
+                }
+                if (!verdict.value()) {
+                    ++deliveryFailures;
+                }
+                m_deliveryOutcomes.erase(verdict);
+                it = remaining.erase(it);
+            }
+            return remaining.isEmpty();
+        };
+        harvest();
+        const QMetaObject::Connection verdicts =
+            connect(this, &DaemonService::CommandFinished, &wait,
+                    [&](const QString&, const QString&) {
+                        if (harvest()) {
+                            wait.quit();
+                        }
+                    });
+        connect(&backstop, &QTimer::timeout, &wait, &QEventLoop::quit);
+        if (!remaining.isEmpty()) {
+            wait.exec();
+        }
+        disconnect(verdicts);
+        // Anything the backstop gave up on counts as a failure.
+        deliveryFailures += static_cast<int>(remaining.size());
+        for (const QString& requestId : remaining) {
+            m_deliveryOutcomes.remove(requestId);
+        }
     }
-    if (rejected > 0) {
-        return {true, QStringLiteral("partial")};
-    }
-    return {true, {}};
+
+    return {true, {}, dispatched, rejected, deliveryFailures};
 }
 
 DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& serial,
@@ -1267,7 +1320,8 @@ void DaemonService::processNextCommand(const QString& serial) {
     }
     while (!queueIt->isEmpty() && m_deadlineRemaining(queueIt->head().deadline) <= 0) {
         const QueuedCommand expired = queueIt->dequeue();
-        finishCommandWithError(expired.requestId, serial, QStringLiteral("timeout"));
+        finishCommandWithError(expired.requestId, serial, QStringLiteral("timeout"),
+                               expired.trackDelivery);
     }
     if (queueIt->isEmpty()) {
         m_commandQueues.erase(queueIt);
@@ -1280,7 +1334,8 @@ void DaemonService::processNextCommand(const QString& serial) {
         if (queueIt->isEmpty()) {
             m_commandQueues.erase(queueIt);
         }
-        finishCommandWithError(command.requestId, serial, QStringLiteral("unknownDevice"));
+        finishCommandWithError(command.requestId, serial, QStringLiteral("unknownDevice"),
+                               command.trackDelivery);
         updateIdleTimer();
         processNextCommand(serial);
         return;
@@ -1299,7 +1354,8 @@ void DaemonService::processNextCommand(const QString& serial) {
         if (queueIt->isEmpty()) {
             m_commandQueues.erase(queueIt);
         }
-        finishCommandWithError(command.requestId, serial, QStringLiteral("timeout"));
+        finishCommandWithError(command.requestId, serial, QStringLiteral("timeout"),
+                               command.trackDelivery);
         updateIdleTimer();
         processNextCommand(serial);
         return;
@@ -1329,6 +1385,9 @@ void DaemonService::processNextCommand(const QString& serial) {
 
 void DaemonService::finishCommand(const QueuedCommand& command, const ProcessResult& result) {
     const bool succeeded = !result.timedOut && result.exitCode == 0;
+    if (command.trackDelivery) {
+        m_deliveryOutcomes.insert(command.requestId, succeeded);
+    }
     QJsonObject payload{{QStringLiteral("schemaVersion"), 1},
                         {QStringLiteral("requestId"), command.requestId},
                         {QStringLiteral("serial"), command.serial},
@@ -1342,7 +1401,10 @@ void DaemonService::finishCommand(const QueuedCommand& command, const ProcessRes
 }
 
 void DaemonService::finishCommandWithError(const QString& requestId, const QString& serial,
-                                           const QString& errorCode) {
+                                           const QString& errorCode, bool trackDelivery) {
+    if (trackDelivery) {
+        m_deliveryOutcomes.insert(requestId, false);
+    }
     Q_EMIT CommandFinished(requestId,
                            compactJson(QJsonObject{{QStringLiteral("schemaVersion"), 1},
                                                    {QStringLiteral("requestId"), requestId},

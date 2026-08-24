@@ -78,6 +78,8 @@ class DaemonDbusTest final : public QObject {
     void setRuleEnabledFlipsWithoutTouchingDefinition();
     void runRuleWithoutConsentingDevicesIsConsentBlocked();
     void runRuleDispatchesKeypressThroughTheCommandPipeline();
+    void runRuleReportsUndeliveredCommandsAsFailed();
+    void runRuleReportsMixedDeliveryAsPartial();
     void runRuleReportsUnsupportedActionsAsFailed();
     void runRuleWithUnknownIdErrors();
     void scheduledDailyRuleFiresThroughTheCommandPipeline();
@@ -101,12 +103,21 @@ class DaemonDbusTest final : public QObject {
     QString addManualRule(const QString& name);
     QString addRuleReturningId(const QString& payload);
     QJsonObject rulesListing() const;
+    // Completes pending fake-runner callbacks while the daemon blocks inside
+    // a rule run waiting for delivery verdicts. `script` drives per-callback
+    // exit codes (0 = delivered, non-zero = transport failure); it defaults
+    // to every command succeeding.
+    void startRunnerCompleter(const QList<int>& script = {});
+    void stopRunnerCompleter();
 
     QTemporaryDir m_configDirectory;
     QString m_configPath;
     bool m_automationEnabled = true;
     QDateTime m_now;
     FakeProcessRunner* m_runner = nullptr;
+    QTimer m_runnerCompleter;
+    QList<int> m_completerScript;
+    bool m_completerWired = false;
     std::unique_ptr<DaemonService> m_daemon;
     QString m_clientConnectionName;
     std::unique_ptr<QDBusConnection> m_clientConnection;
@@ -1596,6 +1607,32 @@ void DaemonDbusTest::addRuleRejectsClientOwnedAndMalformedPayloads() {
              0);
 }
 
+void DaemonDbusTest::startRunnerCompleter(const QList<int>& script) {
+    if (!m_completerWired) {
+        connect(&m_runnerCompleter, &QTimer::timeout, this, [this] {
+            while (m_runner != nullptr && !m_runner->callbacks.isEmpty()) {
+                const int code =
+                    m_completerScript.isEmpty() ? 0 : m_completerScript.takeFirst();
+                ProcessResult result;
+                result.exitCode = code;
+                result.standardOutput = code == 0
+                    ? QByteArrayLiteral("{\"ok\":true}\n")
+                    : QByteArrayLiteral(
+                          "{\"success\":false,\"error\":\"Request timed out\"}\n");
+                m_runner->complete(result);
+            }
+        });
+        m_completerWired = true;
+    }
+    m_completerScript = script;
+    m_runnerCompleter.start(5);
+}
+
+void DaemonDbusTest::stopRunnerCompleter() {
+    m_runnerCompleter.stop();
+    m_completerScript.clear();
+}
+
 QString DaemonDbusTest::addRuleReturningId(const QString& payload) {
     const QDBusMessage created = waitForReply(m_proxy->AddRule(payload));
     if (created.type() == QDBusMessage::ErrorMessage) {
@@ -1771,7 +1808,9 @@ void DaemonDbusTest::runRuleDispatchesKeypressThroughTheCommandPipeline() {
         R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
 
+    startRunnerCompleter();
     const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
     QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
     QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
     QCOMPARE(changed.size(), 1);
@@ -1792,6 +1831,46 @@ void DaemonDbusTest::runRuleDispatchesKeypressThroughTheCommandPipeline() {
              QStringList({QStringLiteral("keypress"), QStringLiteral("Home")}));
     QVERIFY2(m_runner->lastRequest.arguments.contains(QStringLiteral("198.51.100.71")),
              "the macro must target the consenting device's address");
+}
+
+void DaemonDbusTest::runRuleReportsUndeliveredCommandsAsFailed() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.71")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Movie time","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    // The TV is off: rds exits non-zero and the run must not claim ok.
+    startRunnerCompleter({1});
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("failed"));
+}
+
+void DaemonDbusTest::runRuleReportsMixedDeliveryAsPartial() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.71")});
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-B"), QStringLiteral("Kitchen TV"),
+                            QStringLiteral("198.51.100.72")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Movie time","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    // First target's delivery fails, second succeeds.
+    startRunnerCompleter({1, 0});
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("partial"));
 }
 
 void DaemonDbusTest::runRuleReportsUnsupportedActionsAsFailed() {
@@ -1843,7 +1922,9 @@ void DaemonDbusTest::scheduledDailyRuleFiresThroughTheCommandPipeline() {
 
     // At the wall-clock time the rule runs through the real pipeline.
     m_now = QDateTime(QDate(2026, 1, 5), QTime(9, 0));
+    startRunnerCompleter();
     m_daemon->evaluateDueRules();
+    stopRunnerCompleter();
     QCOMPARE(m_runner->requests.size(), 1);
     QCOMPARE(m_runner->lastRequest.arguments.last(2),
              QStringList({QStringLiteral("keypress"), QStringLiteral("Home")}));
@@ -1892,7 +1973,9 @@ void DaemonDbusTest::onceRuleMissedByLessThanADayFiresAtStartup() {
 
     // Boot 90 minutes after the fresh rule's fire time.
     m_now = QDateTime(QDate(2026, 1, 5), QTime(9, 30));
+    startRunnerCompleter();
     recreateDaemon(30s, {}, [this] { return m_now; });
+    stopRunnerCompleter();
 
     // Fresh: caught up exactly once at startup. Stale: skipped forever.
     QCOMPARE(m_runner->requests.size(), 1);
@@ -1916,21 +1999,19 @@ void DaemonDbusTest::intervalRuleReanchorsAcrossDaemonRestarts() {
     recreateDaemon(30s, {}, [this] { return m_now; });
     QVERIFY(m_runner->requests.isEmpty());
 
+    startRunnerCompleter();
     m_now = QDateTime(QDate(2026, 1, 5), QTime(8, 5));
     m_daemon->evaluateDueRules();
     QCOMPARE(m_runner->requests.size(), 1);
     QCOMPARE(m_runner->lastRequest.arguments.last(2),
              QStringList({QStringLiteral("keypress"), QStringLiteral("Home")}));
 
-    // Drain the per-device queue so the next firing can dispatch.
-    QSignalSpy finished(m_daemon.get(), &DaemonService::CommandFinished);
-    m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
-    QCOMPARE(finished.size(), 1);
-
     // The cadence re-anchored to the 08:05 fire instant: due again at exactly
-    // 08:10, not five minutes after boot.
+    // 08:10, not five minutes after boot. The first command already finished
+    // (the completer drained it), so the second firing dispatches freely.
     m_now = QDateTime(QDate(2026, 1, 5), QTime(8, 10));
     m_daemon->evaluateDueRules();
+    stopRunnerCompleter();
     QCOMPARE(m_runner->requests.size(), 2);
 }
 
