@@ -31,6 +31,8 @@ QList<DeviceRecord> ConfigStore::loadDevices() const {
         device.wakeOnWlan = deviceGroup.readEntry("WakeOnWlan", false);
         device.refreshPolicy =
             deviceGroup.readEntry("RefreshPolicy", QStringLiteral("balanced"));
+        // Files written before ceilings existed carry no key: unrestricted.
+        device.volumeCeiling = deviceGroup.readEntry("VolumeCeiling", 100);
         // A file written before ordering existed has no SortIndex; falling back
         // to the group position keeps those devices in their recorded order.
         device.sortIndex = deviceGroup.readEntry("SortIndex", static_cast<int>(devices.size()));
@@ -60,6 +62,7 @@ void ConfigStore::saveDevices(const QList<DeviceRecord>& devices) {
         deviceGroup.writeEntry("AllowAutomations", device.allowAutomations);
         deviceGroup.writeEntry("WakeOnWlan", device.wakeOnWlan);
         deviceGroup.writeEntry("RefreshPolicy", device.refreshPolicy);
+        deviceGroup.writeEntry("VolumeCeiling", device.volumeCeiling);
         deviceGroup.writeEntry("SortIndex", device.sortIndex);
     }
     m_config->sync();

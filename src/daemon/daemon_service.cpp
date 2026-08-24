@@ -21,6 +21,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <utility>
 
@@ -356,6 +357,7 @@ bool DaemonService::mergeDevice(const DeviceRecord& device, MergeMode mode) {
             merged.allowAutomations = previous->allowAutomations;
             merged.wakeOnWlan = previous->wakeOnWlan;
             merged.refreshPolicy = previous->refreshPolicy;
+            merged.volumeCeiling = previous->volumeCeiling;
             merged.sortIndex = previous->sortIndex;
         } else {
             merged.sortIndex = nextSortIndex();
@@ -368,6 +370,7 @@ bool DaemonService::mergeDevice(const DeviceRecord& device, MergeMode mode) {
                          previous->allowAutomations != merged.allowAutomations ||
                          previous->wakeOnWlan != merged.wakeOnWlan ||
                          previous->refreshPolicy != merged.refreshPolicy ||
+                         previous->volumeCeiling != merged.volumeCeiling ||
                          previous->sortIndex != merged.sortIndex;
     if (!changed) {
         return false;
@@ -407,9 +410,10 @@ QJsonObject DaemonService::deviceObject(const DeviceRecord& device) {
     return QJsonObject{{QStringLiteral("serial"), device.serial},
                        {QStringLiteral("displayName"), device.displayName},
                        {QStringLiteral("address"), device.address},
-                       {QStringLiteral("allowAutomations"), device.allowAutomations},
-                       {QStringLiteral("wakeOnWlan"), device.wakeOnWlan},
-                       {QStringLiteral("refreshPolicy"), device.refreshPolicy}};
+                        {QStringLiteral("allowAutomations"), device.allowAutomations},
+                        {QStringLiteral("wakeOnWlan"), device.wakeOnWlan},
+                        {QStringLiteral("refreshPolicy"), device.refreshPolicy},
+                        {QStringLiteral("volumeCeiling"), device.volumeCeiling}};
 }
 
 QString DaemonService::devicesJson(const QList<DeviceRecord>& devices) {
@@ -600,7 +604,8 @@ DaemonService::validateDeviceJson(const QString& deviceJson,
     static const QSet<QString> allowedKeys{
         QStringLiteral("serial"),           QStringLiteral("displayName"),
         QStringLiteral("address"),          QStringLiteral("allowAutomations"),
-        QStringLiteral("wakeOnWlan"),       QStringLiteral("refreshPolicy")};
+        QStringLiteral("wakeOnWlan"),       QStringLiteral("refreshPolicy"),
+        QStringLiteral("volumeCeiling")};
     const QStringList keys = object.keys();
     for (const QString& key : keys) {
         if (!allowedKeys.contains(key)) {
@@ -679,6 +684,18 @@ DaemonService::validateDeviceJson(const QString& deviceJson,
             return {{}, QStringLiteral("refreshPolicy must be responsive, balanced or battery")};
         }
         device.refreshPolicy = value.toString();
+    }
+
+    if (object.contains(QStringLiteral("volumeCeiling"))) {
+        const QJsonValue value = object.value(QStringLiteral("volumeCeiling"));
+        // JSON numbers are doubles: only a finite integral value in 0..100 is
+        // a ceiling, so 50.5 and "50" cannot sneak through.
+        if (!value.isDouble() || !std::isfinite(value.toDouble()) ||
+            value.toDouble() < 0 || value.toDouble() > 100 ||
+            value.toDouble() != std::trunc(value.toDouble())) {
+            return {{}, QStringLiteral("volumeCeiling must be an integer between 0 and 100")};
+        }
+        device.volumeCeiling = value.toInt();
     }
 
     return {device, {}};

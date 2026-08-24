@@ -36,6 +36,8 @@ class ConfigStoreTest final : public QObject {
 private Q_SLOTS:
     void rulesRoundTripPreservesOrderAndFlags();
     void corruptRuleEntriesAreSkipped();
+    void devicesRoundTripPreservesVolumeCeiling();
+    void absentVolumeCeilingDefaultsToUnrestricted();
 };
 
 void ConfigStoreTest::rulesRoundTripPreservesOrderAndFlags()
@@ -101,6 +103,47 @@ void ConfigStoreTest::corruptRuleEntriesAreSkipped()
     const QList<RuleDocument> loaded = store.loadRules();
     QCOMPARE(loaded.size(), 1);
     QCOMPARE(loaded.first().name, QStringLiteral("Good"));
+}
+
+void ConfigStoreTest::devicesRoundTripPreservesVolumeCeiling()
+{
+    QTemporaryDir dir;
+    auto config = KSharedConfig::openConfig(
+        dir.path() + QStringLiteral("/store.rc"), KConfig::SimpleConfig);
+    ConfigStore store(config);
+
+    DeviceRecord device;
+    device.serial = QStringLiteral("SERIAL-A");
+    device.displayName = QStringLiteral("Living Room");
+    device.address = QStringLiteral("198.51.100.10");
+    device.volumeCeiling = 42;
+    store.saveDevices({device});
+
+    ConfigStore reload(config);
+    const QList<DeviceRecord> loaded = reload.loadDevices();
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.first().volumeCeiling, 42);
+}
+
+void ConfigStoreTest::absentVolumeCeilingDefaultsToUnrestricted()
+{
+    QTemporaryDir dir;
+    auto config = KSharedConfig::openConfig(
+        dir.path() + QStringLiteral("/store.rc"), KConfig::SimpleConfig);
+    // A file written before ceilings existed carries no VolumeCeiling key.
+    {
+        KConfigGroup devicesGroup(config, QStringLiteral("Devices"));
+        KConfigGroup deviceGroup(&devicesGroup, QStringLiteral("0"));
+        deviceGroup.writeEntry("Serial", QStringLiteral("SERIAL-A"));
+        deviceGroup.writeEntry("DisplayName", QStringLiteral("Living Room"));
+        deviceGroup.writeEntry("Address", QStringLiteral("198.51.100.10"));
+        config->sync();
+    }
+
+    ConfigStore store(config);
+    const QList<DeviceRecord> loaded = store.loadDevices();
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.first().volumeCeiling, 100);
 }
 
 QTEST_MAIN(ConfigStoreTest)

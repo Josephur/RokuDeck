@@ -20,6 +20,9 @@ struct DeviceRecord {
     bool allowAutomations = true;
     bool wakeOnWlan = false;
     QString refreshPolicy = QStringLiteral("balanced");
+    // Always-on automation policy: relative walks and absolute setVolume
+    // targets never push the volume above this. 100 behaves as unrestricted.
+    int volumeCeiling = 100;
     // Presentation order the user chose; ties fall back to serial so the list
     // is always deterministic.
     int sortIndex = 0;

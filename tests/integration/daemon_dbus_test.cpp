@@ -67,6 +67,8 @@ class DaemonDbusTest final : public QObject {
     void deviceManagementRejectsInvalidInput();
     void deviceOrderIsUserControlledAndPersisted();
     void discoveryPreservesConfiguredDeviceSettings();
+    void volumeCeilingPersistsAndEchoesThroughDeviceJson();
+    void volumeCeilingRejectsOutOfRangeAndNonIntegralValues();
     void testDeviceProbesAnAddressWithoutRegisteringIt();
     void refreshPolicyBoundsHowOftenTheDaemonPollsADevice();
     void aUserChosenNameSurvivesDiscoveryAndPolling();
@@ -1312,6 +1314,58 @@ void DaemonDbusTest::discoveryPreservesConfiguredDeviceSettings() {
     QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))) ==
                  QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-A")}),
              "discovery must not reshuffle the order the user chose");
+}
+
+void DaemonDbusTest::volumeCeilingPersistsAndEchoesThroughDeviceJson() {
+    const QDBusMessage added =
+        call(QStringLiteral("AddDevice"),
+             {deviceJson(QStringLiteral("SERIAL-A"), QStringLiteral("Living Room"),
+                         QStringLiteral("198.51.100.10"))});
+    QVERIFY2(added.type() != QDBusMessage::ErrorMessage, qPrintable(added.errorMessage()));
+    // A fresh device is unrestricted: the ceiling echoes as 100.
+    QCOMPARE(jsonResult(added).value(QStringLiteral("volumeCeiling")).toInt(), 100);
+    QCOMPARE(deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
+                 .value(QStringLiteral("volumeCeiling"))
+                 .toInt(),
+             100);
+
+    const QDBusMessage updated =
+        call(QStringLiteral("UpdateDevice"),
+             {QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"volumeCeiling":50})json")});
+    QVERIFY2(updated.type() != QDBusMessage::ErrorMessage, qPrintable(updated.errorMessage()));
+    QCOMPARE(jsonResult(updated).value(QStringLiteral("volumeCeiling")).toInt(), 50);
+
+    recreateDaemon();
+    QCOMPARE(deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
+                 .value(QStringLiteral("volumeCeiling"))
+                 .toInt(),
+             50);
+}
+
+void DaemonDbusTest::volumeCeilingRejectsOutOfRangeAndNonIntegralValues() {
+    const QDBusMessage added =
+        call(QStringLiteral("AddDevice"),
+             {deviceJson(QStringLiteral("SERIAL-A"), QStringLiteral("Living Room"),
+                         QStringLiteral("198.51.100.10"))});
+    QVERIFY2(added.type() != QDBusMessage::ErrorMessage, qPrintable(added.errorMessage()));
+
+    const QStringList rejected{
+        QStringLiteral(R"json({"volumeCeiling":101})json"),
+        QStringLiteral(R"json({"volumeCeiling":-1})json"),
+        QStringLiteral(R"json({"volumeCeiling":"abc"})json"),
+        QStringLiteral(R"json({"volumeCeiling":50.5})json")};
+    for (const QString& payload : rejected) {
+        const QDBusMessage reply =
+            call(QStringLiteral("UpdateDevice"), {QStringLiteral("SERIAL-A"), payload});
+        QVERIFY2(reply.type() == QDBusMessage::ErrorMessage,
+                 qPrintable(QStringLiteral("UpdateDevice accepted %1").arg(payload)));
+        QCOMPARE(reply.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    }
+    // Every rejected edit leaves the stored ceiling untouched.
+    QCOMPARE(deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("SERIAL-A"))
+                 .value(QStringLiteral("volumeCeiling"))
+                 .toInt(),
+             100);
 }
 
 void DaemonDbusTest::testDeviceProbesAnAddressWithoutRegisteringIt() {
