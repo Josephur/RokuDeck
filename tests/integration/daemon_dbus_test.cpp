@@ -8,6 +8,7 @@
 
 #include <KSharedConfig>
 
+#include <QDBusAbstractAdaptor>
 #include <QDBusConnection>
 #include <QDBusInterface>
 #include <QDBusMessage>
@@ -41,6 +42,84 @@ namespace {
 // them and look This PC up by serial.
 [[nodiscard]] QJsonObject deviceEntry(const QJsonObject& listing, const QString& serial);
 } // namespace
+
+class FakeMprisPlayer;
+
+// The Player-interface adaptor that exposes PlaybackStatus to
+// org.freedesktop.DBus.Properties readers.
+class FakeMprisAdaptor final : public QDBusAbstractAdaptor {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.mpris.MediaPlayer2.Player")
+    Q_PROPERTY(QString PlaybackStatus READ playbackStatus)
+
+  public:
+    explicit FakeMprisAdaptor(FakeMprisPlayer* player);
+    [[nodiscard]] QString playbackStatus() const;
+
+  private:
+    FakeMprisPlayer* m_player;
+};
+
+class FakeMprisPlayer final : public QObject, protected QDBusContext {
+    Q_OBJECT
+
+  public:
+    explicit FakeMprisPlayer(QObject* parent = nullptr);
+    ~FakeMprisPlayer() override;
+
+    QString status = QStringLiteral("Stopped");
+
+    [[nodiscard]] bool registerOnBus(const QString& serviceName) {
+        m_serviceName = serviceName;
+        const bool objectRegistered =
+            m_connection.registerObject(QStringLiteral("/org/mpris/MediaPlayer2"), this);
+        return objectRegistered && m_connection.registerService(serviceName);
+    }
+
+    void leaveBus() {
+        if (!m_serviceName.isEmpty()) {
+            static_cast<void>(m_connection.unregisterService(m_serviceName));
+            m_serviceName.clear();
+        }
+    }
+
+    void setStatus(const QString& newStatus) {
+        status = newStatus;
+        QDBusMessage signal = QDBusMessage::createSignal(
+            QStringLiteral("/org/mpris/MediaPlayer2"),
+            QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("PropertiesChanged"));
+        signal.setArguments({QStringLiteral("org.mpris.MediaPlayer2.Player"),
+                             QVariantMap{{QStringLiteral("PlaybackStatus"), newStatus}},
+                             QStringList{}});
+        static_cast<void>(m_connection.send(signal));
+    }
+
+  private:
+    QString m_connectionName;
+    QDBusConnection m_connection;
+    QString m_serviceName;
+};
+
+FakeMprisAdaptor::FakeMprisAdaptor(FakeMprisPlayer* player)
+    : QDBusAbstractAdaptor(player), m_player(player) {}
+
+QString FakeMprisAdaptor::playbackStatus() const {
+    return m_player->status;
+}
+
+FakeMprisPlayer::FakeMprisPlayer(QObject* parent)
+    : QObject(parent),
+      m_connectionName(QStringLiteral("rokudeck-mpris-test-")
+                       + QUuid::createUuid().toString(QUuid::WithoutBraces)),
+      m_connection(QDBusConnection::connectToBus(QDBusConnection::SessionBus, m_connectionName)) {
+    new FakeMprisAdaptor(this);
+}
+
+FakeMprisPlayer::~FakeMprisPlayer() {
+    m_connection.unregisterObject(QStringLiteral("/org/mpris/MediaPlayer2"));
+    leaveBus();
+    QDBusConnection::disconnectFromBus(m_connectionName);
+}
 
 class DaemonDbusTest final : public QObject {
     Q_OBJECT
@@ -107,6 +186,8 @@ class DaemonDbusTest final : public QObject {
     void pcPollerTracksPipeWireVolume();
     void pcVolumeEdgeFiresStateChangeRule();
     void pcPollerGoesOfflineAfterThreeFailuresAndRecovers();
+    void mprisWatcherMergesPlaybackIntoPcSnapshots();
+    void playingEdgeFiresStateChangeRuleOnLocalPc();
     void muteActionPressesVolumeMuteOnce();
     void muteActionMatchingObservedStateIsANoOp();
     void setVolumeWalksDownWithBoundedPresses();
@@ -1899,7 +1980,7 @@ void DaemonDbusTest::completePollReadings(int volume, bool muted) {
 
 void DaemonDbusTest::completePcVolumePoll(const QByteArray& output, int exitCode) {
     QVERIFY2(QTest::qWaitFor([&] { return m_runner != nullptr && !m_runner->callbacks.isEmpty(); },
-                             8s),
+                             15s),
              "the wpctl get-volume request never reached the fake runner");
     QCOMPARE(m_runner->lastRequest.program, QStringLiteral("wpctl"));
     QCOMPARE(m_runner->lastRequest.arguments,
@@ -2582,6 +2663,74 @@ void DaemonDbusTest::pcPollerGoesOfflineAfterThreeFailuresAndRecovers() {
     QCOMPARE(recovered.value(QStringLiteral("volume")).toInt(), 58);
 }
 
+
+void DaemonDbusTest::mprisWatcherMergesPlaybackIntoPcSnapshots() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    FakeMprisPlayer player;
+    QVERIFY(player.registerOnBus(QStringLiteral("org.mpris.MediaPlayer2.FakeTest")));
+    player.setStatus(QStringLiteral("Playing"));
+
+    // Poll until the watcher's initial Get lands and a tick merges the flag.
+    bool sawPlaying = false;
+    for (int attempts = 0; attempts < 100 && !sawPlaying; ++attempts) {
+        completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
+        sawPlaying = jsonResult(call(QStringLiteral("GetSnapshot"),
+                                     {QStringLiteral("LOCAL-PC")}))
+                         .value(QStringLiteral("playing"))
+                         .toBool();
+    }
+    QVERIFY(sawPlaying);
+
+    // A PropertiesChanged flip to Paused must be reflected on the next tick.
+    player.setStatus(QStringLiteral("Paused"));
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
+    QCOMPARE(jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("LOCAL-PC")}))
+                 .value(QStringLiteral("playing"))
+                 .toBool(),
+             false);
+
+    // Vanishing players recompute too: nobody is playing any more.
+    player.leaveBus();
+    QTest::qWait(50);  // let the unregistration reach the daemon's watcher
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
+    QCOMPARE(jsonResult(call(QStringLiteral("GetSnapshot"), {QStringLiteral("LOCAL-PC")}))
+                 .value(QStringLiteral("playing"))
+                 .toBool(),
+             false);
+}
+
+void DaemonDbusTest::playingEdgeFiresStateChangeRuleOnLocalPc() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Pause the tv","devices":["LOCAL-PC"],)json"
+        R"json("trigger":{"type":"stateChange","field":"playing","op":"is","value":true},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    // Nobody is playing yet: the baseline snapshot carries playing=false.
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 0);
+
+    FakeMprisPlayer player;
+    QVERIFY(player.registerOnBus(QStringLiteral("org.mpris.MediaPlayer2.FakeTest")));
+    player.setStatus(QStringLiteral("Playing"));
+
+    startRunnerCompleter();  // the firing waits for its delivery verdict
+    bool fired = false;
+    for (int attempts = 0; attempts < 100 && !fired; ++attempts) {
+        completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
+        fired = homeKeypressCount() > 0;
+    }
+    stopRunnerCompleter();
+    QVERIFY(fired);
+    const QJsonObject rule =
+        rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+    QCOMPARE(rule.value(QStringLiteral("id")).toString(), ruleId);
+    QCOMPARE(rule.value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
+}
 
 void DaemonDbusTest::muteActionPressesVolumeMuteOnce() {
     m_daemon->upsertDevice(

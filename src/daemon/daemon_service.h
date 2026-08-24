@@ -25,6 +25,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantMap>
 
 #include <atomic>
 #include <chrono>
@@ -107,6 +108,15 @@ class DaemonService final : public QObject, protected QDBusContext {
     // Spec §2.1: every 2 s read the default PipeWire sink via wpctl and feed
     // the result through the same snapshot pipeline as a Roku poll.
     void pollLocalPcAudio();
+    // Spec §2.2: org.mpris.MediaPlayer2.* registrations and losses arrive as
+    // NameOwnerChanged deliveries from the bus daemon.
+    void mprisNameOwnerChanged(const QString& name, const QString& oldOwner,
+                               const QString& newOwner);
+    // PlaybackStatus flips arrive without an attributable sender here; the
+    // handler re-queries every tracked player instead.
+    void mprisPropertiesChanged(const QString& interfaceName,
+                                const QVariantMap& changedProperties,
+                                const QStringList& invalidatedProperties);
     void handleIdleTimeout();
 
   private:
@@ -174,7 +184,16 @@ class DaemonService final : public QObject, protected QDBusContext {
     void finishCommandWithError(const QString& requestId, const QString& serial,
                                 const QString& errorCode, bool trackDelivery = false);
 
-    [[nodiscard]] QString rulesJson() const;    [[nodiscard]] QString nextRuleId() const;
+    [[nodiscard]] QString rulesJson() const;
+    // Spec §2.2: track every org.mpris.MediaPlayer2.* player on the session
+    // bus — an initial Get on appearance plus PropertiesChanged subscriptions
+    // — and keep `playing` true while any of them reports Playing.
+    void mprisPlayerAppeared(const QString& service);
+    void mprisPlayerVanished(const QString& service);
+    // Issues one async org.freedesktop.DBus.Properties.Get for PlaybackStatus.
+    void queryMprisStatus(const QString& service);
+    void storeMprisStatus(const QString& service, const QVariant& value);
+    void recomputeMprisPlaying();    [[nodiscard]] QString nextRuleId() const;
     void announceRules();
     [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
     [[nodiscard]] ActionResult executeActions(const RuleDocument& rule,
@@ -241,6 +260,9 @@ class DaemonService final : public QObject, protected QDBusContext {
     RdsClient m_rdsClient;
     ClientRegistry m_clients;
     QDBusServiceWatcher m_ownerWatcher;
+    QSet<QString> m_mprisPlayers;
+    QHash<QString, QString> m_mprisPlaybackStatuses;
+    bool m_mprisPlaying = false;
     WallClock m_wallClock;
     QTimer m_idleTimer;
     QTimer m_pollTimer;

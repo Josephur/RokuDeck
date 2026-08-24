@@ -9,6 +9,8 @@
 #include "rokudeck1_adaptor.h"
 
 #include <QDBusError>
+#include <QDBusPendingCallWatcher>
+#include <QDBusVariant>
 #include <QDateTime>
 #include <QEventLoop>
 #include <QRandomGenerator>
@@ -275,6 +277,40 @@ DaemonService::DaemonService(QDBusConnection connection,
     new RokuDeck1Adaptor(this);
     m_ownerWatcher.setConnection(m_connection);
     m_ownerWatcher.setWatchMode(QDBusServiceWatcher::WatchForUnregistration);
+
+    // Spec §2.2: track the whole org.mpris.MediaPlayer2.* namespace. Qt's
+    // service watcher only matches exact names for third-party registrations,
+    // so subscribe to NameOwnerChanged directly and enumerate players that
+    // registered before daemon startup.
+    QDBusMessage listNames = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("ListNames"));
+    auto* pending = new QDBusPendingCallWatcher(m_connection.asyncCall(listNames), this);
+    connect(pending, &QDBusPendingCallWatcher::finished, this,
+            [this](QDBusPendingCallWatcher* finished) {
+                finished->deleteLater();
+                if (m_shuttingDown) {
+                    return;
+                }
+                const QDBusMessage reply = finished->reply();
+                if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty()) {
+                    return;
+                }
+                const QStringList names = reply.arguments().front().toStringList();
+                for (const QString& name : names) {
+                    if (name.startsWith(QLatin1String("org.mpris.MediaPlayer2."))) {
+                        mprisPlayerAppeared(name);
+                    }
+                }
+            });
+    static_cast<void>(m_connection.connect(
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameOwnerChanged"), this,
+        SLOT(mprisNameOwnerChanged(QString,QString,QString))));
+    static_cast<void>(m_connection.connect(
+        QString(), QStringLiteral("/org/mpris/MediaPlayer2"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("PropertiesChanged"),
+        this, SLOT(mprisPropertiesChanged(QString,QVariantMap,QStringList))));
 
     for (const DeviceRecord& device : m_configStore->loadDevices()) {
         m_deviceRegistry.upsert(device);
@@ -1851,6 +1887,97 @@ void DaemonService::pollDueDevices() {
     }
 }
 
+void DaemonService::mprisPlayerAppeared(const QString& service) {
+    if (!service.startsWith(QLatin1String("org.mpris.MediaPlayer2."))) {
+        return;
+    }
+    m_mprisPlayers.insert(service);
+    queryMprisStatus(service);
+}
+
+void DaemonService::queryMprisStatus(const QString& service) {
+    QDBusMessage request =
+        QDBusMessage::createMethodCall(service, QStringLiteral("/org/mpris/MediaPlayer2"),
+                                       QStringLiteral("org.freedesktop.DBus.Properties"),
+                                       QStringLiteral("Get"));
+    request.setArguments({QStringLiteral("org.mpris.MediaPlayer2.Player"),
+                          QStringLiteral("PlaybackStatus")});
+    QPointer<DaemonService> self(this);
+    auto* pending = new QDBusPendingCallWatcher(m_connection.asyncCall(request), this);
+    connect(pending, &QDBusPendingCallWatcher::finished, this,
+            [self, service](QDBusPendingCallWatcher* finished) {
+                finished->deleteLater();
+                if (!self || self->m_shuttingDown || !self->m_mprisPlayers.contains(service)) {
+                    return;  // daemon gone, or the player vanished meanwhile
+                }
+                const QDBusMessage reply = finished->reply();
+                if (reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty()) {
+                    self->storeMprisStatus(service, reply.arguments().front());
+                } else {
+                    self->m_mprisPlaybackStatuses.remove(service);
+                    self->recomputeMprisPlaying();
+                }
+            });
+}
+
+void DaemonService::mprisPlayerVanished(const QString& service) {
+    m_mprisPlayers.remove(service);
+    m_mprisPlaybackStatuses.remove(service);
+    recomputeMprisPlaying();
+}
+
+void DaemonService::mprisNameOwnerChanged(const QString& name, const QString& oldOwner,
+                                          const QString& newOwner) {
+    if (!name.startsWith(QLatin1String("org.mpris.MediaPlayer2."))) {
+        return;
+    }
+    if (newOwner.isEmpty()) {
+        if (!oldOwner.isEmpty()) {
+            mprisPlayerVanished(name);
+        }
+        return;
+    }
+    // A fresh registration or an owner handover: either way refresh its status.
+    mprisPlayerAppeared(name);
+}
+
+void DaemonService::mprisPropertiesChanged(const QString& interfaceName,
+                                           const QVariantMap& /*changedProperties*/,
+                                           const QStringList& /*invalidatedProperties*/) {
+    // The sender identity of an unsolicited signal is not tracked here; any
+    // Player-interface flip triggers a cheap re-query of every tracked player
+    // so `playing` converges on the truth (spec §2.2).
+    if (interfaceName != QLatin1String("org.mpris.MediaPlayer2.Player")) {
+        return;
+    }
+    const QList<QString> players = m_mprisPlayers.values();
+    for (const QString& service : players) {
+        queryMprisStatus(service);
+    }
+}
+
+void DaemonService::recomputeMprisPlaying() {
+    bool anyPlaying = false;
+    for (const QString& status : std::as_const(m_mprisPlaybackStatuses)) {
+        if (status == QLatin1String("Playing")) {
+            anyPlaying = true;
+            break;
+        }
+    }
+    m_mprisPlaying = anyPlaying;
+}
+
+// Decodes a PlaybackStatus property reply and refreshes the merged flag.
+void DaemonService::storeMprisStatus(const QString& service, const QVariant& value) {
+    const QString status = value.value<QDBusVariant>().variant().toString();
+    if (status.isEmpty()) {
+        m_mprisPlaybackStatuses.remove(service);
+    } else {
+        m_mprisPlaybackStatuses.insert(service, status);
+    }
+    recomputeMprisPlaying();
+}
+
 void DaemonService::pollLocalPcAudio() {
     if (m_pcPollInFlight || !findDevice(QLatin1String(localPcSerial))) {
         return;
@@ -1909,6 +2036,10 @@ void DaemonService::finishLocalPcPoll(const ProcessResult& result) {
 }
 
 void DaemonService::applyLocalPcSnapshot(DeviceSnapshot snapshot) {
+    // The synthetic playing flag rides every This PC snapshot (spec §2.2).
+    if (snapshot.serial == QLatin1String(localPcSerial)) {
+        snapshot.playing = m_mprisPlaying;
+    }
     snapshot.capturedAt = QDateTime::currentDateTimeUtc();
     // The pre-insert snapshot is the diff baseline; a serial never seen before
     // only establishes it and must not fire (§4.1) — identical to rds polls.
