@@ -1082,7 +1082,11 @@ QString DaemonService::executeRuleRun(const QString& ruleId) {
 
     rule.lastRun.firedAtIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     rule.lastRun.outcome = outcome;
-    *findRule(rule.id) = rule;
+    // Delay steps pump the event loop, so D-Bus calls may have erased or
+    // rewritten the rule while we ran; never resurrect a deleted entry.
+    if (const auto record = findRule(rule.id); record != m_rules.end()) {
+        *record = rule;
+    }
     announceRules();
     evaluateDueRules();  // schedules that fell due during a delay step
     return outcome;

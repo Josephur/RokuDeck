@@ -1922,10 +1922,16 @@ void DaemonDbusTest::intervalRuleReanchorsAcrossDaemonRestarts() {
     QCOMPARE(m_runner->lastRequest.arguments.last(2),
              QStringList({QStringLiteral("keypress"), QStringLiteral("Home")}));
 
-    // Re-anchored to the fire instant: 10 minutes after boot is not due.
+    // Drain the per-device queue so the next firing can dispatch.
+    QSignalSpy finished(m_daemon.get(), &DaemonService::CommandFinished);
+    m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
+    QCOMPARE(finished.size(), 1);
+
+    // The cadence re-anchored to the 08:05 fire instant: due again at exactly
+    // 08:10, not five minutes after boot.
     m_now = QDateTime(QDate(2026, 1, 5), QTime(8, 10));
     m_daemon->evaluateDueRules();
-    QCOMPARE(m_runner->requests.size(), 1);
+    QCOMPARE(m_runner->requests.size(), 2);
 }
 
 void DaemonDbusTest::pendingScheduleKeepsTheDaemonAwake() {
