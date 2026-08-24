@@ -166,6 +166,16 @@ ColumnLayout {
         }
     }
 
+    // Owners assign node after construction (open-for-edit, bindChild), so
+    // gates and leaf editors must reseed here rather than rely on the
+    // construction-time pass above.
+    onNodeChanged: {
+        nodeRoot.refreshGates();
+        if (nodeRoot.showLeaf) {
+            nodeRoot.syncFromNode();
+        }
+    }
+
     Kirigami.FormLayout {
         id: leafBody
 

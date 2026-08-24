@@ -51,6 +51,18 @@ ColumnLayout {
         nodeBody.syncFromNode();
     }
 
+    // The dialog assigns node after construction when editing; keep the kind
+    // combo honest (the body reseeds its own gates and editors).
+    onNodeChanged: {
+        if (nodeRoot.node !== null) {
+            for (let kind = 0; kind < kindCombo.model.length; ++kind) {
+                if (kindCombo.model[kind].value === nodeRoot.node.kind) {
+                    kindCombo.currentIndex = kind;
+                }
+            }
+        }
+    }
+
     function refreshGates() {
         nodeBody.refreshGates();
     }

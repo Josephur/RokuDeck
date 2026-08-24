@@ -50,6 +50,10 @@ RowLayout {
         root.refreshEditors();
     }
 
+    // Owners re-assign value when reloading form state; declarative bindings
+    // would die on the first internal write, so reloads land here instead.
+    onValueChanged: root.refreshEditors()
+
     // Re-seeds every editor from value; declarative bindings would die on the
     // first user interaction, so reloads are imperative.
     function refreshEditors() {

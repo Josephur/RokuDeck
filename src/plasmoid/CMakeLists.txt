@@ -25,7 +25,7 @@ plasma_add_applet(io.github.josephur.rokudeck
     qml/ActionListEditor.qml
     qml/ActionStepEditor.qml
     qml/RuleValueInput.qml
-    qml/ConfigAdvanced.qml
+    qml/rulepayload.js
     qml/address.js
   CPP_SOURCES
     rokudeckapplet.cpp

@@ -37,10 +37,16 @@ KCM.SimpleKCM {
 
         function onDeviceOperationFailed(operation, message) {
             root.operationError = message;
+            // The editor is modal: its own banner is the one the user sees.
+            if ((operation === "addRule" || operation === "updateRule")
+                && ruleEditor.opened) {
+                ruleEditor.errorText = message;
+            }
         }
 
         function onDeviceOperationSucceeded(operation) {
             root.operationError = "";
+            ruleEditor.errorText = "";
             // The editor stays open through the round trip so a rejection
             // never loses the user's edits; success closes it.
             if (operation === "addRule" || operation === "updateRule") {

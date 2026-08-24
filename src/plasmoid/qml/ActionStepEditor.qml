@@ -70,6 +70,11 @@ ColumnLayout {
         }
     }
 
+    // ActionListEditor assigns node right after loading this editor, long
+    // after construction; reseed so loaded values reach every control
+    // instead of defaults overwriting them on save.
+    onNodeChanged: stepRoot.syncFromNode()
+
     PlasmaComponents.Label {
         Layout.fillWidth: true
         font.bold: true

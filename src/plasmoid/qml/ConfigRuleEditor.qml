@@ -26,6 +26,10 @@ Kirigami.Dialog {
     property var formState: null
     property bool saveAttempted: false
 
+    // Server rejections must be readable inside this modal; the page's own
+    // banner sits behind it.
+    property string errorText: ""
+
     // Structural edits rebuild plain-JS Repeaters: bumping this tracked int
     // re-evaluates their models against the replaced arrays.
     property int formRevision: 0
@@ -49,6 +53,7 @@ Kirigami.Dialog {
         root.editingRule = null;
         root.formState = RulePayload.blankRule();
         root.saveAttempted = false;
+        root.errorText = "";
         root.syncFromForm();
         root.open();
     }
@@ -58,6 +63,7 @@ Kirigami.Dialog {
         root.formState = root.editing
             ? RulePayload.toFormState(root.editingRule) : RulePayload.blankRule();
         root.saveAttempted = false;
+        root.errorText = "";
         root.syncFromForm();
         root.open();
     }
@@ -160,6 +166,7 @@ Kirigami.Dialog {
 
     function save() {
         root.saveAttempted = true;
+        root.errorText = "";
         if (RulePayload.validate(root.formState).length > 0 || !root.daemonReachable) {
             return;
         }
@@ -245,6 +252,15 @@ Kirigami.Dialog {
 
             width: editorScroll.width
             spacing: Kirigami.Units.largeSpacing
+
+            Kirigami.InlineMessage {
+                objectName: "editorErrorMessage"
+
+                Layout.fillWidth: true
+                type: Kirigami.MessageType.Error
+                visible: root.errorText.length > 0
+                text: root.errorText
+            }
 
             Kirigami.InlineMessage {
                 objectName: "editorValidationMessage"
