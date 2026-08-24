@@ -98,12 +98,46 @@ KCM.SimpleKCM {
             visible: root.daemonReachable && automationsList.count === 0
             Layout.fillWidth: true
 
-            QQC2.Label {
-                text: KI18n.i18nc("@info", "busctl --user call io.github.josephur.RokuDeck1 /io/github/josephur/RokuDeck1 io.github.josephur.RokuDeck1 AddRule s '{\"schemaVersion\":1,\"name\":\"Movie time\",\"trigger\":{\"type\":\"manual\"},\"actions\":[{\"type\":\"keypress\",\"key\":\"Home\"}]}'")
-                font.family: "monospace"
-                font.pointSize: Kirigami.Theme.smallFont.pointSize
-                wrapMode: Text.WrapAnywhere
-                color: Kirigami.Theme.disabledTextColor
+            ColumnLayout {
+                width: parent.width
+                spacing: Kirigami.Units.smallSpacing
+
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: Kirigami.Theme.disabledTextColor
+                    text: KI18n.i18nc("@info", "Create your first automation with this command:")
+                }
+
+                QQC2.TextArea {
+                    id: addRuleHintArea
+
+                    objectName: "addRuleHintArea"
+
+                    Layout.fillWidth: true
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.WrapAnywhere
+                    font.family: "monospace"
+                    font.pointSize: Kirigami.Theme.smallFont.pointSize
+                    text: KI18n.i18nc("@info", "busctl --user call io.github.josephur.RokuDeck1 /io/github/josephur/RokuDeck1 io.github.josephur.RokuDeck1 AddRule s '{\"schemaVersion\":1,\"name\":\"Movie time\",\"trigger\":{\"type\":\"manual\"},\"actions\":[{\"type\":\"keypress\",\"key\":\"Home\"}]}'")
+                }
+
+                QQC2.Button {
+                    objectName: "copyRuleHintButton"
+
+                    icon.name: root.hintCopied ? "dialog-ok-apply" : "edit-copy"
+                    text: root.hintCopied
+                        ? KI18n.i18nc("@action:button", "Copied")
+                        : KI18n.i18nc("@action:button", "Copy command")
+                    onClicked: {
+                        addRuleHintArea.selectAll();
+                        addRuleHintArea.copy();
+                        addRuleHintArea.deselect();
+                        root.hintCopied = true;
+                        hintCopiedTimer.restart();
+                    }
+                }
             }
         }
 
