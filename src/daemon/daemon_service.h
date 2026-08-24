@@ -149,6 +149,9 @@ class DaemonService final : public QObject, protected QDBusContext {
     void watchOwner(const QString& owner);
     void updateIdleTimer();
     [[nodiscard]] bool hasAcceptedWork() const;
+    // True when any enabled rule names LOCAL-PC or uses the wildcard, which
+    // keeps the daemon alive per the PC-state-source design (§5 idle parity).
+    [[nodiscard]] bool hasEnabledLocalPcRules() const;
     [[nodiscard]] bool mergeDevice(const DeviceRecord& device,
                                    MergeMode mode = MergeMode::PreserveSettings);
     [[nodiscard]] ValidatedRecord validateDeviceJson(const QString& deviceJson,

@@ -91,6 +91,10 @@ constexpr qsizetype maximumDeviceJsonBytes = 4096;
 constexpr qsizetype maximumDisplayNameLength = 128;
 constexpr qsizetype maximumSerialLength = 64;
 
+// The reserved serial of the machine the daemon runs on (spec §1): exactly one
+// such device is bootstrapped at startup, undeletable and always consenting.
+constexpr auto localPcSerial = "LOCAL-PC";
+
 // Deliberately parsed by hand rather than with QHostAddress: the daemon must
 // accept exactly one notation, and QHostAddress also resolves shorthand forms
 // such as "10.1" that would silently reach a different host than the user typed.
@@ -260,6 +264,18 @@ DaemonService::DaemonService(QDBusConnection connection,
     for (const DeviceRecord& device : m_configStore->loadDevices()) {
         m_deviceRegistry.upsert(device);
         m_addressGenerations.insert(device.serial, 1);
+    }
+    // Spec §1: the daemon always owns the machine it runs on as a reserved
+    // device, so rules and actions can address This PC like any other target.
+    if (!findDevice(QLatin1String(localPcSerial))) {
+        DeviceRecord localDevice;
+        localDevice.serial = QLatin1String(localPcSerial);
+        localDevice.displayName = QStringLiteral("This PC");
+        localDevice.address = QStringLiteral("127.0.0.1");
+        localDevice.sortIndex = nextSortIndex();
+        m_deviceRegistry.upsert(localDevice);
+        m_addressGenerations.insert(localDevice.serial, 1);
+        m_configStore->saveDevices(m_deviceRegistry.devices());
     }
     m_rules = m_configStore->loadRules();
     m_ruleScheduler.updateRulesAtStartup(m_rules, m_wallClock());
@@ -744,6 +760,14 @@ QString DaemonService::UpdateDevice(const QString& serial, const QString& change
         }
         return {};
     }
+    // Consent lives on the machine itself: This PC always allows automations.
+    if (serial == QLatin1String(localPcSerial) && !validated.device.allowAutomations) {
+        if (calledFromDBus()) {
+            sendErrorReply(QDBusError::InvalidArgs,
+                           QStringLiteral("the local device always allows automations"));
+        }
+        return {};
+    }
     if (mergeDevice(validated.device, MergeMode::ApplySettings)) {
         if (validated.device.refreshPolicy != existing->refreshPolicy) {
             reapplyPollInterests();
@@ -754,6 +778,13 @@ QString DaemonService::UpdateDevice(const QString& serial, const QString& change
 }
 
 void DaemonService::RemoveDevice(const QString& serial) {
+    if (serial == QLatin1String(localPcSerial)) {
+        if (calledFromDBus()) {
+            sendErrorReply(QDBusError::InvalidArgs,
+                           QStringLiteral("the local device cannot be removed"));
+        }
+        return;
+    }
     if (!m_deviceRegistry.remove(serial)) {
         if (calledFromDBus()) {
             sendErrorReply(QString::fromLatin1(DbusError::unknownDevice),
@@ -1823,7 +1854,21 @@ void DaemonService::updateIdleTimer() {
 bool DaemonService::hasAcceptedWork() const {
     return m_discoveryActive || !m_deviceTestReplies.isEmpty() ||
            !m_activeCommandSerials.isEmpty() || !m_commandQueues.isEmpty() ||
-           m_scheduleTimer.isActive();
+           m_scheduleTimer.isActive() || hasEnabledLocalPcRules();
+}
+
+// Spec §5 idle parity: an enabled rule that can reach This PC — by naming it
+// or through the wildcard — keeps the daemon alive exactly like a scheduled
+// rule does, because PC state changes may fire it at any moment.
+bool DaemonService::hasEnabledLocalPcRules() const {
+    for (const RuleDocument& rule : m_rules) {
+        if (rule.enabled
+            && (rule.devices.isEmpty()
+                || rule.devices.contains(QLatin1String(localPcSerial)))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void DaemonService::handleIdleTimeout() {

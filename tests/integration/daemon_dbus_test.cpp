@@ -29,11 +29,18 @@
 #include <QtTest>
 
 #include <chrono>
+#include <algorithm>
 #include <memory>
 
 using namespace RokuDeck;
 using namespace RokuDeck::Test;
 using namespace std::chrono_literals;
+
+namespace {
+// Defined with the other fixture helpers below; the bootstrap tests precede
+// them and look This PC up by serial.
+[[nodiscard]] QJsonObject deviceEntry(const QJsonObject& listing, const QString& serial);
+} // namespace
 
 class DaemonDbusTest final : public QObject {
     Q_OBJECT
@@ -49,6 +56,9 @@ class DaemonDbusTest final : public QObject {
     void registrationFailureCleansObjectAndReportsDiagnostic();
     void daemonExecutableReportsRegistrationFailure();
     void lifecycleTracksClientsAndEnabledAutomations();
+    void daemonBootstrapsThisPcAndShieldsIt();
+    void localPcRulesKeepTheDaemonAwake();
+    void wildcardRulesKeepTheDaemonAwakeForTheLocalPc();
     void deviceJsonIsVersionedAndAddressChangesPreserveIdentity();
     void addressChangeInvalidatesSnapshotAndRejectsStalePoll();
     void discoveryUpdatesSerialKeyedRegistry();
@@ -562,6 +572,75 @@ void DaemonDbusTest::lifecycleTracksClientsAndEnabledAutomations() {
     QVERIFY(!m_daemon->idleTimerActive());
 }
 
+void DaemonDbusTest::daemonBootstrapsThisPcAndShieldsIt() {
+    // A fresh temp-config daemon owns This PC out of the box (spec §1).
+    const QJsonObject record =
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("LOCAL-PC"));
+    QCOMPARE(record.value(QStringLiteral("displayName")).toString(), QStringLiteral("This PC"));
+    QVERIFY(record.value(QStringLiteral("allowAutomations")).toBool());
+
+    // Undeletable: the machine the daemon runs on cannot be removed.
+    const QDBusMessage removed = call(QStringLiteral("RemoveDevice"), {QStringLiteral("LOCAL-PC")});
+    QCOMPARE(removed.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(removed.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+    QVERIFY2(removed.errorMessage().contains(QStringLiteral("the local device cannot be removed")),
+             qPrintable(removed.errorMessage()));
+
+    // Consent is always-on for the local machine...
+    const QDBusMessage consentOff =
+        call(QStringLiteral("UpdateDevice"),
+             {QStringLiteral("LOCAL-PC"), QStringLiteral(R"json({"allowAutomations":false})json")});
+    QCOMPARE(consentOff.type(), QDBusMessage::ErrorMessage);
+    QVERIFY2(
+        consentOff.errorMessage().contains(
+            QStringLiteral("the local device always allows automations")),
+        qPrintable(consentOff.errorMessage()));
+
+    // ...but the display name stays user-renameable, and everything persists.
+    const QDBusMessage renamed =
+        call(QStringLiteral("UpdateDevice"),
+             {QStringLiteral("LOCAL-PC"), QStringLiteral(R"json({"displayName":"Dev Box"})json")});
+    QVERIFY2(renamed.type() != QDBusMessage::ErrorMessage, qPrintable(renamed.errorMessage()));
+    recreateDaemon();
+    const QJsonObject persisted =
+        deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("LOCAL-PC"));
+    QCOMPARE(persisted.value(QStringLiteral("displayName")).toString(), QStringLiteral("Dev Box"));
+    QVERIFY(persisted.value(QStringLiteral("allowAutomations")).toBool());
+}
+
+void DaemonDbusTest::localPcRulesKeepTheDaemonAwake() {
+    m_automationEnabled = false;
+    m_daemon->automationEnablementChanged();
+    QVERIFY(m_daemon->idleTimerActive());  // owning This PC alone pins nothing
+
+    const QString explicitId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Mute when playing","devices":["LOCAL-PC"],)json"
+        R"json("trigger":{"type":"stateChange","field":"playing","op":"is","value":true},)json"
+        R"json("actions":[{"type":"mute","muted":true}]})json"));
+    QVERIFY(!m_daemon->idleTimerActive());  // an enabled LOCAL-PC rule blocks idle exit
+
+    const QDBusMessage disabled = waitForReply(m_proxy->SetRuleEnabled(explicitId, false));
+    QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
+             qPrintable(disabled.errorMessage()));
+    QVERIFY(m_daemon->idleTimerActive());  // disabling releases the daemon again
+
+    const QDBusMessage enabled = waitForReply(m_proxy->SetRuleEnabled(explicitId, true));
+    QVERIFY2(enabled.type() != QDBusMessage::ErrorMessage, qPrintable(enabled.errorMessage()));
+    QVERIFY(!m_daemon->idleTimerActive());
+}
+
+void DaemonDbusTest::wildcardRulesKeepTheDaemonAwakeForTheLocalPc() {
+    m_automationEnabled = false;
+    m_daemon->automationEnablementChanged();
+    QVERIFY(m_daemon->idleTimerActive());
+
+    // An empty devices list is the wildcard, which reaches This PC too
+    // (spec §5). The manual trigger keeps the schedule timer out of the
+    // picture so only wildcard reach can hold the daemon awake here.
+    addManualRule(QStringLiteral("Wildcard macro"));
+    QVERIFY(!m_daemon->idleTimerActive());
+}
+
 void DaemonDbusTest::deviceJsonIsVersionedAndAddressChangesPreserveIdentity() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.10")});
@@ -573,17 +652,20 @@ void DaemonDbusTest::deviceJsonIsVersionedAndAddressChangesPreserveIdentity() {
     const QJsonObject payload = jsonResult(reply);
     QCOMPARE(payload.value(QStringLiteral("schemaVersion")).toInt(), 1);
     const QJsonArray devices = payload.value(QStringLiteral("devices")).toArray();
-    QCOMPARE(devices.size(), 1);
-    QCOMPARE(devices.at(0).toObject().value(QStringLiteral("serial")).toString(),
+    QCOMPARE(devices.size(), 2);
+    QCOMPARE(devices.at(1).toObject().value(QStringLiteral("serial")).toString(),
              QStringLiteral("SERIAL-A"));
-    QCOMPARE(devices.at(0).toObject().value(QStringLiteral("address")).toString(),
+    QCOMPARE(devices.at(1).toObject().value(QStringLiteral("address")).toString(),
              QStringLiteral("192.0.2.11"));
 
     ConfigStore reloaded(KSharedConfig::openConfig(m_configPath, KConfig::SimpleConfig));
     const QList<DeviceRecord> stored = reloaded.loadDevices();
-    QCOMPARE(stored.size(), 1);
-    QCOMPARE(stored.front().serial, QStringLiteral("SERIAL-A"));
-    QCOMPARE(stored.front().address, QStringLiteral("192.0.2.11"));
+    QCOMPARE(stored.size(), 2);
+    QVERIFY(std::any_of(stored.cbegin(), stored.cend(),
+                        [](const DeviceRecord& device) {
+                            return device.serial == QLatin1String("SERIAL-A")
+                                && device.address == QLatin1String("192.0.2.11");
+                        }));
 }
 
 void DaemonDbusTest::addressChangeInvalidatesSnapshotAndRejectsStalePoll() {
@@ -665,7 +747,7 @@ void DaemonDbusTest::addressChangeInvalidatesSnapshotAndRejectsStalePoll() {
     const QJsonObject devices = jsonResult(call(QStringLiteral("ListDevices")));
     QCOMPARE(devices.value(QStringLiteral("devices"))
                  .toArray()
-                 .at(0)
+                 .at(1)
                  .toObject()
                  .value(QStringLiteral("address"))
                  .toString(),
@@ -694,13 +776,13 @@ void DaemonDbusTest::discoveryUpdatesSerialKeyedRegistry() {
     QVERIFY2(completed.type() != QDBusMessage::ErrorMessage, qPrintable(completed.errorMessage()));
     const QJsonArray completedDevices =
         jsonResult(completed).value(QStringLiteral("devices")).toArray();
-    QCOMPARE(completedDevices.size(), 2);
-    QCOMPARE(completedDevices.at(0).toObject().value(QStringLiteral("serial")).toString(),
+    QCOMPARE(completedDevices.size(), 3);
+    QCOMPARE(completedDevices.at(1).toObject().value(QStringLiteral("serial")).toString(),
              QStringLiteral("SERIAL-A"));
     QCOMPARE(changed.size(), 1);
     QJsonArray devices =
         jsonResult(waitForReply(m_proxy->ListDevices())).value(QStringLiteral("devices")).toArray();
-    QCOMPARE(devices.size(), 2);
+    QCOMPARE(devices.size(), 3);
 
     const QDBusPendingReply<QString> rediscovery = m_proxy->DiscoverDevices();
     QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 2, 500);
@@ -714,7 +796,7 @@ void DaemonDbusTest::discoveryUpdatesSerialKeyedRegistry() {
     QCOMPARE(jsonResult(rediscovered)
                  .value(QStringLiteral("devices"))
                  .toArray()
-                 .at(0)
+                 .at(1)
                  .toObject()
                  .value(QStringLiteral("address"))
                  .toString(),
@@ -722,10 +804,10 @@ void DaemonDbusTest::discoveryUpdatesSerialKeyedRegistry() {
     QCOMPARE(changed.size(), 2);
     devices =
         jsonResult(waitForReply(m_proxy->ListDevices())).value(QStringLiteral("devices")).toArray();
-    QCOMPARE(devices.size(), 2);
-    QCOMPARE(devices.at(0).toObject().value(QStringLiteral("serial")).toString(),
+    QCOMPARE(devices.size(), 3);
+    QCOMPARE(devices.at(1).toObject().value(QStringLiteral("serial")).toString(),
              QStringLiteral("SERIAL-A"));
-    QCOMPARE(devices.at(0).toObject().value(QStringLiteral("address")).toString(),
+    QCOMPARE(devices.at(1).toObject().value(QStringLiteral("address")).toString(),
              QStringLiteral("198.51.100.42"));
 }
 
@@ -1157,7 +1239,8 @@ void DaemonDbusTest::deviceManagementAddsRenamesAndRemovesDevices() {
 
     const QDBusMessage removed = call(QStringLiteral("RemoveDevice"), {QStringLiteral("SERIAL-A")});
     QVERIFY2(removed.type() != QDBusMessage::ErrorMessage, qPrintable(removed.errorMessage()));
-    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))).size(), 0);
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
+             QStringList{QStringLiteral("LOCAL-PC")});
 
     const QDBusMessage removedAgain =
         call(QStringLiteral("RemoveDevice"), {QStringLiteral("SERIAL-A")});
@@ -1166,7 +1249,8 @@ void DaemonDbusTest::deviceManagementAddsRenamesAndRemovesDevices() {
              QStringLiteral("io.github.josephur.RokuDeck1.Error.UnknownDevice"));
 
     recreateDaemon();
-    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))).size(), 0);
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
+             QStringList{QStringLiteral("LOCAL-PC")});
 }
 
 void DaemonDbusTest::deviceManagementRejectsInvalidInput() {
@@ -1203,7 +1287,8 @@ void DaemonDbusTest::deviceManagementRejectsInvalidInput() {
             .arg(QString(8192, QChar(u'x')));
     QCOMPARE(call(QStringLiteral("AddDevice"), {oversized}).type(), QDBusMessage::ErrorMessage);
 
-    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))).size(), 0);
+    QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
+             QStringList{QStringLiteral("LOCAL-PC")});
 
     const QDBusMessage unknownUpdate =
         call(QStringLiteral("UpdateDevice"),
@@ -1247,8 +1332,8 @@ void DaemonDbusTest::deviceOrderIsUserControlledAndPersisted() {
         QVERIFY2(added.type() != QDBusMessage::ErrorMessage, qPrintable(added.errorMessage()));
     }
     QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
-             QStringList({QStringLiteral("SERIAL-A"), QStringLiteral("SERIAL-B"),
-                          QStringLiteral("SERIAL-C")}));
+             QStringList({QStringLiteral("LOCAL-PC"), QStringLiteral("SERIAL-A"),
+                          QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-C")}));
 
     QSignalSpy changed(m_daemon.get(), &DaemonService::DeviceListChanged);
     const QDBusMessage reordered =
@@ -1259,7 +1344,7 @@ void DaemonDbusTest::deviceOrderIsUserControlledAndPersisted() {
     QCOMPARE(changed.size(), 1);
     QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
              QStringList({QStringLiteral("SERIAL-C"), QStringLiteral("SERIAL-A"),
-                          QStringLiteral("SERIAL-B")}));
+                          QStringLiteral("SERIAL-B"), QStringLiteral("LOCAL-PC")}));
 
     const QDBusMessage unknown =
         call(QStringLiteral("SetDeviceOrder"),
@@ -1267,7 +1352,7 @@ void DaemonDbusTest::deviceOrderIsUserControlledAndPersisted() {
     QCOMPARE(unknown.type(), QDBusMessage::ErrorMessage);
     QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
              QStringList({QStringLiteral("SERIAL-C"), QStringLiteral("SERIAL-A"),
-                          QStringLiteral("SERIAL-B")}));
+                          QStringLiteral("SERIAL-B"), QStringLiteral("LOCAL-PC")}));
 
     const QDBusMessage duplicated =
         call(QStringLiteral("SetDeviceOrder"),
@@ -1279,13 +1364,13 @@ void DaemonDbusTest::deviceOrderIsUserControlledAndPersisted() {
     QVERIFY2(partial.type() != QDBusMessage::ErrorMessage, qPrintable(partial.errorMessage()));
     QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))) ==
                  QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-C"),
-                              QStringLiteral("SERIAL-A")}),
+                              QStringLiteral("SERIAL-A"), QStringLiteral("LOCAL-PC")}),
              "devices the caller omitted must keep their relative order behind the named ones");
 
     recreateDaemon();
     QCOMPARE(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))),
              QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-C"),
-                          QStringLiteral("SERIAL-A")}));
+                          QStringLiteral("SERIAL-A"), QStringLiteral("LOCAL-PC")}));
 }
 
 void DaemonDbusTest::discoveryPreservesConfiguredDeviceSettings() {
@@ -1331,7 +1416,8 @@ void DaemonDbusTest::discoveryPreservesConfiguredDeviceSettings() {
              "discovery must not discard the wake preference");
     QCOMPARE(record.value(QStringLiteral("refreshPolicy")).toString(), QStringLiteral("battery"));
     QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))) ==
-                 QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-A")}),
+                 QStringList({QStringLiteral("SERIAL-B"), QStringLiteral("SERIAL-A"),
+                              QStringLiteral("LOCAL-PC")}),
              "discovery must not reshuffle the order the user chose");
 }
 
@@ -1438,7 +1524,8 @@ void DaemonDbusTest::testDeviceProbesAnAddressWithoutRegisteringIt() {
     QCOMPARE(snapshot.value(QStringLiteral("power")).toString(), QStringLiteral("on"));
     QCOMPARE(snapshot.value(QStringLiteral("volume")).toInt(), 27);
 
-    QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))).isEmpty(),
+    QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))) ==
+                 QStringList{QStringLiteral("LOCAL-PC")},
              "testing an address must never register it behind the user's back");
 }
 
@@ -1936,7 +2023,9 @@ void DaemonDbusTest::runRuleWithoutConsentingDevicesIsConsentBlocked() {
         call(QStringLiteral("UpdateDevice"),
              {QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"allowAutomations":false})json")});
     QVERIFY2(denied.type() != QDBusMessage::ErrorMessage, qPrintable(denied.errorMessage()));
-    const QString ruleId = addManualRule(QStringLiteral("Quiet hour"));
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Quiet hour","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Select"}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
 
     const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
@@ -1971,7 +2060,7 @@ void DaemonDbusTest::runRuleDispatchesKeypressThroughTheCommandPipeline() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
                             QStringLiteral("198.51.100.71")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Movie time","trigger":{"type":"manual"},)json"
+        R"json({"name":"Movie time","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
 
@@ -2004,7 +2093,7 @@ void DaemonDbusTest::runRuleReportsUndeliveredCommandsAsFailed() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
                             QStringLiteral("198.51.100.71")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Movie time","trigger":{"type":"manual"},)json"
+        R"json({"name":"Movie time","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
 
     // The TV is off: rds exits non-zero and the run must not claim ok.
@@ -2028,9 +2117,9 @@ void DaemonDbusTest::runRuleReportsMixedDeliveryAsPartial() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
                             QStringLiteral("198.51.100.71")});
     m_daemon->upsertDevice({QStringLiteral("SERIAL-B"), QStringLiteral("Kitchen TV"),
-                            QStringLiteral("198.51.100.72")});
+                             QStringLiteral("198.51.100.72")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Movie time","trigger":{"type":"manual"},)json"
+        R"json({"name":"Movie time","devices":["SERIAL-A","SERIAL-B"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
 
     // First target's delivery fails, second succeeds.
@@ -2086,7 +2175,7 @@ void DaemonDbusTest::runRuleWithMatchingConditionsRunsAndReportsOk() {
     completePollReadings(18);
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Quiet movie","trigger":{"type":"manual"},)json"
+        R"json({"name":"Quiet movie","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("conditions":{"leaf":{"device":"*","field":"volume","op":"lt","value":20}},)json"
         R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
 
@@ -2145,7 +2234,7 @@ void DaemonDbusTest::scheduledDailyRuleFiresThroughTheCommandPipeline() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
                             QStringLiteral("198.51.100.80")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Nightly home","trigger":{"type":"time","kind":"daily","time":"09:00"})json"
+        R"json({"name":"Nightly home","devices":["SERIAL-A"],"trigger":{"type":"time","kind":"daily","time":"09:00"})json"
         R"json(,"actions":[{"type":"keypress","key":"Home"}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
     const int announcementsBefore = changed.size();
@@ -2185,7 +2274,7 @@ void DaemonDbusTest::disablingARuleUnschedulesItsNextFire() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
                             QStringLiteral("198.51.100.81")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Nightly home","trigger":{"type":"time","kind":"daily","time":"09:00"})json"
+        R"json({"name":"Nightly home","devices":["SERIAL-A"],"trigger":{"type":"time","kind":"daily","time":"09:00"})json"
         R"json(,"actions":[{"type":"keypress","key":"Home"}]})json"));
     const QDBusMessage disabled = waitForReply(m_proxy->SetRuleEnabled(ruleId, false));
     QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
@@ -2200,10 +2289,10 @@ void DaemonDbusTest::onceRuleMissedByLessThanADayFiresAtStartup() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
                             QStringLiteral("198.51.100.82")});
     addRuleReturningId(QStringLiteral(
-        R"json({"name":"Once fresh","trigger":{"type":"time","kind":"once","time":"08:00")json"
+        R"json({"name":"Once fresh","devices":["SERIAL-A"],"trigger":{"type":"time","kind":"once","time":"08:00")json"
         R"json(,"date":"2026-01-05"},"actions":[{"type":"keypress","key":"Home"}]})json"));
     addRuleReturningId(QStringLiteral(
-        R"json({"name":"Once stale","trigger":{"type":"time","kind":"once","time":"08:00")json"
+        R"json({"name":"Once stale","devices":["SERIAL-A"],"trigger":{"type":"time","kind":"once","time":"08:00")json"
         R"json(,"date":"2026-01-03"},"actions":[{"type":"keypress","key":"Back"}]})json"));
 
     // Boot 90 minutes after the fresh rule's fire time.
@@ -2226,7 +2315,7 @@ void DaemonDbusTest::intervalRuleReanchorsAcrossDaemonRestarts() {
     m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
                             QStringLiteral("198.51.100.83")});
     addRuleReturningId(QStringLiteral(
-        R"json({"name":"Nudge","trigger":{"type":"interval","minutes":5})json"
+        R"json({"name":"Nudge","devices":["SERIAL-A"],"trigger":{"type":"interval","minutes":5})json"
         R"json(,"actions":[{"type":"keypress","key":"Home"}]})json"));
 
     // Restart: the cadence starts over from boot — no burst.
@@ -2284,7 +2373,7 @@ void DaemonDbusTest::stateChangeRuleFiresOnRisingEdgeOnly() {
 
     // The rule joins after the baseline: dropping below 20 must fire it.
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Volume watchdog","trigger":{"type":"stateChange","field":"volume",)json"
+        R"json({"name":"Volume watchdog","devices":["SERIAL-A"],"trigger":{"type":"stateChange","field":"volume",)json"
         R"json("op":"lt","value":20},"actions":[{"type":"keypress","key":"Home"}]})json"));
     startRunnerCompleter();  // the firing waits for its delivery verdict
     completePollReadings(5);
@@ -2317,7 +2406,7 @@ void DaemonDbusTest::firstObservationIsBaselineAndNeverFires() {
     // The rule exists before the daemon ever observes the device: even a first
     // reading that already matches stays silent (spec §4.1 baseline).
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Quiet watcher","trigger":{"type":"stateChange","field":"volume",)json"
+        R"json({"name":"Quiet watcher","devices":["SERIAL-A"],"trigger":{"type":"stateChange","field":"volume",)json"
         R"json("op":"lt","value":20},"actions":[{"type":"keypress","key":"Home"}]})json"));
     const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
         QStringLiteral("baseline-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
@@ -2397,7 +2486,7 @@ void DaemonDbusTest::muteActionPressesVolumeMuteOnce() {
     QCOMPARE(keypressCount(QStringLiteral("VolumeMute")), 0);
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Silence please","trigger":{"type":"manual"},)json"
+        R"json({"name":"Silence please","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"mute","muted":true}]})json"));
 
     startRunnerCompleter();  // the run waits for its delivery verdict
@@ -2424,7 +2513,7 @@ void DaemonDbusTest::muteActionMatchingObservedStateIsANoOp() {
     completePollReadings(18, true);  // already muted
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Stay quiet","trigger":{"type":"manual"},)json"
+        R"json({"name":"Stay quiet","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"mute","muted":true}]})json"));
 
     startRunnerCompleter();
@@ -2450,7 +2539,7 @@ void DaemonDbusTest::setVolumeWalksDownWithBoundedPresses() {
     completePollReadings(18);
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Softly","trigger":{"type":"manual"},)json"
+        R"json({"name":"Softly","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"setVolume","volume":15}]})json"));
     QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 0);
 
@@ -2526,7 +2615,7 @@ void DaemonDbusTest::ceilingClampsAnUpwardVolumeWalk() {
     completePollReadings(46);
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Loud but legal","trigger":{"type":"manual"},)json"
+        R"json({"name":"Loud but legal","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"setVolume","volume":90}]})json"));
 
     startRunnerCompleter();
@@ -2555,7 +2644,7 @@ void DaemonDbusTest::downwardWalksIgnoreTheCeiling() {
     completePollReadings(24);
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Softly","trigger":{"type":"manual"},)json"
+        R"json({"name":"Softly","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"setVolume","volume":20}]})json"));
 
     startRunnerCompleter();
@@ -2584,7 +2673,7 @@ void DaemonDbusTest::setVolumeAtTheCeilingIsACleanNoOp() {
     completePollReadings(50);
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Already loud enough","trigger":{"type":"manual"},)json"
+        R"json({"name":"Already loud enough","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"setVolume","volume":60}]})json"));
 
     startRunnerCompleter();
@@ -2637,7 +2726,7 @@ void DaemonDbusTest::mixedListWithIfThenElseRunsToCompletion() {
     // longer aborts: the Home ahead of the branch must land, and the
     // unobservable power gate cleanly skips to its (empty) else.
     const QString mixedId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Mixed macro","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"name":"Mixed macro","devices":["SERIAL-A"],"trigger":{"type":"manual"},"actions":[)json"
         R"json({"type":"keypress","key":"Home"},)json"
         R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"power",)json"
         R"json("op":"is","value":"on"}},"then":[{"type":"keypress","key":"Back"}]}]})json"));
@@ -2661,10 +2750,10 @@ void DaemonDbusTest::macroChainRunsChildAndReportsOk() {
     // The child is added first so its generated id can seed the parent's
     // macro target without a rewrite.
     const QString childId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Child step","trigger":{"type":"manual"},)json"
+        R"json({"name":"Child step","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
     const QString parentId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Movie night","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"name":"Movie night","devices":["SERIAL-A"],"trigger":{"type":"manual"},"actions":[)json"
         R"json({"type":"keypress","key":"Home"},)json"
         R"json({"type":"runRule","id":"%1"}]})json").arg(childId));
 
@@ -2806,7 +2895,7 @@ void DaemonDbusTest::condTrueRunsThenBranch() {
     completePollReadings(18);
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Quiet branch","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"name":"Quiet branch","devices":["SERIAL-A"],"trigger":{"type":"manual"},"actions":[)json"
         R"json({"type":"setVolume","volume":15},)json"
         R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"volume",)json"
         R"json("op":"lt","value":20}},)json"
@@ -2838,7 +2927,7 @@ void DaemonDbusTest::condFalseRunsElseBranch() {
     completePollReadings(18);  // volume 18 fails a "louder than 50" gate
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Loud branch","trigger":{"type":"manual"},"actions":[)json"
+        R"json({"name":"Loud branch","devices":["SERIAL-A"],"trigger":{"type":"manual"},"actions":[)json"
         R"json({"type":"setVolume","volume":15},)json"
         R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"volume",)json"
         R"json("op":"gt","value":50}},)json"
@@ -2896,8 +2985,8 @@ void DaemonDbusTest::ifThenElseBranchRecursionCarriesCycleContext() {
     // inside a then-branch so recursion must carry the cycle context in.
     const QString rewritten = QStringLiteral(
         R"json({"id":"%1","name":"Ouroboros branch","enabled":true,"mode":"restart",)json"
-        R"json("devices":[],"trigger":{"type":"manual"},"actions":[)json"
-        R"json({"type":"ifThenElse","cond":{"leaf":{"device":"*","field":"volume",)json"
+        R"json("devices":["SERIAL-A"],"trigger":{"type":"manual"},"actions":[)json"
+        R"json({"type":"ifThenElse","cond":{"leaf":{"device":"SERIAL-A","field":"volume",)json"
         R"json("op":"lt","value":20}},)json"
         R"json("then":[{"type":"runRule","id":"%1"}]}]})json").arg(ruleId);
     const QDBusMessage update = waitForReply(m_proxy->UpdateRule(rewritten));
@@ -2950,7 +3039,7 @@ void DaemonDbusTest::singleModeDropsOverlappingFiring() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.40")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Solo","mode":"single","devices":[],)json"
+        R"json({"name":"Solo","mode":"single","devices":["SERIAL-A"],)json"
         R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
         R"json({"type":"delay","seconds":1}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
@@ -2975,7 +3064,7 @@ void DaemonDbusTest::restartModeSupersedesActiveRun() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.41")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Chaser","mode":"restart","devices":[],)json"
+        R"json({"name":"Chaser","mode":"restart","devices":["SERIAL-A"],)json"
         R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
         R"json({"type":"delay","seconds":1},{"type":"keypress","key":"Select"}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
@@ -3000,7 +3089,7 @@ void DaemonDbusTest::queuedModeCoalescesThenDrains() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.42")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Cohort","mode":"queued","devices":[],)json"
+        R"json({"name":"Cohort","mode":"queued","devices":["SERIAL-A"],)json"
         R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
         R"json({"type":"delay","seconds":1}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
@@ -3025,7 +3114,7 @@ void DaemonDbusTest::suppressedFiringAnnouncesDroppedRecord() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.43")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Gatekeeper","mode":"single","devices":[],)json"
+        R"json({"name":"Gatekeeper","mode":"single","devices":["SERIAL-A"],)json"
         R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
         R"json({"type":"delay","seconds":1}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
@@ -3063,11 +3152,11 @@ void DaemonDbusTest::macroInvocationBypassesModeGate() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.44")});
     const QString slowId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Slowpoke","mode":"single","devices":[],)json"
+        R"json({"name":"Slowpoke","mode":"single","devices":["SERIAL-A"],)json"
         R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Back"},)json"
         R"json({"type":"delay","seconds":1}]})json"));
     const QString invokerId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Invoker","devices":[],"trigger":{"type":"manual"},)json"
+        R"json({"name":"Invoker","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
         R"json("actions":[{"type":"runRule","id":"%1"}]})json").arg(slowId));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
 
@@ -3107,7 +3196,7 @@ void DaemonDbusTest::stateChangeFiringGatedByConditionsRecordsConditionFalse() {
     // the predicate while unmuted fires the pipeline, but the condition gate
     // stops it as condition-false before anything reaches a device.
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Muted watchdog","trigger":{"type":"stateChange","field":"volume",)json"
+        R"json({"name":"Muted watchdog","devices":["SERIAL-A"],"trigger":{"type":"stateChange","field":"volume",)json"
         R"json("op":"lt","value":20},"conditions":{"leaf":{"device":"*","field":"muted",)json"
         R"json("op":"is","value":true}},"actions":[{"type":"keypress","key":"Home"}]})json"));
 
@@ -3150,7 +3239,7 @@ void DaemonDbusTest::restartThenThirdFiringDuringReplacementIsGated() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.46")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Relay","mode":"restart","devices":[],)json"
+        R"json({"name":"Relay","mode":"restart","devices":["SERIAL-A"],)json"
         R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
         R"json({"type":"delay","seconds":5},{"type":"keypress","key":"Select"}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
@@ -3178,7 +3267,7 @@ void DaemonDbusTest::singleModeThirdFiringDuringActiveRunIsDropped() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.47")});
     const QString ruleId = addRuleReturningId(QStringLiteral(
-        R"json({"name":"Anchor","mode":"single","devices":[],)json"
+        R"json({"name":"Anchor","mode":"single","devices":["SERIAL-A"],)json"
         R"json("trigger":{"type":"manual"},"actions":[{"type":"keypress","key":"Home"},)json"
         R"json({"type":"delay","seconds":1}]})json"));
     QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);

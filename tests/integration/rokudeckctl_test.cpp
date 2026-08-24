@@ -144,8 +144,10 @@ void RokuDeckCtlTest::jsonDeviceListIsMachineReadable() {
     QCOMPARE(result.standardError, QByteArray{});
     const QJsonDocument document = parseJson(result.standardOutput);
     QVERIFY(document.isArray());
-    QCOMPARE(document.array().size(), 1);
+    QCOMPARE(document.array().size(), 2);
     QCOMPARE(document.array().at(0).toObject().value(QStringLiteral("serial")).toString(),
+             QStringLiteral("LOCAL-PC"));
+    QCOMPARE(document.array().at(1).toObject().value(QStringLiteral("serial")).toString(),
              QStringLiteral("SERIAL-TEST"));
 }
 
@@ -181,8 +183,10 @@ void RokuDeckCtlTest::jsonDiscoveryUsesDaemonContract() {
     QCOMPARE(result.exitCode, 0);
     const QJsonDocument document = parseJson(result.standardOutput);
     QVERIFY(document.isArray());
-    QCOMPARE(document.array().size(), 1);
+    QCOMPARE(document.array().size(), 2);
     QCOMPARE(document.array().at(0).toObject().value(QStringLiteral("serial")).toString(),
+             QStringLiteral("LOCAL-PC"));
+    QCOMPARE(document.array().at(1).toObject().value(QStringLiteral("serial")).toString(),
              QStringLiteral("SERIAL-DISCOVERED"));
     QCOMPARE(m_runner->requests.size(), 1);
     QCOMPARE(m_runner->lastRequest.program, QStringLiteral("rds"));
