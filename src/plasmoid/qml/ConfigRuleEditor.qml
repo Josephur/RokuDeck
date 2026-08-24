@@ -47,7 +47,7 @@ Kirigami.Dialog {
         ? KI18n.i18nc("@title:window", "Edit Automation")
         : KI18n.i18nc("@title:window", "New Automation")
 
-    preferredWidth: Kirigami.Units.gridUnit * 28
+    preferredWidth: Kirigami.Units.gridUnit * 38
 
     function openForAdd() {
         root.editingRule = null;
@@ -243,8 +243,10 @@ Kirigami.Dialog {
 
         clip: true
         contentHeight: editorColumn.implicitHeight
+        // Give the form room to breathe: most rules fit without scrolling on
+        // a 1080p+ desktop, and long macro lists scroll instead of squeezing.
         implicitHeight: Math.min(editorColumn.implicitHeight,
-                                 Kirigami.Units.gridUnit * 24)
+                                 Kirigami.Units.gridUnit * 34)
         interactive: contentHeight > height
 
         ColumnLayout {
