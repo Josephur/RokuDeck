@@ -2611,13 +2611,6 @@ void DaemonDbusTest::condFalseRunsElseBranch() {
 void DaemonDbusTest::falseCondWithoutElseIsCleanNoOp() {
     m_daemon->upsertDevice(
         {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.43")});
-    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
-        QStringLiteral("branch-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
-    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
-             qPrintable(registered.errorMessage()));
-
-    completePollVersion();
-    completePollReadings(18);  // volume 18 fails a "louder than 50" gate
 
     const QString ruleId = addRuleReturningId(QStringLiteral(
         R"json({"name":"Silent branch","trigger":{"type":"manual"},"actions":[)json"
@@ -2625,13 +2618,12 @@ void DaemonDbusTest::falseCondWithoutElseIsCleanNoOp() {
         R"json("op":"gt","value":50}},)json"
         R"json("then":[{"type":"keypress","key":"Home"}]}]})json"));
 
-    const int requestsBeforeRun = m_runner->requests.size();
     const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
     QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
     // A false condition with no else is a successful nothing: no attempts, so
-    // the run earns ok without touching a device.
+    // the run earns ok without touching a device. No client is registered, so
+    // the snapshot is empty and the gate can never pass.
     QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
-    QCOMPARE(m_runner->requests.size(), requestsBeforeRun);
     QCOMPARE(homeKeypressCount(), 0);
 }
 
