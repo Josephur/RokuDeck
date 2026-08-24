@@ -260,10 +260,11 @@ DaemonService::DaemonService(QDBusConnection connection,
         m_addressGenerations.insert(device.serial, 1);
     }
     m_rules = m_configStore->loadRules();
-    m_ruleScheduler.updateRules(m_rules, m_wallClock());
+    m_ruleScheduler.updateRulesAtStartup(m_rules, m_wallClock());
     m_scheduleTimer.setSingleShot(true);
     connect(&m_scheduleTimer, &QTimer::timeout, this, &DaemonService::evaluateDueRules);
     rearmScheduleTimer();
+    evaluateDueRules();  // spec §4.2: fresh missed `once` rules fire once at boot
 
     m_idleTimer.setSingleShot(true);
     m_idleTimer.setInterval(static_cast<int>(std::min<std::chrono::milliseconds::rep>(
@@ -1443,7 +1444,8 @@ void DaemonService::updateIdleTimer() {
 
 bool DaemonService::hasAcceptedWork() const {
     return m_discoveryActive || !m_deviceTestReplies.isEmpty() ||
-           !m_activeCommandSerials.isEmpty() || !m_commandQueues.isEmpty();
+           !m_activeCommandSerials.isEmpty() || !m_commandQueues.isEmpty() ||
+           m_scheduleTimer.isActive();
 }
 
 void DaemonService::handleIdleTimeout() {

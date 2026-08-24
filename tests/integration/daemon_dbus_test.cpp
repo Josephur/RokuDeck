@@ -82,6 +82,9 @@ class DaemonDbusTest final : public QObject {
     void runRuleWithUnknownIdErrors();
     void scheduledDailyRuleFiresThroughTheCommandPipeline();
     void disablingARuleUnschedulesItsNextFire();
+    void onceRuleMissedByLessThanADayFiresAtStartup();
+    void intervalRuleReanchorsAcrossDaemonRestarts();
+    void pendingScheduleKeepsTheDaemonAwake();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -1875,6 +1878,70 @@ void DaemonDbusTest::disablingARuleUnschedulesItsNextFire() {
     m_now = QDateTime(QDate(2026, 1, 5), QTime(9, 0));
     m_daemon->evaluateDueRules();
     QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::onceRuleMissedByLessThanADayFiresAtStartup() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.82")});
+    addRuleReturningId(QStringLiteral(
+        R"json({"name":"Once fresh","trigger":{"type":"time","kind":"once","time":"08:00")json"
+        R"json(,"date":"2026-01-05"},"actions":[{"type":"keypress","key":"Home"}]})json"));
+    addRuleReturningId(QStringLiteral(
+        R"json({"name":"Once stale","trigger":{"type":"time","kind":"once","time":"08:00")json"
+        R"json(,"date":"2026-01-03"},"actions":[{"type":"keypress","key":"Back"}]})json"));
+
+    // Boot 90 minutes after the fresh rule's fire time.
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(9, 30));
+    recreateDaemon(30s, {}, [this] { return m_now; });
+
+    // Fresh: caught up exactly once at startup. Stale: skipped forever.
+    QCOMPARE(m_runner->requests.size(), 1);
+    QCOMPARE(m_runner->lastRequest.arguments.last(2),
+             QStringList({QStringLiteral("keypress"), QStringLiteral("Home")}));
+
+    // Restart again: the persisted lastRun marks the rule consumed.
+    recreateDaemon(30s, {}, [this] { return m_now; });
+    QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::intervalRuleReanchorsAcrossDaemonRestarts() {
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.83")});
+    addRuleReturningId(QStringLiteral(
+        R"json({"name":"Nudge","trigger":{"type":"interval","minutes":5})json"
+        R"json(,"actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    // Restart: the cadence starts over from boot — no burst.
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(8, 0));
+    recreateDaemon(30s, {}, [this] { return m_now; });
+    QVERIFY(m_runner->requests.isEmpty());
+
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(8, 5));
+    m_daemon->evaluateDueRules();
+    QCOMPARE(m_runner->requests.size(), 1);
+    QCOMPARE(m_runner->lastRequest.arguments.last(2),
+             QStringList({QStringLiteral("keypress"), QStringLiteral("Home")}));
+
+    // Re-anchored to the fire instant: 10 minutes after boot is not due.
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(8, 10));
+    m_daemon->evaluateDueRules();
+    QCOMPARE(m_runner->requests.size(), 1);
+}
+
+void DaemonDbusTest::pendingScheduleKeepsTheDaemonAwake() {
+    m_automationEnabled = false;
+    m_daemon->automationEnablementChanged();
+    QVERIFY(m_daemon->idleTimerActive());  // nothing to keep the daemon alive
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Nightly off","trigger":{"type":"time","kind":"daily","time":"23:00"})json"
+        R"json(,"actions":[{"type":"keypress","key":"Power"}]})json"));
+    QVERIFY(!m_daemon->idleTimerActive());  // the pending schedule blocks idle exit
+
+    const QDBusMessage disabled = waitForReply(m_proxy->SetRuleEnabled(ruleId, false));
+    QVERIFY2(disabled.type() != QDBusMessage::ErrorMessage,
+             qPrintable(disabled.errorMessage()));
+    QVERIFY(m_daemon->idleTimerActive());   // released
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)
