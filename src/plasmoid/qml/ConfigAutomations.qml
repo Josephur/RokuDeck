@@ -83,7 +83,7 @@ KCM.SimpleKCM {
             text: root.runFeedback
         }
 
-        PlasmaExtras.PlaceHolder {
+        PlasmaExtras.PlaceholderMessage {
             objectName: "noRulesPlaceholder"
 
             visible: root.daemonReachable && automationsList.count === 0
