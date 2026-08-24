@@ -6,6 +6,12 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- Rules gain `single`/`restart`/`queued` execution modes: every trigger origin (schedules,
+  state changes, manual runs) passes the rule's mode gate — `single` drops firings that
+  arrive while a run is active, `restart` supersedes the active run mid-flight (cooperative
+  cancellation, the superseded run records nothing), and `queued` (the default) holds one
+  pending firing that drains when the active run finishes. Overloaded firings are recorded
+  and announced as `dropped`.
 - The Automations page gains a full structured editor — create and edit every trigger,
   condition, and action type without touching a terminal.
 - Added a per-device volume ceiling as an always-on automation policy: the daemon stores and

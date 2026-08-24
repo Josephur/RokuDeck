@@ -116,6 +116,7 @@ class DaemonDbusTest final : public QObject {
     void queuedModeCoalescesThenDrains();
     void suppressedFiringAnnouncesDroppedRecord();
     void macroInvocationBypassesModeGate();
+    void stateChangeFiringGatedByConditionsRecordsConditionFalse();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -3064,6 +3065,60 @@ void DaemonDbusTest::macroInvocationBypassesModeGate() {
     QVERIFY2(!outcomes.contains(QStringLiteral("dropped")),
              "a macro child must never be gated into a drop");
     QCOMPARE(outcomes.last(), QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::stateChangeFiringGatedByConditionsRecordsConditionFalse() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.45")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("sc-cond-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    completePollVersion();
+    completePollReadings(25);  // baseline above the threshold: no firing
+
+    // The stateChange trigger and the condition tree compose: an edge into
+    // the predicate while unmuted fires the pipeline, but the condition gate
+    // stops it as condition-false before anything reaches a device.
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Muted watchdog","trigger":{"type":"stateChange","field":"volume",)json"
+        R"json("op":"lt","value":20},"conditions":{"leaf":{"device":"*","field":"muted",)json"
+        R"json("op":"is","value":true}},"actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    completePollReadings(5);
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 0);
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("condition-false"));
+
+    // Falling edges stay silent; the next rising edge arrives muted, the gate
+    // passes, and the rule runs to a real dispatch.
+    completePollReadings(25, true);
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 0);
+
+    startRunnerCompleter();  // the gated-in firing waits for its delivery verdict
+    completePollReadings(8, true);
+    stopRunnerCompleter();
+    QTest::qWait(50);
+    QCOMPARE(homeKeypressCount(), 1);
+    const QJsonObject fired =
+        rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
+    QCOMPARE(fired.value(QStringLiteral("id")).toString(), ruleId);
+    QCOMPARE(fired.value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("ok"));
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)
