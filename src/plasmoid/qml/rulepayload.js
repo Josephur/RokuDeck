@@ -8,7 +8,7 @@
 
 var modes = ["single", "restart", "queued"];
 var timeKinds = ["daily", "weekdays", "once"];
-var fields = ["power", "screensaver", "app", "muted", "volume", "health"];
+var fields = ["power", "screensaver", "app", "muted", "volume", "health", "playing"];
 var ops = ["is", "isNot", "gt", "lt", "between"];
 var powerValues = ["on", "standby", "unknown"];
 var screensaverValues = ["active", "inactive", "unknown"];
@@ -69,7 +69,7 @@ function canonicalValue(field, op, value) {
             ? Number(value[1]) : NaN;
         return [isNaN(low) ? 0 : low, isNaN(high) ? 100 : high];
     }
-    if (field === "muted") {
+    if (field === "muted" || field === "playing") {
         return value === true;
     }
     if (field === "volume") {
@@ -226,7 +226,7 @@ function conditionValueJson(node) {
             ? node.value : [0, 100];
         return [Number(pair[0]), Number(pair[1])];
     }
-    if (node.field === "muted") {
+    if (node.field === "muted" || node.field === "playing") {
         return node.value === true;
     }
     if (node.field === "volume") {

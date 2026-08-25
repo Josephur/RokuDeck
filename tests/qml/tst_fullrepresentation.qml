@@ -389,4 +389,16 @@ TestCase {
         verify(!findChild(fixture.full, "activeAppValue").visible);
         verify(!findChild(fixture.full, "detailStatusTv").visible);
     }
+
+    function test_thisPcDetailHidesTheRemoteButKeepsCeiling() {
+        const fixture = createFull([{
+            serial: "LOCAL-PC",
+            name: "This PC",
+            capabilities: ["power", "volume", "mute", "navigation", "playback"]
+        }]);
+        // There is nothing to press on the machine the daemon runs on.
+        verify(!findChild(fixture.full, "remoteControls").visible);
+        // Rename and the volume ceiling remain fully usable.
+        verify(findChild(fixture.full, "volumeCeilingSpinbox").visible);
+    }
 }

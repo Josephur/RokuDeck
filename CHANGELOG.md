@@ -6,6 +6,21 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- RokuDeck now reacts to the machine it runs on: the daemon auto-creates a reserved
+  **This PC** device (`LOCAL-PC`) that cannot be removed and always allows automations
+  (rename and volume ceiling stay user-controlled). An enabled rule that names This PC —
+  or reaches it through the wildcard — keeps the daemon alive like scheduled rules do.
+- This PC state flows from the local machine itself: a 2 s PipeWire poll (`wpctl`) feeds
+  volume/mute readings (three consecutive failures flip health to `offline`), and an MPRIS
+  watcher tracks every media player on the session bus into a new boolean `playing` field.
+  Rules can trigger on `playing` and use it in conditions (`is`/`isNot`).
+- Automations acting on This PC execute exactly instead of approximately: `setVolume`
+  clamps through the volume ceiling then runs `wpctl set-volume` absolutely (no nudge walk),
+  and `mute` runs `wpctl set-mute` only when the observed state differs. Keypresses and app
+  launches aimed at This PC count as rejected attempts.
+- The widget's device detail page hides the remote controls for This PC (nothing to press);
+  renaming and the volume ceiling remain available. The rule editor's field picker gains
+  `playing` with a Playing/Paused switch.
 - Rules gain `single`/`restart`/`queued` execution modes: every trigger origin (schedules,
   state changes, manual runs) passes the rule's mode gate — `single` drops firings that
   arrive while a run is active, `restart` supersedes the active run mid-flight (cooperative

@@ -100,13 +100,18 @@ RowLayout {
 
         objectName: root.objectName.length > 0 ? root.objectName + "Combo" : ""
 
-        visible: !root.isBetween && root.field === "muted"
+        visible: !root.isBetween && (root.field === "muted" || root.field === "playing")
         Layout.fillWidth: true
         textRole: "label"
-        model: [
-            { label: KI18n.i18nc("@option", "Muted"), flag: true },
-            { label: KI18n.i18nc("@option", "Unmuted"), flag: false }
-        ]
+        model: root.field === "playing"
+            ? [
+                { label: KI18n.i18nc("@option", "Playing"), flag: true },
+                { label: KI18n.i18nc("@option", "Paused"), flag: false }
+            ]
+            : [
+                { label: KI18n.i18nc("@option", "Muted"), flag: true },
+                { label: KI18n.i18nc("@option", "Unmuted"), flag: false }
+            ]
         onActivated: index => {
             root.value = model[index].flag;
             root.valueEdited(root.value);

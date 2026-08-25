@@ -39,6 +39,9 @@ Item {
     readonly property string friendlyName: displayName.length > 0
         ? displayName
         : KI18n.i18n("Unnamed Roku device")
+    // This PC has no remote: there is nothing on the daemon's own machine to
+    // press, so the controls section collapses entirely (rename + ceiling stay).
+    readonly property bool isLocalPc: root.serial === "LOCAL-PC"
     // The daemon reports "unknown" whenever it could not determine the screen
     // saver state, so never collapse that into a definite "Inactive" claim.
     readonly property string screensaverText: {
@@ -161,7 +164,10 @@ Item {
         }
 
         RemoteControls {
+            objectName: "remoteControls"
+
             Layout.fillWidth: true
+            visible: !root.isLocalPc
             bridge: root.bridge
             visibleControls: root.visibleControls
             serial: root.serial

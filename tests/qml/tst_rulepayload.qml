@@ -503,4 +503,33 @@ TestCase {
         compare(rebuilt.trigger.value, true, "booleans stay booleans");
         compare(typeof rebuilt.actions[0].volume, "number", "volumes stay numeric");
     }
+
+    function test_playingFieldJoinsTheVocabulary() {
+        verify(RulePayload.fields.indexOf("playing") >= 0,
+               "the editor field picker must list playing");
+        compare(RulePayload.canonicalValue("playing", "is", true), true);
+        compare(RulePayload.canonicalValue("playing", "is", false), false);
+        // Strings and numbers collapse to a plain boolean, mirroring muted.
+        compare(RulePayload.canonicalValue("playing", "is", "true"), false);
+        const leaf = RulePayload.nodeToForm(
+            { leaf: { device: "LOCAL-PC", field: "playing", op: "is", value: true } });
+        compare(leaf.value, true);
+        compare(RulePayload.conditionValueJson(leaf), true);
+
+        const problems = RulePayload.validatePredicate("playing", "is", true);
+        compare(problems.length, 0);
+    }
+
+    function test_playingStateChangeRoundTripsByteForByte() {
+        const payload = RulePayload.buildPayload(blankWith({
+            name: "Now playing",
+            devices: ["LOCAL-PC"],
+            trigger: { type: "stateChange", field: "playing", op: "is", value: true },
+            actions: [{ type: "mute", muted: true }]
+        }), null);
+        compare(payload,
+                '{"name":"Now playing","mode":"queued","devices":["LOCAL-PC"],'
+                + '"trigger":{"type":"stateChange","field":"playing","op":"is","value":true},'
+                + '"actions":[{"type":"mute","muted":true}]}');
+    }
 }
