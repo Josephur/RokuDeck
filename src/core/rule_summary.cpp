@@ -169,11 +169,26 @@ namespace {
 QString ruleSummary(const QJsonObject& rule) {
     QStringList parts;
 
-    const QString trigger = renderTrigger(rule.value(QStringLiteral("trigger")).toObject());
+    const QJsonObject triggerObject =
+        rule.value(QStringLiteral("trigger")).toObject();
+    const QString trigger = renderTrigger(triggerObject);
     if (trigger.isEmpty()) {
         return QStringLiteral("Custom rule");
     }
     parts.append(trigger);
+
+    // An activeWindow block appends its span; one the renderer cannot read
+    // degrades the whole rule rather than showing a half-truth.
+    if (triggerObject.contains(QStringLiteral("activeWindow"))) {
+        const QJsonObject window =
+            triggerObject.value(QStringLiteral("activeWindow")).toObject();
+        const QString start = window.value(QStringLiteral("start")).toString();
+        const QString end = window.value(QStringLiteral("end")).toString();
+        if (start.isEmpty() || end.isEmpty()) {
+            return QStringLiteral("Custom rule");
+        }
+        parts.append(QStringLiteral("active %1\u2013%2").arg(start, end));
+    }
 
     const QJsonArray actions = rule.value(QStringLiteral("actions")).toArray();
     if (actions.isEmpty()) {

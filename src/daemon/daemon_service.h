@@ -244,10 +244,11 @@ class DaemonService final : public QObject, protected QDBusContext {
     // one — otherwise they describe the live replacement.
     void finishRuleRun(const QString& ruleId,
                        const std::shared_ptr<std::atomic_bool>& token);
-    // Records a mode-suppressed firing: only the lastRun fields are written
-    // behind the find-rule guard (never a whole-struct clobber), then the
-    // rules are announced — mirroring the targeted-writeback pattern.
-    void recordDroppedFiring(const QString& ruleId);
+    // Records a suppressed firing (mode drop, inactive window): only the
+    // lastRun fields are written behind the find-rule guard (never a
+    // whole-struct clobber), then the rules are announced — mirroring the
+    // targeted-writeback pattern.
+    void recordSuppressedFiring(const QString& ruleId, const QString& outcome);
     [[nodiscard]] static QString devicesJson(const QList<DeviceRecord>& devices);
     [[nodiscard]] static QJsonObject deviceObject(const DeviceRecord& device);
     [[nodiscard]] static QString snapshotJson(const DeviceSnapshot& snapshot,

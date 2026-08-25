@@ -221,6 +221,9 @@ class DaemonDbusTest final : public QObject {
     void singleModeThirdFiringDuringActiveRunIsDropped();
     void runRuleOnDisabledRuleIsTypedRejected();
     void stateChangeEdgeOnDisabledRuleDoesNotFire();
+    void windowedRuleFiresInsideAndRecordsInactiveOutside();
+    void windowBoundariesAreInclusiveStartExclusiveEnd();
+    void scheduledWindowedRuleRecordsInactiveWindow();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -3871,6 +3874,102 @@ void DaemonDbusTest::stateChangeEdgeOnDisabledRuleDoesNotFire() {
                   .toObject()
                   .contains(QStringLiteral("lastRun")),
              "a skipped firing must not record a last-run entry");
+}
+
+void DaemonDbusTest::windowedRuleFiresInsideAndRecordsInactiveOutside() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.50")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Overnight guard","devices":["SERIAL-A"],"trigger":{"type":"manual",)json"
+        R"json("activeWindow":{"start":"22:00","end":"08:00"}},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    // Midday: the firing is recorded, announced and dispatches nothing.
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(12, 0));
+    const QDBusMessage noon = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(noon.type() != QDBusMessage::ErrorMessage, qPrintable(noon.errorMessage()));
+    QCOMPARE(noon.arguments().front().toString(), QStringLiteral("inactive-window"));
+    QVERIFY(m_runner->requests.isEmpty());
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    QVERIFY2(outcomes.contains(QStringLiteral("inactive-window")),
+             "an out-of-window firing must be announced as inactive-window");
+    QJsonObject stored = rulesListing()
+                             .value(QStringLiteral("rules"))
+                             .toArray()
+                             .at(0)
+                             .toObject();
+    QCOMPARE(stored.value(QStringLiteral("id")).toString(), ruleId);
+    QCOMPARE(stored.value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("inactive-window"));
+    QVERIFY2(!stored.value(QStringLiteral("lastRun"))
+                  .toObject()
+                  .value(QStringLiteral("lastFiredAt"))
+                  .toString()
+                  .isEmpty(),
+             "an inactive-window record must carry its timestamp");
+
+    // 23:00 sits inside a window that wraps midnight.
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(23, 0));
+    startRunnerCompleter();
+    const QDBusMessage night = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(night.type() != QDBusMessage::ErrorMessage, qPrintable(night.errorMessage()));
+    QCOMPARE(night.arguments().front().toString(), QStringLiteral("ok"));
+
+    // 07:00 is on the far side of the wrap, still inside.
+    m_now = QDateTime(QDate(2026, 1, 6), QTime(7, 0));
+    startRunnerCompleter();
+    const QDBusMessage morning = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(morning.type() != QDBusMessage::ErrorMessage,
+             qPrintable(morning.errorMessage()));
+    QCOMPARE(homeKeypressCount(), 2);
+}
+
+void DaemonDbusTest::windowBoundariesAreInclusiveStartExclusiveEnd() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.51")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Evening only","devices":["SERIAL-A"],"trigger":{"type":"manual",)json"
+        R"json("activeWindow":{"start":"09:00","end":"10:00"}},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(9, 0));  // exactly start: fires
+    startRunnerCompleter();
+    const QDBusMessage opening = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QCOMPARE(opening.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(homeKeypressCount(), 1);
+
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(10, 0));  // exactly end: gated
+    const QDBusMessage closing = waitForReply(m_proxy->RunRule(ruleId));
+    QCOMPARE(closing.arguments().front().toString(), QStringLiteral("inactive-window"));
+    QCOMPARE(homeKeypressCount(), 1);
+}
+
+void DaemonDbusTest::scheduledWindowedRuleRecordsInactiveWindow() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.52")});
+    // The schedule fires daily at 09:00; its own window forbids that instant.
+    addRuleReturningId(QStringLiteral(
+        R"json({"name":"Never at nine","devices":["SERIAL-A"],"trigger":{"type":"time",)json"
+        R"json("kind":"daily","time":"09:00","activeWindow":{"start":"22:00","end":"08:00"}},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    m_now = QDateTime(QDate(2026, 1, 5), QTime(9, 0));
+    m_daemon->evaluateDueRules();
+
+    // The scheduled origin hits the same gate: nothing dispatches, yet the
+    // skipped occurrence is recorded and announced like a manual one.
+    QVERIFY(m_runner->requests.isEmpty());
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    QVERIFY2(outcomes.contains(QStringLiteral("inactive-window")),
+             "the scheduled origin must record inactive-window too");
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

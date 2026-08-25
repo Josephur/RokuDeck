@@ -251,6 +251,23 @@ struct DiscoveryResult {
     return discovery;
 }
 
+// Ruling 2: a window spans [start, end) on the local wall clock — inclusive
+// start, exclusive end — and end < start wraps midnight (22:00→08:00 spans
+// overnight). parseRule guarantees start != end and HH:MM validity; an
+// unparsable legacy bound fails open rather than suppressing firings.
+[[nodiscard]] bool timeWithinWindow(const QTime& now, const QString& startText,
+                                    const QString& endText) {
+    const QTime start = QTime::fromString(startText, QStringLiteral("HH:mm"));
+    const QTime end = QTime::fromString(endText, QStringLiteral("HH:mm"));
+    if (!start.isValid() || !end.isValid()) {
+        return true;
+    }
+    if (start < end) {
+        return now >= start && now < end;
+    }
+    return now >= start || now < end;  // wraps midnight
+}
+
 } // namespace
 
 DaemonService::DaemonService(QDBusConnection connection,
@@ -1171,6 +1188,17 @@ QString DaemonService::requestRuleFire(const QString& ruleId) {
     if (existing == m_rules.end() || !existing->enabled) {
         return {};  // erased or disabled between scheduling and firing
     }
+
+    // Ruling 1: the time-of-day window gates BEFORE the mode machine —
+    // outside it this firing never happened, whatever the run states say.
+    // Every origin (scheduled, state edge, D-Bus RunRule) funnels through
+    // here, so one check covers them all.
+    if (existing->trigger.activeWindow.has_value()
+        && !timeWithinWindow(m_wallClock().time(),
+            existing->trigger.activeWindow->start, existing->trigger.activeWindow->end)) {
+        recordSuppressedFiring(ruleId, QStringLiteral("inactive-window"));
+        return QStringLiteral("inactive-window");
+    }
     const QString mode = existing->mode;
 
     // The §4 mode gate: one Active run per rule, plus a single queued slot in
@@ -1183,13 +1211,13 @@ QString DaemonService::requestRuleFire(const QString& ruleId) {
             // Both slots busy (single/queued), or restart merely replaces the
             // coalesced pending firing with this fresher one — still one slot.
             if (mode != QStringLiteral("restart")) {
-                recordDroppedFiring(ruleId);
+                recordSuppressedFiring(ruleId, QStringLiteral("dropped"));
                 return QStringLiteral("dropped");
             }
             return {};
         }
         if (mode == QStringLiteral("single")) {
-            recordDroppedFiring(ruleId);
+            recordSuppressedFiring(ruleId, QStringLiteral("dropped"));
             return QStringLiteral("dropped");
         }
         if (mode != QStringLiteral("restart")) {  // queued, active run in flight
@@ -1241,10 +1269,10 @@ void DaemonService::finishRuleRun(const QString& ruleId,
     m_runStates.remove(ruleId);
 }
 
-void DaemonService::recordDroppedFiring(const QString& ruleId) {
+void DaemonService::recordSuppressedFiring(const QString& ruleId, const QString& outcome) {
     if (const auto record = findRule(ruleId); record != m_rules.end()) {
         record->lastRun.firedAtIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
-        record->lastRun.outcome = QStringLiteral("dropped");
+        record->lastRun.outcome = outcome;
     }
     announceRules();
 }

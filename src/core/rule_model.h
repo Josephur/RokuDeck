@@ -49,6 +49,14 @@ struct ActionNode {
     QList<ActionNode> elseActions;
 };
 
+// A time-of-day window restricting WHEN a trigger may fire (spec §2). The
+// bounds stay strings in HH:MM form so documents round-trip byte-identically;
+// start == end is rejected at parse time and end < start wraps midnight.
+struct TimeWindow {
+    QString start;
+    QString end;
+};
+
 struct TriggerSpec {
     QString type;  // time|interval|stateChange|manual
     QString timeKind;  // daily|weekdays|once
@@ -56,6 +64,7 @@ struct TriggerSpec {
     QString date;  // YYYY-MM-DD, once only
     int minutes = 0;  // interval
     FieldPredicate stateChange;
+    std::optional<TimeWindow> activeWindow;  // any type
 };
 
 struct RuleLastRun {

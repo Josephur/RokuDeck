@@ -33,6 +33,38 @@ constexpr int maximumDepth = 16;
     return ops.contains(op);
 }
 
+// The optional activeWindow block shared by every trigger type: exact inner
+// keys, HH:MM bounds, and a non-degenerate span (end < start wraps midnight).
+[[nodiscard]] ParseResult<std::optional<TimeWindow>> parseActiveWindow(
+    const QJsonObject& trigger)
+{
+    if (!trigger.contains(QStringLiteral("activeWindow"))) {
+        return {std::nullopt};
+    }
+    const QJsonObject window = trigger.value(QStringLiteral("activeWindow")).toObject();
+    if (!exactKeys(window,
+            {QStringLiteral("start"), QStringLiteral("end")})) {
+        return {ParseError{ParseError::Code::InvalidValue,
+            QStringLiteral("active window takes start and end")}};
+    }
+    const QString start = window.value(QStringLiteral("start")).toString();
+    const QString end = window.value(QStringLiteral("end")).toString();
+    const QTime startTime = QTime::fromString(start, QStringLiteral("HH:mm"));
+    const QTime endTime = QTime::fromString(end, QStringLiteral("HH:mm"));
+    if (!startTime.isValid() || !endTime.isValid()) {
+        return {ParseError{ParseError::Code::InvalidValue,
+            QStringLiteral("active window bounds must be HH:MM")}};
+    }
+    if (startTime == endTime) {
+        return {ParseError{ParseError::Code::InvalidValue,
+            QStringLiteral("degenerate window")}};
+    }
+    TimeWindow parsed;
+    parsed.start = start;
+    parsed.end = end;
+    return {std::optional<TimeWindow>{std::move(parsed)}};
+}
+
 [[nodiscard]] ParseResult<FieldPredicate> parsePredicate(
     const QJsonObject& object, int depth)
 {
@@ -193,21 +225,37 @@ constexpr int maximumDepth = 16;
     TriggerSpec trigger;
     trigger.type = type;
 
+    // Every type accepts the optional activeWindow block; validate it up
+    // front so each branch only extends its exact-key set.
+    auto window = parseActiveWindow(object);
+    if (!window) {
+        return {ParseError{window.error()}};
+    }
+    const bool hasWindow = window.value().has_value();
+
     if (type == QStringLiteral("manual")) {
-        if (!exactKeys(object, {QStringLiteral("type")})) {
+        if (!exactKeys(object,
+                hasWindow ? QStringList{QStringLiteral("type"),
+                                             QStringLiteral("activeWindow")}
+                          : QStringList{QStringLiteral("type")})) {
             return {ParseError{ParseError::Code::InvalidValue,
                 QStringLiteral("manual trigger takes no options")}};
         }
+        trigger.activeWindow = std::move(window.value());
         return {std::move(trigger)};
     }
 
     if (type == QStringLiteral("time")) {
         const bool hasDate = object.contains(QStringLiteral("date"));
-        if (!exactKeys(object,
-                hasDate ? QStringList{QStringLiteral("type"), QStringLiteral("kind"),
-                            QStringLiteral("time"), QStringLiteral("date")}
-                        : QStringList{QStringLiteral("type"), QStringLiteral("kind"),
-                            QStringLiteral("time")})) {
+        QStringList expected{QStringLiteral("type"), QStringLiteral("kind"),
+            QStringLiteral("time")};
+        if (hasDate) {
+            expected.append(QStringLiteral("date"));
+        }
+        if (hasWindow) {
+            expected.append(QStringLiteral("activeWindow"));
+        }
+        if (!exactKeys(object, expected)) {
             return {ParseError{ParseError::Code::InvalidValue,
                 QStringLiteral("time trigger keys mismatch")}};
         }
@@ -227,7 +275,7 @@ constexpr int maximumDepth = 16;
             if (!hasDate
                 || QDate::fromString(trigger.date = object.value(
                                          QStringLiteral("date")).toString(),
-                       QStringLiteral("yyyy-MM-dd")).isNull()) {
+                        QStringLiteral("yyyy-MM-dd")).isNull()) {
                 return {ParseError{ParseError::Code::InvalidValue,
                     QStringLiteral("once needs date YYYY-MM-DD")}};
             }
@@ -235,11 +283,17 @@ constexpr int maximumDepth = 16;
             return {ParseError{ParseError::Code::InvalidValue,
                 QStringLiteral("date only valid for once")}};
         }
+        trigger.activeWindow = std::move(window.value());
         return {std::move(trigger)};
     }
 
     if (type == QStringLiteral("interval")) {
-        if (!exactKeys(object, {QStringLiteral("type"), QStringLiteral("minutes")})) {
+        if (!exactKeys(object,
+                hasWindow ? QStringList{QStringLiteral("type"),
+                                             QStringLiteral("minutes"),
+                                             QStringLiteral("activeWindow")}
+                          : QStringList{QStringLiteral("type"),
+                                QStringLiteral("minutes")})) {
             return {ParseError{ParseError::Code::InvalidValue,
                 QStringLiteral("interval keys mismatch")}};
         }
@@ -248,18 +302,22 @@ constexpr int maximumDepth = 16;
             return {ParseError{ParseError::Code::InvalidValue,
                 QStringLiteral("interval minutes must be 5..1440")}};
         }
+        trigger.activeWindow = std::move(window.value());
         return {std::move(trigger)};
     }
 
     // stateChange: the optional device key scopes the trigger to one serial;
     // absent keeps the wildcard "any device" meaning existing rules rely on.
     const bool hasDevice = object.contains(QStringLiteral("device"));
-    if (!exactKeys(object,
-            hasDevice ? QStringList{QStringLiteral("type"), QStringLiteral("device"),
-                                     QStringLiteral("field"), QStringLiteral("op"),
-                                     QStringLiteral("value")}
-                      : QStringList{QStringLiteral("type"), QStringLiteral("field"),
-                                    QStringLiteral("op"), QStringLiteral("value")})) {
+    QStringList stateChangeKeys{QStringLiteral("type"), QStringLiteral("field"),
+        QStringLiteral("op"), QStringLiteral("value")};
+    if (hasDevice) {
+        stateChangeKeys.insert(1, QStringLiteral("device"));
+    }
+    if (hasWindow) {
+        stateChangeKeys.append(QStringLiteral("activeWindow"));
+    }
+    if (!exactKeys(object, stateChangeKeys)) {
         return {ParseError{ParseError::Code::InvalidValue,
             QStringLiteral("stateChange keys mismatch")}};
     }
@@ -286,6 +344,7 @@ constexpr int maximumDepth = 16;
         return {ParseError{predicate.error()}};
     }
     trigger.stateChange = std::move(predicate.value());
+    trigger.activeWindow = std::move(window.value());
     return {std::move(trigger)};
 }
 
@@ -604,6 +663,11 @@ QJsonObject ruleJson(const RuleDocument& rule)
         trigger.insert(QStringLiteral("field"), rule.trigger.stateChange.field);
         trigger.insert(QStringLiteral("op"), rule.trigger.stateChange.op);
         trigger.insert(QStringLiteral("value"), rule.trigger.stateChange.value);
+    }
+    if (rule.trigger.activeWindow.has_value()) {
+        trigger.insert(QStringLiteral("activeWindow"),
+            QJsonObject{{QStringLiteral("start"), rule.trigger.activeWindow->start},
+                {QStringLiteral("end"), rule.trigger.activeWindow->end}});
     }
     object.insert(QStringLiteral("trigger"), trigger);
 

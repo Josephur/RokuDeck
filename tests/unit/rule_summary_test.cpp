@@ -122,6 +122,17 @@ void RuleSummaryTest::rendersKnownTriggerAndActionShapes_data() {
         << fixtureRule(trigger("manual"_L1), QJsonArray{QJsonObject{{"type"_L1, "runRule"_L1},
                                                                    {"id"_L1, "rABC123"_L1}}})
         << QStringLiteral("Manually run \u00b7 Run rule rABC123");
+    QTest::newRow("daily-window")
+        << fixtureRule(QJsonObject{{"type"_L1, "time"_L1},
+                                   {"kind"_L1, "daily"_L1},
+                                   {"time"_L1, "22:00"_L1},
+                                   {"activeWindow"_L1,
+                                    QJsonObject{{"start"_L1, "22:00"_L1},
+                                                {"end"_L1, "08:00"_L1}}}},
+                       QJsonArray{QJsonObject{{"type"_L1, "keypress"_L1},
+                                              {"key"_L1, "Home"_L1}}})
+        << QStringLiteral(
+            "Daily at 22:00 \u00b7 active 22:00\u201308:00 \u00b7 Press Home");
 
     const QJsonObject conditionalAction{
         {"type"_L1, "ifThenElse"_L1},
@@ -164,6 +175,13 @@ void RuleSummaryTest::degradesUnknownTypesToCustomRule() {
     const QJsonObject unknownAction =
         fixtureRule(trigger("manual"_L1), QJsonArray{QJsonObject{{"type"_L1, "teleport"_L1}}});
     QCOMPARE(ruleSummary(unknownAction), QStringLiteral("Custom rule"));
+
+    // A window block the renderer cannot read degrades the whole rule.
+    const QJsonObject unreadableWindow = fixtureRule(
+        QJsonObject{{"type"_L1, "manual"_L1},
+                    {"activeWindow"_L1, QJsonObject{{"start"_L1, ""_L1}}}},
+        QJsonArray{QJsonObject{{"type"_L1, "keypress"_L1}, {"key"_L1, "Home"_L1}}});
+    QCOMPARE(ruleSummary(unreadableWindow), QStringLiteral("Custom rule"));
 }
 
 void RuleSummaryTest::toleratesMalformedDocuments() {

@@ -86,6 +86,7 @@ private Q_SLOTS:
     void parsesAndSerializesACompleteRule();
     void parsesPlayingFieldsAndRejectsNonBooleanValues();
     void parsesDeviceScopedStateChangeTriggers();
+    void parsesActiveWindowsOnEveryTriggerType();
     void rejectsMalformedRules_data();
     void rejectsMalformedRules();
     void rejectsOverlyDeepConditions();
@@ -225,6 +226,65 @@ void RuleModelTest::parsesDeviceScopedStateChangeTriggers()
         "wildcard stateChange must not serialize a device key");
 }
 
+void RuleModelTest::parsesActiveWindowsOnEveryTriggerType()
+{
+    const QJsonObject window{{QStringLiteral("start"), QStringLiteral("22:00")},
+        {QStringLiteral("end"), QStringLiteral("08:00")}};
+    const QJsonObject base{{"schemaVersion"_L1, 1},
+        {"name"_L1, "windowed"_L1},
+        {"actions"_L1, QJsonArray{keypressAction(QStringLiteral("Home"))}}};
+
+    // Every trigger type carries the optional block.
+    const QList<QJsonObject> triggers{
+        QJsonObject{{"type"_L1, "time"_L1}, {"kind"_L1, "daily"_L1},
+            {"time"_L1, "23:00"_L1}, {"activeWindow"_L1, window}},
+        QJsonObject{{"type"_L1, "interval"_L1}, {"minutes"_L1, 30},
+            {"activeWindow"_L1, window}},
+        QJsonObject{{"type"_L1, "stateChange"_L1}, {"device"_L1, "SERIAL-B"_L1},
+            {"field"_L1, "playing"_L1}, {"op"_L1, "is"_L1}, {"value"_L1, true},
+            {"activeWindow"_L1, window}},
+        QJsonObject{{"type"_L1, "manual"_L1}, {"activeWindow"_L1, window}},
+        // The once variant composes with its date key too.
+        QJsonObject{{"type"_L1, "time"_L1}, {"kind"_L1, "once"_L1},
+            {"time"_L1, "23:00"_L1}, {"date"_L1, "2026-09-01"_L1},
+            {"activeWindow"_L1, window}}};
+    for (const QJsonObject& trigger : triggers) {
+        QJsonObject document = base;
+        document.insert(QStringLiteral("trigger"), trigger);
+        const auto parsed = parseRule(document);
+        if (!parsed.has_value()) {
+            QFAIL(qPrintable(parsed.error().message));
+        }
+        QVERIFY2(parsed.value().trigger.activeWindow.has_value(),
+            qPrintable(QStringLiteral("window missing for type %1").arg(trigger.value(
+                QStringLiteral("type")).toString())));
+        QCOMPARE(parsed.value().trigger.activeWindow->start, "22:00"_L1);
+        QCOMPARE(parsed.value().trigger.activeWindow->end, "08:00"_L1);
+
+        // Round trip: the window survives serialization and re-parses.
+        const auto reparsed = parseRule(ruleJson(parsed.value()));
+        if (!reparsed.has_value()) {
+            QFAIL(qPrintable(reparsed.error().message));
+        }
+        QVERIFY(reparsed.value().trigger.activeWindow.has_value());
+        QCOMPARE(reparsed.value().trigger.activeWindow->start, "22:00"_L1);
+        QCOMPARE(reparsed.value().trigger.activeWindow->end, "08:00"_L1);
+    }
+
+    // Absent stays absent.
+    QJsonObject plain = base;
+    plain.insert(QStringLiteral("trigger"),
+        QJsonObject{{"type"_L1, "manual"_L1}});
+    const auto unparsed = parseRule(plain);
+    QVERIFY(unparsed.has_value());
+    QVERIFY(!unparsed.value().trigger.activeWindow.has_value());
+    QVERIFY2(!ruleJson(unparsed.value())
+                  .value(QStringLiteral("trigger"))
+                  .toObject()
+                  .contains(QStringLiteral("activeWindow")),
+        "an absent window must not serialize");
+}
+
 void RuleModelTest::rejectsMalformedRules_data()
 {
     QTest::addColumn<QJsonObject>("document");
@@ -313,6 +373,41 @@ void RuleModelTest::rejectsMalformedRules_data()
                        {"value"_L1, "on"_L1}});
            })
         << "device";
+    QTest::newRow("window-degenerate")
+        << mutated([](QJsonObject& o) {
+               o.insert("trigger"_L1,
+                   QJsonObject{{"type"_L1, "manual"_L1},
+                       {"activeWindow"_L1,
+                           QJsonObject{{"start"_L1, "22:00"_L1},
+                                       {"end"_L1, "22:00"_L1}}}});
+           })
+        << "degenerate window";
+    QTest::newRow("window-bad-start")
+        << mutated([](QJsonObject& o) {
+               o.insert("trigger"_L1,
+                   QJsonObject{{"type"_L1, "manual"_L1},
+                       {"activeWindow"_L1,
+                           QJsonObject{{"start"_L1, "25:99"_L1},
+                                       {"end"_L1, "08:00"_L1}}}});
+           })
+        << "HH:MM";
+    QTest::newRow("window-bad-end-type")
+        << mutated([](QJsonObject& o) {
+               o.insert("trigger"_L1,
+                   QJsonObject{{"type"_L1, "manual"_L1},
+                       {"activeWindow"_L1,
+                           QJsonObject{{"start"_L1, "22:00"_L1},
+                                       {"end"_L1, 800}}}});
+           })
+        << "HH:MM";
+    QTest::newRow("window-inner-keys-mismatch")
+        << mutated([](QJsonObject& o) {
+               o.insert("trigger"_L1,
+                   QJsonObject{{"type"_L1, "manual"_L1},
+                       {"activeWindow"_L1,
+                           QJsonObject{{"start"_L1, "22:00"_L1}}}});
+           })
+        << "active window";
     QTest::newRow("unknown-action")
         << mutated([](QJsonObject& o) {
                o.insert("actions"_L1,
