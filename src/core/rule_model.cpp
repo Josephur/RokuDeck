@@ -358,7 +358,7 @@ constexpr int maximumDepth = 16;
     static const QStringList allowedTypes{QStringLiteral("keypress"),
         QStringLiteral("launchApp"), QStringLiteral("setVolume"),
         QStringLiteral("mute"), QStringLiteral("delay"), QStringLiteral("runRule"),
-        QStringLiteral("ifThenElse")};
+        QStringLiteral("runScript"), QStringLiteral("ifThenElse")};
     ActionNode action;
     action.type = object.value(QStringLiteral("type")).toString();
     if (!allowedTypes.contains(action.type)) {
@@ -447,6 +447,28 @@ constexpr int maximumDepth = 16;
         return {std::move(action)};
     }
 
+    if (action.type == QStringLiteral("runScript")) {
+        // Rules reference scripts BY NAME: raw command strings never cross
+        // D-Bus, and the name charset keeps the file inside one directory.
+        if (!exactKeys(object, {QStringLiteral("type"), QStringLiteral("script")})) {
+            return {ParseError{ParseError::Code::InvalidValue,
+                QStringLiteral("runScript keys mismatch")}};
+        }
+        const QJsonValue script = object.value(QStringLiteral("script"));
+        if (!script.isString()) {
+            return {ParseError{ParseError::Code::InvalidValue,
+                QStringLiteral("runScript name must be a string")}};
+        }
+        static const QRegularExpression safeScriptName(
+            QStringLiteral("^[a-z0-9][a-z0-9_-]{0,63}$"));
+        action.script = script.toString();
+        if (!safeScriptName.match(action.script).hasMatch()) {
+            return {ParseError{ParseError::Code::InvalidValue,
+                QStringLiteral("runScript name invalid")}};
+        }
+        return {std::move(action)};
+    }
+
     // ifThenElse
     if (!exactKeys(object, {QStringLiteral("type"), QStringLiteral("cond"),
                             QStringLiteral("then"), QStringLiteral("else")})
@@ -501,6 +523,8 @@ constexpr int maximumDepth = 16;
         object.insert(QStringLiteral("seconds"), action.delaySeconds);
     } else if (action.type == QStringLiteral("runRule")) {
         object.insert(QStringLiteral("id"), action.ruleId);
+    } else if (action.type == QStringLiteral("runScript")) {
+        object.insert(QStringLiteral("script"), action.script);
     } else if (action.type == QStringLiteral("ifThenElse")) {
         auto cond = conditionJson(action.condition, depth + 1);
         if (!cond) {

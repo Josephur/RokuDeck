@@ -51,6 +51,7 @@ class DaemonService final : public QObject, protected QDBusContext {
         DeadlineRemaining deadlineRemaining = {},
         WallClock wallClock = {},
         std::chrono::milliseconds localPcPollInterval = std::chrono::seconds(2),
+        QString scriptsDir = {},
         QObject* parent = nullptr);
     ~DaemonService() override;
 
@@ -293,6 +294,10 @@ class DaemonService final : public QObject, protected QDBusContext {
     QHash<QString, QList<QDBusMessage>> m_deviceTestReplies;
     QHash<QString, QQueue<QueuedCommand>> m_commandQueues;
     QSet<QString> m_activeCommandSerials;
+    // The scripts directory runScript steps execute from (ruling 3): an
+    // injected path for tests, else AppDataLocation + "/scripts", resolved
+    // once at construction.
+    QString m_scriptsDirectory;
     bool m_registeredOnBus = false;
     bool m_discoveryActive = false;
     bool m_pollingEnabled = true;

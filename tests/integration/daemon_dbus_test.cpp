@@ -15,8 +15,11 @@
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDateTime>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -224,6 +227,10 @@ class DaemonDbusTest final : public QObject {
     void windowedRuleFiresInsideAndRecordsInactiveOutside();
     void windowBoundariesAreInclusiveStartExclusiveEnd();
     void scheduledWindowedRuleRecordsInactiveWindow();
+    void runScriptHappyRunIsDeliveredAsOk();
+    void runScriptNonZeroExitFailsTheRun();
+    void runScriptRejectsBadFilesWithoutTraffic();
+    void addRuleRejectsInvalidScriptNames();
 
   private:
     [[nodiscard]] QDBusMessage call(const QString& method,
@@ -237,7 +244,8 @@ class DaemonDbusTest final : public QObject {
     void recreateDaemon(std::chrono::milliseconds idleGrace = 30s,
                         DaemonService::DeadlineRemaining deadlineRemaining = {},
                         DaemonService::WallClock wallClock = {},
-                        std::chrono::milliseconds localPcPollInterval = 1h);
+                        std::chrono::milliseconds localPcPollInterval = 1h,
+                        const QString& scriptsDir = {});
     QString addManualRule(const QString& name);
     QString addRuleReturningId(const QString& payload);
     QJsonObject rulesListing() const;
@@ -302,7 +310,8 @@ void DaemonDbusTest::init() {
 void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
                                     DaemonService::DeadlineRemaining deadlineRemaining,
                                     DaemonService::WallClock wallClock,
-                                    std::chrono::milliseconds localPcPollInterval) {
+                                    std::chrono::milliseconds localPcPollInterval,
+                                    const QString& scriptsDir) {
     m_proxy.reset();
     m_daemon.reset();
     auto runner = std::make_unique<FakeProcessRunner>();
@@ -312,7 +321,7 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
     m_daemon = std::make_unique<DaemonService>(
         QDBusConnection::sessionBus(), [this] { return m_automationEnabled; }, std::move(runner),
         std::move(configStore), idleGrace, std::move(deadlineRemaining), std::move(wallClock),
-        localPcPollInterval);
+        localPcPollInterval, scriptsDir);
     QVERIFY2(m_daemon->registerOnBus(),
              "the test daemon could not own its private session-bus name");
     if (!m_clientConnection) {
@@ -3970,6 +3979,140 @@ void DaemonDbusTest::scheduledWindowedRuleRecordsInactiveWindow() {
     const QStringList outcomes = announcedLastRunOutcomes(changed);
     QVERIFY2(outcomes.contains(QStringLiteral("inactive-window")),
              "the scheduled origin must record inactive-window too");
+}
+
+void DaemonDbusTest::runScriptHappyRunIsDeliveredAsOk() {
+    // Contract pin: scripts get their own generous completion budget.
+    QCOMPARE(CommandContract::scriptTimeoutMs, 30000);
+
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.53")});
+    QTemporaryDir scripts;
+    QVERIFY(scripts.isValid());
+    const QString scriptPath = scripts.filePath(QStringLiteral("movie-night"));
+    {
+        QFile script(scriptPath);
+        QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Text));
+        QVERIFY(script.write("#!/bin/sh\nexit 0\n") > 0);
+        script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    }
+    recreateDaemon(30s, {}, [this] { return m_now; }, 1h, scripts.path());
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Movie night","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"runScript","script":"movie-night"}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    // The script runs as itself — program-routed, no arguments, no shell.
+    QCOMPARE(m_runner->requests.size(), 1);
+    QCOMPARE(m_runner->lastRequest.program,
+             QFileInfo(scriptPath).canonicalFilePath());
+    QVERIFY(m_runner->lastRequest.arguments.isEmpty());
+}
+
+void DaemonDbusTest::runScriptNonZeroExitFailsTheRun() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.54")});
+    QTemporaryDir scripts;
+    QVERIFY(scripts.isValid());
+    const QString scriptPath = scripts.filePath(QStringLiteral("grumpy"));
+    {
+        QFile script(scriptPath);
+        QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Text));
+        QVERIFY(script.write("#!/bin/sh\nexit 1\n") > 0);
+        script.setPermissions(QFile::ReadOwner | QFile::ExeOwner);
+    }
+    recreateDaemon(30s, {}, [this] { return m_now; }, 1h, scripts.path());
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Grumpy script","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"runScript","script":"grumpy"}]})json"));
+    QSignalSpy changed(m_daemon.get(), &DaemonService::RulesChanged);
+
+    startRunnerCompleter({1});
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    // A non-zero exit is a delivery failure, so the run reports failed and
+    // records it.
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
+    const QStringList outcomes = announcedLastRunOutcomes(changed);
+    QCOMPARE(outcomes.last(), QStringLiteral("failed"));
+}
+
+void DaemonDbusTest::runScriptRejectsBadFilesWithoutTraffic() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.55")});
+    QTemporaryDir scripts;
+    QVERIFY(scripts.isValid());
+    QTemporaryDir outside;
+    QVERIFY(outside.isValid());
+    // A regular but non-executable file...
+    {
+        QFile locked(scripts.filePath(QStringLiteral("locked")));
+        QVERIFY(locked.open(QIODevice::WriteOnly | QIODevice::Text));
+        QVERIFY(locked.write("#!/bin/sh\nexit 0\n") > 0);
+    }
+    // ...and an executable outside the directory reachable only via symlink:
+    // the canonical-containment check must defeat the escape.
+    const QString sneaky = outside.filePath(QStringLiteral("sneaky"));
+    {
+        QFile target(sneaky);
+        QVERIFY(target.open(QIODevice::WriteOnly | QIODevice::Text));
+        QVERIFY(target.write("#!/bin/sh\nexit 0\n") > 0);
+        target.setPermissions(QFile::ReadOwner | QFile::ExeOwner);
+    }
+    QVERIFY(QFile::link(sneaky, scripts.filePath(QStringLiteral("escape"))));
+
+    recreateDaemon(30s, {}, [this] { return m_now; }, 1h, scripts.path());
+    auto scriptRule = [](const QString& name, const QString& script) {
+        return QStringLiteral(
+                   R"json({"name":"%1","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
+                   R"json("actions":[{"type":"runScript","script":"%2"}]})json")
+            .arg(name, script);
+    };
+
+    const QStringList cases{
+        QStringLiteral("ghost"),   // missing file
+        QStringLiteral("locked"),  // not executable
+        QStringLiteral("escape")   // symlink out of the directory
+    };
+    QList<QString> ruleIds;
+    for (const QString& script : cases) {
+        ruleIds.append(addRuleReturningId(
+            scriptRule(QStringLiteral("Broken %1").arg(script), script)));
+    }
+
+    // Every rejection is dispatch-time: zero traffic, one rejected attempt
+    // per action, hence "failed".
+    for (const QString& ruleId : ruleIds) {
+        const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+        QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+        QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
+    }
+    QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::addRuleRejectsInvalidScriptNames() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.56")});
+    const QString escapePayload = QStringLiteral(
+        R"json({"name":"Escape","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"runScript","script":"../evil"}]})json");
+    const QDBusMessage escape = waitForReply(m_proxy->AddRule(escapePayload));
+    QCOMPARE(escape.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(escape.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+
+    const QString upperPayload = QStringLiteral(
+        R"json({"name":"Upper","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"runScript","script":"Movie-Night"}]})json");
+    const QDBusMessage upper = waitForReply(m_proxy->AddRule(upperPayload));
+    QCOMPARE(upper.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(upper.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+
+    QVERIFY(m_runner->requests.isEmpty());
 }
 
 QTEST_GUILESS_MAIN(DaemonDbusTest)

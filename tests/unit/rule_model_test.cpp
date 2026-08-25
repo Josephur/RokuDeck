@@ -87,6 +87,7 @@ private Q_SLOTS:
     void parsesPlayingFieldsAndRejectsNonBooleanValues();
     void parsesDeviceScopedStateChangeTriggers();
     void parsesActiveWindowsOnEveryTriggerType();
+    void parsesRunScriptActions();
     void rejectsMalformedRules_data();
     void rejectsMalformedRules();
     void rejectsOverlyDeepConditions();
@@ -285,6 +286,35 @@ void RuleModelTest::parsesActiveWindowsOnEveryTriggerType()
         "an absent window must not serialize");
 }
 
+void RuleModelTest::parsesRunScriptActions()
+{
+    const QJsonObject document{{"schemaVersion"_L1, 1},
+        {"name"_L1, "scripty"_L1},
+        {"trigger"_L1, QJsonObject{{"type"_L1, "manual"_L1}}},
+        {"actions"_L1, QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+            {"script"_L1, "movie-night"_L1}}}}};
+    const auto parsed = parseRule(document);
+    if (!parsed.has_value()) {
+        QFAIL(qPrintable(parsed.error().message));
+    }
+    QCOMPARE(parsed.value().actions.at(0).type, "runScript"_L1);
+    QCOMPARE(parsed.value().actions.at(0).script, "movie-night"_L1);
+
+    // Round trip: the script name survives serialization untouched.
+    const auto reparsed = parseRule(ruleJson(parsed.value()));
+    if (!reparsed.has_value()) {
+        QFAIL(qPrintable(reparsed.error().message));
+    }
+    QCOMPARE(reparsed.value().actions.at(0).script, "movie-night"_L1);
+
+    // The longest legal name still parses.
+    QJsonObject boundary = document;
+    boundary.insert(QStringLiteral("actions"),
+        QJsonArray{QJsonObject{{QStringLiteral("type"), QStringLiteral("runScript")},
+            {QStringLiteral("script"), QString(64, QLatin1Char('a'))}}});
+    QVERIFY(parseRule(boundary).has_value());
+}
+
 void RuleModelTest::rejectsMalformedRules_data()
 {
     QTest::addColumn<QJsonObject>("document");
@@ -408,6 +438,55 @@ void RuleModelTest::rejectsMalformedRules_data()
                            QJsonObject{{"start"_L1, "22:00"_L1}}}});
            })
         << "active window";
+    QTest::newRow("runscript-uppercase")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+                       {"script"_L1, "Movie-Night"_L1}}});
+           })
+        << "runScript";
+    QTest::newRow("runscript-leading-dash")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+                       {"script"_L1, "-movie"_L1}}});
+           })
+        << "runScript";
+    QTest::newRow("runscript-leading-underscore")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+                       {"script"_L1, "_movie"_L1}}});
+           })
+        << "runScript";
+    QTest::newRow("runscript-separator")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+                       {"script"_L1, "../evil"_L1}}});
+           })
+        << "runScript";
+    QTest::newRow("runscript-empty")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+                       {"script"_L1, ""_L1}}});
+           })
+        << "runScript";
+    QTest::newRow("runscript-too-long")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+                       {"script"_L1, QString(65, QLatin1Char('a'))}}});
+           })
+        << "runScript";
+    QTest::newRow("runscript-not-string")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+                       {"script"_L1, 42}}});
+           })
+        << "runScript";
     QTest::newRow("unknown-action")
         << mutated([](QJsonObject& o) {
                o.insert("actions"_L1,

@@ -41,6 +41,7 @@ struct ActionNode {
     QString key;
     QString appId;
     QString ruleId;
+    QString script;  // runScript: name inside the daemon's scripts directory
     int volume = -1;
     int mutedFlag = -1;  // -1 unset, else 0/1
     int delaySeconds = 0;

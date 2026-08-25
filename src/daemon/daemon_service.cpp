@@ -12,7 +12,9 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusVariant>
 #include <QDateTime>
+#include <QDir>
 #include <QEventLoop>
+#include <QFileInfo>
 #include <QRandomGenerator>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -20,6 +22,7 @@
 #include <QJsonParseError>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QUuid>
 
 #include <algorithm>
@@ -276,7 +279,8 @@ DaemonService::DaemonService(QDBusConnection connection,
                              std::unique_ptr<ConfigStore> configStore,
                              std::chrono::milliseconds idleGrace,
                              DeadlineRemaining deadlineRemaining, WallClock wallClock,
-                             std::chrono::milliseconds localPcPollInterval, QObject* parent)
+                             std::chrono::milliseconds localPcPollInterval,
+                             QString scriptsDir, QObject* parent)
     : QObject(parent), m_connection(std::move(connection)),
       m_hasEnabledAutomations(hasEnabledAutomations ? std::move(hasEnabledAutomations)
                                                     : [] { return false; }),
@@ -290,7 +294,13 @@ DaemonService::DaemonService(QDBusConnection connection,
                                     : std::make_unique<QProcessRunner>()),
       m_rdsClient(m_processRunner.get()), m_ownerWatcher(this),
       m_wallClock(wallClock ? std::move(wallClock)
-                            : [] { return QDateTime::currentDateTime(); }) {
+                            : [] { return QDateTime::currentDateTime(); }),
+      // Ruling 3: the scripts directory resolves once — an injected path for
+      // tests, else the standard app-data location.
+      m_scriptsDirectory(scriptsDir.isEmpty()
+              ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                    + QStringLiteral("/scripts")
+              : std::move(scriptsDir)) {
     new RokuDeck1Adaptor(this);
     m_ownerWatcher.setConnection(m_connection);
     m_ownerWatcher.setWatchMode(QDBusServiceWatcher::WatchForUnregistration);
@@ -1404,7 +1414,11 @@ DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& ru
         QEventLoop wait;
         QTimer backstop;
         backstop.setSingleShot(true);
-        backstop.start(CommandContract::daemonCompletionDeadlineMs + 5000);
+        // The per-command deadlines always emit verdicts themselves; this
+        // backstop only covers a wedged runner and must outlive even the
+        // longest script budget.
+        backstop.start(CommandContract::daemonCompletionDeadlineMs
+                       + CommandContract::scriptTimeoutMs + 5000);
         auto harvest = [&]() {
             for (auto it = remaining.begin(); it != remaining.end();) {
                 const auto verdict = m_deliveryOutcomes.constFind(*it);
@@ -1462,7 +1476,7 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
         QStringLiteral("delay"),     QStringLiteral("keypress"),
         QStringLiteral("launchApp"), QStringLiteral("mute"),
         QStringLiteral("setVolume"), QStringLiteral("runRule"),
-        QStringLiteral("ifThenElse")};
+        QStringLiteral("runScript"), QStringLiteral("ifThenElse")};
     for (const ActionNode& action : actions) {
         if (!executableTypes.contains(action.type)) {
             return false;
@@ -1494,9 +1508,12 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
         processNextCommand(serial);
     };
     // This PC control runs wpctl directly: the arguments are final, so no rds
-    // schema validation applies — only the shared queue bounds do.
+    // schema validation applies — only the shared queue bounds do. The
+    // deadline is per call: device commands use the shared contract budget,
+    // scripts their own generous one (ruling 4).
     auto enqueueProcess = [&](const QString& serial, const QString& program,
-                              const QStringList& arguments) {
+                              const QStringList& arguments,
+                              qint64 deadlineMs = CommandContract::daemonCompletionDeadlineMs) {
         QQueue<QueuedCommand>& queue = m_commandQueues[serial];
         if (queue.size() >= CommandContract::maximumOutstandingPerDevice) {
             ++rejected;
@@ -1504,8 +1521,7 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
         }
         const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         queue.enqueue({requestId, serial, arguments,
-                       QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs,
-                                      Qt::PreciseTimer),
+                       QDeadlineTimer(deadlineMs, Qt::PreciseTimer),
                        true, program});
         pendingRequests.append(requestId);
         ++dispatched;
@@ -1534,6 +1550,27 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                     &pause, &QEventLoop::quit);
                 pause.exec();
             }
+            continue;
+        }
+        if (action.type == QStringLiteral("runScript")) {
+            // Spec §3: user-approved scripts run by name from the daemon's
+            // own directory — no shell, no arguments, bounded timeout. The
+            // name regex already forbids separators; resolving canonicals on
+            // both sides additionally defeats symlink escapes. One dispatch
+            // per step, executed on This PC itself (the reserved device owns
+            // a queue slot like any other target).
+            const QDir scriptsDirectory(m_scriptsDirectory);
+            const QFileInfo candidate(scriptsDirectory.filePath(action.script));
+            const QString canonical = candidate.canonicalFilePath();
+            const bool contained = !canonical.isEmpty()
+                && QDir(canonical).absolutePath().startsWith(
+                    scriptsDirectory.absolutePath() + QLatin1Char('/'));
+            if (!contained || !candidate.isFile() || !candidate.isExecutable()) {
+                ++rejected;
+                continue;
+            }
+            enqueueProcess(QLatin1String(localPcSerial), canonical, {},
+                           CommandContract::scriptTimeoutMs);
             continue;
         }
         if (action.type == QStringLiteral("mute")) {
@@ -1829,9 +1866,11 @@ void DaemonService::processNextCommand(const QString& serial) {
 
     const QueuedCommand command = queueIt->head();
     ProcessRequest request;
-    if (command.program == QLatin1String("wpctl")) {
-        // Absolute local-audio control runs wpctl directly, without any of
-        // the rds-specific flags or address routing.
+    const bool rdsRouted = command.program == QLatin1String("rds");
+    if (!rdsRouted) {
+        // Direct programs (wpctl for absolute local audio, scripts for
+        // runScript steps) run as-is: their arguments are final, so none of
+        // the rds-specific flags or address routing applies.
         request.program = command.program;
         request.arguments = command.arguments;
     } else {
@@ -1853,8 +1892,14 @@ void DaemonService::processNextCommand(const QString& serial) {
         processNextCommand(serial);
         return;
     }
+    // Scripts may legitimately run long; device commands keep the tight
+    // budget that bounds a whole queue drain.
+    const qint64 executionBudgetMs =
+        !rdsRouted && command.program.startsWith(QLatin1Char('/'))
+        ? CommandContract::scriptTimeoutMs
+        : CommandContract::executionTimeoutMs;
     request.timeout = std::chrono::milliseconds(
-        std::min<qint64>(CommandContract::executionTimeoutMs, remainingMs));
+        std::min<qint64>(executionBudgetMs, remainingMs));
     m_activeCommandSerials.insert(serial);
 
     QPointer<DaemonService> service(this);
