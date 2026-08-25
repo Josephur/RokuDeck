@@ -21,6 +21,8 @@ AllowAutomations=true   ;; forced; UpdateDevice rejects false with "the local de
   (nameIsUserChosen machinery works unchanged).
 - Undeletable (`RemoveDevice` on LOCAL-PC replies InvalidArgs "the local device cannot be removed")
   and never produced by discovery.
+- This PC participates in automations only when a rule lists it explicitly; wildcard rules
+  (empty device list) resolve to Roku devices alone.
 - Consent is always-on: it is the machine the daemon runs on.
 
 ## 2. State sources
@@ -58,7 +60,7 @@ PC commands run `wpctl` without the rds-specific flags.
 
 ## 5. Lifecycle
 
-- An **enabled** rule whose devices reference LOCAL-PC (or wildcard) keeps the daemon alive,
+- An **enabled** rule whose devices explicitly reference LOCAL-PC keeps the daemon alive,
   exactly like scheduled rules; otherwise the daemon may idle-exit as before. The poller itself
   runs whenever the daemon runs (2 s wpctl is cheap).
 - The widget's device list shows This PC like any device; its detail page hides the Roku remote

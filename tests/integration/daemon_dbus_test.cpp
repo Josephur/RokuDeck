@@ -137,7 +137,8 @@ class DaemonDbusTest final : public QObject {
     void lifecycleTracksClientsAndEnabledAutomations();
     void daemonBootstrapsThisPcAndShieldsIt();
     void localPcRulesKeepTheDaemonAwake();
-    void wildcardRulesKeepTheDaemonAwakeForTheLocalPc();
+    void wildcardRulesDoNotKeepTheDaemonAwakeForTheLocalPc();
+    void wildcardRulesDoNotTargetTheLocalPc();
     void deviceJsonIsVersionedAndAddressChangesPreserveIdentity();
     void addressChangeInvalidatesSnapshotAndRejectsStalePoll();
     void discoveryUpdatesSerialKeyedRegistry();
@@ -726,16 +727,46 @@ void DaemonDbusTest::localPcRulesKeepTheDaemonAwake() {
     QVERIFY(!m_daemon->idleTimerActive());
 }
 
-void DaemonDbusTest::wildcardRulesKeepTheDaemonAwakeForTheLocalPc() {
+void DaemonDbusTest::wildcardRulesDoNotKeepTheDaemonAwakeForTheLocalPc() {
     m_automationEnabled = false;
     m_daemon->automationEnablementChanged();
     QVERIFY(m_daemon->idleTimerActive());
 
-    // An empty devices list is the wildcard, which reaches This PC too
-    // (spec §5). The manual trigger keeps the schedule timer out of the
-    // picture so only wildcard reach can hold the daemon awake here.
+    // Wildcards mean "my TVs": an enabled wildcard rule does not reach This
+    // PC (only explicit listing does), so it cannot hold the daemon awake.
+    // The manual trigger keeps the schedule timer out of the picture.
     addManualRule(QStringLiteral("Wildcard macro"));
-    QVERIFY(!m_daemon->idleTimerActive());
+    QVERIFY(m_daemon->idleTimerActive());
+}
+
+void DaemonDbusTest::wildcardRulesDoNotTargetTheLocalPc() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"),
+                            QStringLiteral("198.51.100.61")});
+    // A healthy This PC reading exists, yet wildcards must not resolve it.
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
+    const int pcControlBefore = 0;
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"TVs only","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(homeKeypressCount(), 1);  // the keypress landed on the TV alone
+
+    int pcControls = pcControlBefore;
+    for (const ProcessRequest& request : m_runner->requests) {
+        if (request.program == QLatin1String("wpctl")
+            && !request.arguments.isEmpty()
+            && (request.arguments.first() == QLatin1String("set-volume")
+                || request.arguments.first() == QLatin1String("set-mute"))) {
+            ++pcControls;
+        }
+    }
+    QCOMPARE(pcControls, pcControlBefore);  // zero wpctl traffic: PC untouched
 }
 
 void DaemonDbusTest::deviceJsonIsVersionedAndAddressChangesPreserveIdentity() {

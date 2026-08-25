@@ -1262,6 +1262,11 @@ QString DaemonService::executeRuleRun(const QString& ruleId, const QStringList& 
     QStringList targets;
     if (rule.devices.isEmpty()) {
         for (const DeviceRecord& device : m_deviceRegistry.devices()) {
+            // This PC joins only when a rule names it explicitly: wildcards
+            // mean "my TVs", and the machine running the daemon is not one.
+            if (device.serial == QLatin1String(localPcSerial)) {
+                continue;
+            }
             if (device.allowAutomations) {
                 targets.append(device.serial);
             }
@@ -2153,9 +2158,8 @@ bool DaemonService::hasAcceptedWork() const {
 // rule does, because PC state changes may fire it at any moment.
 bool DaemonService::hasEnabledLocalPcRules() const {
     for (const RuleDocument& rule : m_rules) {
-        if (rule.enabled
-            && (rule.devices.isEmpty()
-                || rule.devices.contains(QLatin1String(localPcSerial)))) {
+        // Explicit listing only: wildcards never reach This PC.
+        if (rule.enabled && rule.devices.contains(QLatin1String(localPcSerial))) {
             return true;
         }
     }
