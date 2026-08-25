@@ -84,7 +84,6 @@ RowLayout {
     }
 
     PlasmaComponents.ComboBox {
-        popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
         id: enumFieldCombo
 
         objectName: root.objectName.length > 0 ? root.objectName + "Combo" : ""
@@ -99,7 +98,6 @@ RowLayout {
     }
 
     PlasmaComponents.ComboBox {
-        popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
         id: mutedCombo
 
         objectName: root.objectName.length > 0 ? root.objectName + "Combo" : ""

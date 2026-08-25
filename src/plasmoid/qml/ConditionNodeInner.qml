@@ -194,7 +194,6 @@ ColumnLayout {
         }
 
         PlasmaComponents.ComboBox {
-            popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
             id: deviceCombo
 
             objectName: "conditionDeviceCombo"
@@ -209,7 +208,6 @@ ColumnLayout {
         }
 
         PlasmaComponents.ComboBox {
-            popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
             id: fieldCombo
 
             objectName: "conditionFieldCombo"
@@ -228,7 +226,6 @@ ColumnLayout {
         }
 
         PlasmaComponents.ComboBox {
-            popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
             id: opCombo
 
             objectName: "conditionOpCombo"

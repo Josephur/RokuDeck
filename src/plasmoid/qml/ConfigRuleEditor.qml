@@ -270,7 +270,11 @@ Kirigami.Dialog {
     contentItem: Flickable {
         id: editorScroll
 
-        clip: true
+        // Deliberately NOT clipped: a clip here would also cut off every
+        // ComboBox dropdown (popups render inside the control's subtree),
+        // which is exactly the clipped-dropdown bug this dialog shipped once.
+        // Scroll overshoot lands in the dialog's padding, which is invisible.
+        clip: false
         contentHeight: editorColumn.implicitHeight
         // Generous viewport; long macro lists scroll instead of squeezing.
         implicitHeight: Math.min(editorColumn.implicitHeight,
@@ -331,7 +335,6 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
-                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: modeCombo
 
                     objectName: "modeCombo"
@@ -398,7 +401,6 @@ Kirigami.Dialog {
                 Layout.fillWidth: true
 
                 PlasmaComponents.ComboBox {
-                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: triggerTypeCombo
 
                     objectName: "triggerTypeCombo"
@@ -453,7 +455,6 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
-                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: stateChangeDeviceCombo
 
                     objectName: "stateChangeDeviceCombo"
@@ -483,7 +484,6 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
-                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: stateChangeFieldCombo
 
                     objectName: "stateChangeFieldCombo"
@@ -504,7 +504,6 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
-                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: stateChangeOpCombo
 
                     objectName: "stateChangeOpCombo"
