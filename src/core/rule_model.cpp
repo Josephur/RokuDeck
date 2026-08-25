@@ -251,14 +251,33 @@ constexpr int maximumDepth = 16;
         return {std::move(trigger)};
     }
 
-    // stateChange
-    if (!exactKeys(object, {QStringLiteral("type"), QStringLiteral("field"),
-                            QStringLiteral("op"), QStringLiteral("value")})) {
+    // stateChange: the optional device key scopes the trigger to one serial;
+    // absent keeps the wildcard "any device" meaning existing rules rely on.
+    const bool hasDevice = object.contains(QStringLiteral("device"));
+    if (!exactKeys(object,
+            hasDevice ? QStringList{QStringLiteral("type"), QStringLiteral("device"),
+                                     QStringLiteral("field"), QStringLiteral("op"),
+                                     QStringLiteral("value")}
+                      : QStringList{QStringLiteral("type"), QStringLiteral("field"),
+                                    QStringLiteral("op"), QStringLiteral("value")})) {
         return {ParseError{ParseError::Code::InvalidValue,
             QStringLiteral("stateChange keys mismatch")}};
     }
+    QString scopedDevice = QStringLiteral("*");
+    if (hasDevice) {
+        const QJsonValue device = object.value(QStringLiteral("device"));
+        if (!device.isString()) {
+            return {ParseError{ParseError::Code::InvalidValue,
+                QStringLiteral("stateChange device must be a string")}};
+        }
+        scopedDevice = device.toString();
+        if (scopedDevice.isEmpty() || scopedDevice.size() > 64) {
+            return {ParseError{ParseError::Code::InvalidValue,
+                QStringLiteral("stateChange device invalid")}};
+        }
+    }
     auto predicate = parsePredicate(
-        QJsonObject{{QStringLiteral("device"), QStringLiteral("*")},
+        QJsonObject{{QStringLiteral("device"), scopedDevice},
             {QStringLiteral("field"), object.value(QStringLiteral("field"))},
             {QStringLiteral("op"), object.value(QStringLiteral("op"))},
             {QStringLiteral("value"), object.value(QStringLiteral("value"))}},
@@ -579,6 +598,9 @@ QJsonObject ruleJson(const RuleDocument& rule)
     } else if (rule.trigger.type == QStringLiteral("interval")) {
         trigger.insert(QStringLiteral("minutes"), rule.trigger.minutes);
     } else if (rule.trigger.type == QStringLiteral("stateChange")) {
+        if (rule.trigger.stateChange.device != QStringLiteral("*")) {
+            trigger.insert(QStringLiteral("device"), rule.trigger.stateChange.device);
+        }
         trigger.insert(QStringLiteral("field"), rule.trigger.stateChange.field);
         trigger.insert(QStringLiteral("op"), rule.trigger.stateChange.op);
         trigger.insert(QStringLiteral("value"), rule.trigger.stateChange.value);

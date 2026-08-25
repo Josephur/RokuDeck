@@ -125,6 +125,7 @@ class RuleConditionsTest final : public QObject {
     void dueStateChangeFiresOnlyOnRisingEdge();
     void dueStateChangeSkipsDisabledAndNonStateChangeRules();
     void dueStateChangePreservesRuleListOrder();
+    void dueStateChangeRespectsTheTriggerDeviceScope();
 };
 
 void RuleConditionsTest::powerPredicateComparesRenderedEnumValues() {
@@ -456,6 +457,30 @@ void RuleConditionsTest::dueStateChangePreservesRuleListOrder() {
 
     const QStringList expectedDue{u"zulu"_s, u"yankee"_s, u"xray"_s};
     QCOMPARE(dueStateChangeRuleIds(rules, on.serial, off, on), expectedDue);
+}
+
+void RuleConditionsTest::dueStateChangeRespectsTheTriggerDeviceScope() {
+    // A device-scoped rule watches that serial's edges only; the wildcard
+    // twin keeps observing everything.
+    const QList<RuleDocument> rules{
+        rule(u"tv-only"_s,
+             QJsonObject{{"type"_L1, "stateChange"_L1},
+                         {"device"_L1, "SERIAL-B"_L1},
+                         {"field"_L1, "power"_L1},
+                         {"op"_L1, "is"_L1},
+                         {"value"_L1, "on"_L1}}),
+        powerOnStateChangeRule(QStringLiteral("any-device"))};
+    DeviceSnapshot offA = knownSnapshot(QStringLiteral("SERIAL-A"));
+    offA.power = PowerState::Standby;
+    const DeviceSnapshot onA = knownSnapshot(QStringLiteral("SERIAL-A"));
+    DeviceSnapshot offB = knownSnapshot(QStringLiteral("SERIAL-B"));
+    offB.power = PowerState::Standby;
+    const DeviceSnapshot onB = knownSnapshot(QStringLiteral("SERIAL-B"));
+
+    QCOMPARE(dueStateChangeRuleIds(rules, offB.serial, offB, onB),
+             (QStringList{u"tv-only"_s, u"any-device"_s}));
+    QCOMPARE(dueStateChangeRuleIds(rules, offA.serial, offA, onA),
+             QStringList{u"any-device"_s});
 }
 
 QTEST_MAIN(RuleConditionsTest)

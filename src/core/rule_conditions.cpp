@@ -208,6 +208,12 @@ QStringList dueStateChangeRuleIds(const QList<RuleDocument>& rules,
         if (!rule.enabled || rule.trigger.type != u"stateChange"_s) {
             continue;
         }
+        // An explicitly scoped trigger observes that serial's edges only; the
+        // wildcard (or empty, its legacy spelling) keeps watching every edge.
+        const QString& scope = rule.trigger.stateChange.device;
+        if (!scope.isEmpty() && scope != u"*"_s && scope != serial) {
+            continue;
+        }
         const QHash<QString, DeviceSnapshot> previousSnapshots{{serial, previous}};
         const QHash<QString, DeviceSnapshot> currentSnapshots{{serial, current}};
         const bool wasMatched =

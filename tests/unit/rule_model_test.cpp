@@ -85,6 +85,7 @@ private:
 private Q_SLOTS:
     void parsesAndSerializesACompleteRule();
     void parsesPlayingFieldsAndRejectsNonBooleanValues();
+    void parsesDeviceScopedStateChangeTriggers();
     void rejectsMalformedRules_data();
     void rejectsMalformedRules();
     void rejectsOverlyDeepConditions();
@@ -178,6 +179,52 @@ void RuleModelTest::parsesPlayingFieldsAndRejectsNonBooleanValues()
              qPrintable(numericParsed.error().message));
 }
 
+void RuleModelTest::parsesDeviceScopedStateChangeTriggers()
+{
+    const QJsonObject base{{"schemaVersion"_L1, 1},
+        {"name"_L1, "scoped"_L1},
+        {"trigger"_L1, QJsonObject{{"type"_L1, "stateChange"_L1},
+            {"field"_L1, "playing"_L1},
+            {"op"_L1, "is"_L1},
+            {"value"_L1, true}}},
+        {"actions"_L1, QJsonArray{keypressAction(QStringLiteral("Home"))}}};
+
+    // Absent device keeps the wildcard meaning every existing rule relies on.
+    const auto wildcard = parseRule(base);
+    if (!wildcard.has_value()) {
+        QFAIL(qPrintable(wildcard.error().message));
+    }
+    QCOMPARE(wildcard.value().trigger.stateChange.device, "*"_L1);
+
+    // Present device scopes the trigger to that serial.
+    QJsonObject scoped = base;
+    QJsonObject trigger = scoped.value(QStringLiteral("trigger")).toObject();
+    trigger.insert(QStringLiteral("device"), QStringLiteral("SERIAL-B"));
+    scoped.insert(QStringLiteral("trigger"), trigger);
+    const auto parsed = parseRule(scoped);
+    if (!parsed.has_value()) {
+        QFAIL(qPrintable(parsed.error().message));
+    }
+    QCOMPARE(parsed.value().trigger.stateChange.device, "SERIAL-B"_L1);
+
+    // Round trip: the scope survives serialization; a wildcard stays implicit
+    // so stored legacy documents keep their exact shape.
+    const QJsonObject serialized = ruleJson(parsed.value());
+    QCOMPARE(serialized.value(QStringLiteral("trigger"))
+                 .toObject()
+                 .value(QStringLiteral("device"))
+                 .toString(),
+        QStringLiteral("SERIAL-B"));
+    const auto reparsed = parseRule(serialized);
+    QVERIFY(reparsed.has_value());
+    QCOMPARE(reparsed.value().trigger.stateChange.device, "SERIAL-B"_L1);
+    const QJsonObject wildcardSerialized = ruleJson(wildcard.value());
+    QVERIFY2(!wildcardSerialized.value(QStringLiteral("trigger"))
+                  .toObject()
+                  .contains(QStringLiteral("device")),
+        "wildcard stateChange must not serialize a device key");
+}
+
 void RuleModelTest::rejectsMalformedRules_data()
 {
     QTest::addColumn<QJsonObject>("document");
@@ -236,6 +283,36 @@ void RuleModelTest::rejectsMalformedRules_data()
                        {"value"_L1, QJsonArray{20}}});
            })
         << "[low,high]";
+    QTest::newRow("statechange-device-not-string")
+        << mutated([](QJsonObject& o) {
+               o.insert("trigger"_L1,
+                   QJsonObject{{"type"_L1, "stateChange"_L1},
+                       {"device"_L1, 7},
+                       {"field"_L1, "power"_L1},
+                       {"op"_L1, "is"_L1},
+                       {"value"_L1, "on"_L1}});
+           })
+        << "device";
+    QTest::newRow("statechange-device-empty")
+        << mutated([](QJsonObject& o) {
+               o.insert("trigger"_L1,
+                   QJsonObject{{"type"_L1, "stateChange"_L1},
+                       {"device"_L1, ""_L1},
+                       {"field"_L1, "power"_L1},
+                       {"op"_L1, "is"_L1},
+                       {"value"_L1, "on"_L1}});
+           })
+        << "device";
+    QTest::newRow("statechange-device-too-long")
+        << mutated([](QJsonObject& o) {
+               o.insert("trigger"_L1,
+                   QJsonObject{{"type"_L1, "stateChange"_L1},
+                       {"device"_L1, QString(65, QLatin1Char('A'))},
+                       {"field"_L1, "power"_L1},
+                       {"op"_L1, "is"_L1},
+                       {"value"_L1, "on"_L1}});
+           })
+        << "device";
     QTest::newRow("unknown-action")
         << mutated([](QJsonObject& o) {
                o.insert("actions"_L1,
