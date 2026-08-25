@@ -33,6 +33,7 @@ class RokuDeckApplet final : public Plasma::Applet {
 
     [[nodiscard]] DevicesModel* devices();
     [[nodiscard]] AutomationsModel* automations();
+    Q_INVOKABLE [[nodiscard]] QVariantList deviceEntries() const;
     [[nodiscard]] QString selectedSerial() const;
     void setSelectedSerial(const QString& serial);
     [[nodiscard]] bool isAvailable() const;

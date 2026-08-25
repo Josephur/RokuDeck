@@ -61,6 +61,18 @@ AutomationsModel* RokuDeckApplet::automations() {
     return &m_automations;
 }
 
+QVariantList RokuDeckApplet::deviceEntries() const {
+    QVariantList entries;
+    entries.reserve(m_devices.rowCount());
+    for (int row = 0; row < m_devices.rowCount(); ++row) {
+        const QModelIndex index = m_devices.index(row, 0);
+        entries.append(QVariantMap{
+            {QStringLiteral("serial"), index.data(DevicesModel::SerialRole).toString()},
+            {QStringLiteral("name"), index.data(DevicesModel::NameRole).toString()}});
+    }
+    return entries;
+}
+
 QString RokuDeckApplet::selectedSerial() const {
     return m_selectedSerial;
 }
