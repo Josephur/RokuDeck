@@ -546,6 +546,19 @@ TestCase {
 
         const problems = RulePayload.validatePredicate("playing", "is", true);
         compare(problems.length, 0);
+
+        // media joins the enum-field family: canonical values, round-trip,
+        // and validation reject nonsense just like power/health.
+        verify(RulePayload.fields.indexOf("media") >= 0,
+               "the editor field picker must list media");
+        compare(RulePayload.canonicalValue("media", "is", "paused"), "paused");
+        const mediaLeaf = RulePayload.nodeToForm(
+            { leaf: { device: "*", field: "media", op: "is", value: "playing" } });
+        compare(mediaLeaf.value, "playing");
+        compare(RulePayload.conditionValueJson(mediaLeaf), "playing");
+        const mediaProblems =
+            RulePayload.validatePredicate("media", "is", "loud");
+        verify(mediaProblems.length > 0, "nonsense media values must be flagged");
     }
 
     function test_playingStateChangeRoundTripsByteForByte() {

@@ -95,6 +95,21 @@ namespace {
         }
         return *snapshot.playing ? u"true"_s : u"false"_s;
     }
+    if (field == u"media"_s) {
+        switch (snapshot.media) {
+        case MediaPlaybackState::Playing:
+            return u"playing"_s;
+        case MediaPlaybackState::Paused:
+            return u"paused"_s;
+        case MediaPlaybackState::Stopped:
+            return u"stopped"_s;
+        case MediaPlaybackState::Idle:
+            return u"idle"_s;
+        case MediaPlaybackState::Unknown:
+            break;
+        }
+        return std::nullopt;
+    }
     if (field == u"volume"_s) {
         if (!snapshot.volume.has_value()) {
             return std::nullopt;

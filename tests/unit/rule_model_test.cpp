@@ -355,6 +355,15 @@ void RuleModelTest::rejectsMalformedRules_data()
                    QJsonObject{{"type"_L1, "interval"_L1}, {"minutes"_L1, 1}});
            })
         << "5..1440";
+    QTest::newRow("media-bad-value")
+        << mutated([](QJsonObject& o) {
+               o.insert("trigger"_L1,
+                   QJsonObject{{"type"_L1, "stateChange"_L1},
+                       {"field"_L1, "media"_L1},
+                       {"op"_L1, "is"_L1},
+                       {"value"_L1, "loud"_L1}});
+           })
+        << "media needs";
     QTest::newRow("unknown-field")
         << mutated([](QJsonObject& o) {
                o.insert("trigger"_L1,

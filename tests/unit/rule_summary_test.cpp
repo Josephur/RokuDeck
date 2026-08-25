@@ -95,6 +95,13 @@ void RuleSummaryTest::rendersKnownTriggerAndActionShapes_data() {
                                    {"value"_L1, 20}},
                        QJsonArray{QJsonObject{{"type"_L1, "setVolume"_L1}, {"volume"_L1, 10}}})
         << QStringLiteral("When volume above 20 \u00b7 Set volume to 10");
+    QTest::newRow("statechange-media")
+        << fixtureRule(QJsonObject{{"type"_L1, "stateChange"_L1},
+                                   {"field"_L1, "media"_L1},
+                                   {"op"_L1, "is"_L1},
+                                   {"value"_L1, "playing"_L1}},
+                       QJsonArray{QJsonObject{{"type"_L1, "mute"_L1}, {"muted"_L1, true}}})
+        << QStringLiteral("When media is playing \u00b7 Mute");
     QTest::newRow("statechange-between")
         << fixtureRule(QJsonObject{{"type"_L1, "stateChange"_L1},
                                    {"field"_L1, "volume"_L1},

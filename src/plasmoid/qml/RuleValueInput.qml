@@ -30,9 +30,11 @@ RowLayout {
     readonly property var canonicalValues: root.field === "power"
         ? RulePayload.powerValues
         : root.field === "screensaver" ? RulePayload.screensaverValues
+        : root.field === "media" ? RulePayload.mediaValues
         : RulePayload.healthValues
     readonly property bool enumField: root.field === "power"
         || root.field === "screensaver" || root.field === "health"
+        || root.field === "media"
 
     spacing: Kirigami.Units.smallSpacing
 

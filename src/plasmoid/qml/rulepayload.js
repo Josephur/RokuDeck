@@ -8,11 +8,12 @@
 
 var modes = ["single", "restart", "queued"];
 var timeKinds = ["daily", "weekdays", "once"];
-var fields = ["power", "screensaver", "app", "muted", "volume", "health", "playing"];
+var fields = ["power", "screensaver", "app", "muted", "volume", "health", "playing", "media"];
 var ops = ["is", "isNot", "gt", "lt", "between"];
 var powerValues = ["on", "standby", "unknown"];
 var screensaverValues = ["active", "inactive", "unknown"];
 var healthValues = ["online", "standby", "degraded", "offline"];
+var mediaValues = ["playing", "paused", "stopped", "idle"];
 var keypressKeys = ["Home", "Back", "Up", "Down", "Left", "Right", "Select",
                     "Play", "Pause", "Rev", "Fwd", "InstantReplay",
                     "FindRemote", "Power", "PowerOn"];
@@ -428,7 +429,8 @@ function validatePredicate(field, op, value) {
     }
     if ((field === "power" && powerValues.indexOf(String(value)) < 0)
         || (field === "screensaver" && screensaverValues.indexOf(String(value)) < 0)
-        || (field === "health" && healthValues.indexOf(String(value)) < 0)) {
+        || (field === "health" && healthValues.indexOf(String(value)) < 0)
+        || (field === "media" && mediaValues.indexOf(String(value)) < 0)) {
         problems.push({ code: "valueRequired" });
         return problems;
     }

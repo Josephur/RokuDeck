@@ -116,6 +116,7 @@ class RuleConditionsTest final : public QObject {
     void volumeOpsAreStrictAndBetweenIsClosed();
     void numericOpsNeverMatchMutedBooleans();
     void playingPredicateRendersBooleansAndNumericOpsNeverMatch();
+    void mediaPredicateRendersStatesAndNeverMatchesUnknown();
     void dueStateChangeFiresOnPlayingEdge();
     void appPredicateMatchesTheActiveAppId();
     void healthPredicateRendersHealthNames();
@@ -274,6 +275,37 @@ void RuleConditionsTest::playingPredicateRendersBooleansAndNumericOpsNeverMatch(
                               QStringList{roku.serial}));
     QVERIFY(!predicateMatches(predicate(roku.serial, u"playing"_s, u"isNot"_s, true), rokuMap,
                               QStringList{roku.serial}));
+}
+
+void RuleConditionsTest::mediaPredicateRendersStatesAndNeverMatchesUnknown() {
+    DeviceSnapshot playing = knownSnapshot(QStringLiteral("serial-tv"));
+    playing.media = MediaPlaybackState::Playing;
+
+    const auto mediaMatches = [&playing](const QString& op, QJsonValue value) {
+        const QHash<QString, DeviceSnapshot> snapshots{{playing.serial, playing}};
+        return predicateMatches(predicate(playing.serial, u"media"_s, op, std::move(value)),
+                                snapshots, QStringList{playing.serial});
+    };
+    QVERIFY(mediaMatches(u"is"_s, u"playing"_s));
+    QVERIFY(!mediaMatches(u"is"_s, u"paused"_s));
+    QVERIFY(mediaMatches(u"isNot"_s, u"paused"_s));
+    QVERIFY(!mediaMatches(u"isNot"_s, u"playing"_s));
+    // Numeric ops never match a string enum field, mirroring power.
+    QVERIFY(!mediaMatches(u"gt"_s, 0));
+    QVERIFY(!mediaMatches(u"between"_s, QJsonArray{0, 1}));
+
+    // Unknown media state never matches - not even isNot.
+    DeviceSnapshot idle = knownSnapshot(QStringLiteral("serial-tv"));
+    idle.media = MediaPlaybackState::Idle;
+    const QHash<QString, DeviceSnapshot> idleMap{{idle.serial, idle}};
+    QVERIFY(predicateMatches(predicate(idle.serial, u"media"_s, u"is"_s, u"idle"_s), idleMap,
+                             QStringList{idle.serial}));
+    const DeviceSnapshot unknown = knownSnapshot(QStringLiteral("serial-tv"));
+    const QHash<QString, DeviceSnapshot> unknownMap{{unknown.serial, unknown}};
+    QVERIFY(!predicateMatches(predicate(unknown.serial, u"media"_s, u"is"_s, u"idle"_s),
+                              unknownMap, QStringList{unknown.serial}));
+    QVERIFY(!predicateMatches(predicate(unknown.serial, u"media"_s, u"isNot"_s, u"idle"_s),
+                              unknownMap, QStringList{unknown.serial}));
 }
 
 void RuleConditionsTest::dueStateChangeFiresOnPlayingEdge() {
