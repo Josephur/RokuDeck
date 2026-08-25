@@ -128,6 +128,9 @@ class DaemonService final : public QObject, protected QDBusContext {
         // Automation dispatches wait on their delivery verdicts to build an
         // honest last-run outcome; widget-issued commands have no waiter.
         bool trackDelivery = false;
+        // The binary the queued arguments run against: "rds" for Roku ECP,
+        // "wpctl" for absolute This PC audio control (spec §4).
+        QString program = QStringLiteral("rds");
     };
 
     struct ValidatedCommand {

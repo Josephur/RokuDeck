@@ -1460,6 +1460,24 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
         ++dispatched;
         processNextCommand(serial);
     };
+    // This PC control runs wpctl directly: the arguments are final, so no rds
+    // schema validation applies — only the shared queue bounds do.
+    auto enqueueProcess = [&](const QString& serial, const QString& program,
+                              const QStringList& arguments) {
+        QQueue<QueuedCommand>& queue = m_commandQueues[serial];
+        if (queue.size() >= CommandContract::maximumOutstandingPerDevice) {
+            ++rejected;
+            return;
+        }
+        const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        queue.enqueue({requestId, serial, arguments,
+                       QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs,
+                                      Qt::PreciseTimer),
+                       true, program});
+        pendingRequests.append(requestId);
+        ++dispatched;
+        processNextCommand(serial);
+    };
 
     for (const ActionNode& action : actions) {
         // Cooperative cancellation checkpoint: once the owning run is
@@ -1490,6 +1508,23 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
             // state is a successful no-op, unknown state a rejected attempt.
             const bool wantMuted = action.mutedFlag != 0;
             for (const QString& serial : targets) {
+                if (serial == QLatin1String(localPcSerial)) {
+                    // Spec §4: absolute mute control via wpctl, gated on a
+                    // fresh observation (stale health leaves nothing to trust).
+                    const DeviceSnapshot snapshot = m_snapshots.value(serial);
+                    if (!snapshot.muted.has_value()) {
+                        ++rejected;
+                        continue;
+                    }
+                    if (*snapshot.muted == wantMuted) {
+                        continue;
+                    }
+                    enqueueProcess(
+                        serial, QStringLiteral("wpctl"),
+                        {QStringLiteral("set-mute"), QStringLiteral("@DEFAULT_AUDIO_SINK@"),
+                         wantMuted ? QStringLiteral("1") : QStringLiteral("0")});
+                    continue;
+                }
                 const DeviceSnapshot snapshot = m_snapshots.value(serial);
                 if (!snapshot.muted.has_value()) {
                     ++rejected;
@@ -1512,6 +1547,26 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
             // authored target before the delta math, so a walk can never aim
             // past it (spec §2).
             for (const QString& serial : targets) {
+                if (serial == QLatin1String(localPcSerial)) {
+                    // Spec §4: absolute set-volume via wpctl. The M5 ceiling
+                    // clamps the authored target first; a stale/offline health
+                    // means no trustworthy reading, so the attempt is rejected.
+                    const auto device = findDevice(serial);
+                    const DeviceSnapshot snapshot = m_snapshots.value(serial);
+                    if (!device || !snapshot.volume.has_value()) {
+                        ++rejected;
+                        continue;
+                    }
+                    const int target = std::min(action.volume, device->volumeCeiling);
+                    if (target == *snapshot.volume) {
+                        continue;  // already there: a clean no-op
+                    }
+                    enqueueProcess(
+                        serial, QStringLiteral("wpctl"),
+                        {QStringLiteral("set-volume"), QStringLiteral("@DEFAULT_AUDIO_SINK@"),
+                         QString::number(target / 100.0, 'f', 2)});
+                    continue;
+                }
                 const auto device = findDevice(serial);
                 const DeviceSnapshot snapshot = m_snapshots.value(serial);
                 if (!device || !snapshot.volume.has_value()) {
@@ -1592,6 +1647,12 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
             command.insert(QStringLiteral("appId"), action.appId);
         }
         for (const QString& serial : targets) {
+            if (serial == QLatin1String(localPcSerial)) {
+                // There is nothing to press or launch on This PC; the attempt
+                // counts as rejected rather than aborting sibling actions.
+                ++rejected;
+                continue;
+            }
             enqueue(serial, command);
         }
     }
@@ -1735,11 +1796,18 @@ void DaemonService::processNextCommand(const QString& serial) {
 
     const QueuedCommand command = queueIt->head();
     ProcessRequest request;
-    request.program = QStringLiteral("rds");
-    request.arguments = {QStringLiteral("--json"),    QStringLiteral("--quiet"),
-                         QStringLiteral("--timeout"), QStringLiteral("3000"),
-                         QStringLiteral("--ip"),      device->address};
-    request.arguments.append(command.arguments);
+    if (command.program == QLatin1String("wpctl")) {
+        // Absolute local-audio control runs wpctl directly, without any of
+        // the rds-specific flags or address routing.
+        request.program = command.program;
+        request.arguments = command.arguments;
+    } else {
+        request.program = QStringLiteral("rds");
+        request.arguments = {QStringLiteral("--json"),    QStringLiteral("--quiet"),
+                             QStringLiteral("--timeout"), QStringLiteral("3000"),
+                             QStringLiteral("--ip"),      device->address};
+        request.arguments.append(command.arguments);
+    }
     const qint64 remainingMs = m_deadlineRemaining(command.deadline);
     if (remainingMs <= 0) {
         queueIt->dequeue();

@@ -188,6 +188,9 @@ class DaemonDbusTest final : public QObject {
     void pcPollerGoesOfflineAfterThreeFailuresAndRecovers();
     void mprisWatcherMergesPlaybackIntoPcSnapshots();
     void playingEdgeFiresStateChangeRuleOnLocalPc();
+    void pcSetVolumeDispatchesExactWpctlShapeAndClampsToCeiling();
+    void pcMuteDispatchesToggleShapesAndNoOpsWhenEqual();
+    void keypressOnLocalPcIsRejectedWithoutTraffic();
     void muteActionPressesVolumeMuteOnce();
     void muteActionMatchingObservedStateIsANoOp();
     void setVolumeWalksDownWithBoundedPresses();
@@ -248,6 +251,9 @@ class DaemonDbusTest final : public QObject {
     [[nodiscard]] int homeKeypressCount() const;
     // Keypress requests for one specific key seen by the fake runner.
     [[nodiscard]] int keypressCount(const QString& key) const;
+    // True once any absolute local-audio control invocation (set-volume /
+    // set-mute) reached the fake runner.
+    [[nodiscard]] bool hasPcControlRequest(const QString& subcommand) const;
     // Serves the one-time rds --version probe that precedes the very first
     // device query of a daemon's lifetime.
     void completePollVersion();
@@ -1894,14 +1900,27 @@ void DaemonDbusTest::startRunnerCompleter(const QList<int>& script) {
     if (!m_completerWired) {
         connect(&m_runnerCompleter, &QTimer::timeout, this, [this] {
             while (m_runner != nullptr && !m_runner->callbacks.isEmpty()) {
-                const int code =
-                    m_completerScript.isEmpty() ? 0 : m_completerScript.takeFirst();
                 ProcessResult result;
-                result.exitCode = code;
-                result.standardOutput = code == 0
-                    ? QByteArrayLiteral("{\"ok\":true}\n")
-                    : QByteArrayLiteral(
-                          "{\"success\":false,\"error\":\"Request timed out\"}\n");
+                // Background local-audio ticks must stay healthy no matter who
+                // completes them: a consumed get-volume answers with a stable
+                // reading instead of junk (which would read as poll failures).
+                const qsizetype index =
+                    m_runner->requests.size() - m_runner->callbacks.size();
+                const ProcessRequest& pending = m_runner->requests.at(index);
+                if (pending.program == QLatin1String("wpctl")
+                    && !pending.arguments.isEmpty()
+                    && pending.arguments.first() == QLatin1String("get-volume")) {
+                    result.exitCode = 0;
+                    result.standardOutput = QByteArrayLiteral("Volume: 0.30\n");
+                } else {
+                    const int code =
+                        m_completerScript.isEmpty() ? 0 : m_completerScript.takeFirst();
+                    result.exitCode = code;
+                    result.standardOutput = code == 0
+                        ? QByteArrayLiteral("{\"ok\":true}\n")
+                        : QByteArrayLiteral(
+                              "{\"success\":false,\"error\":\"Request timed out\"}\n");
+                }
                 m_runner->complete(result);
             }
         });
@@ -1936,6 +1955,16 @@ int DaemonDbusTest::keypressCount(const QString& key) const {
         }
     }
     return count;
+}
+
+bool DaemonDbusTest::hasPcControlRequest(const QString& subcommand) const {
+    for (const ProcessRequest& request : m_runner->requests) {
+        if (request.program == QLatin1String("wpctl") && !request.arguments.isEmpty()
+            && request.arguments.first() == subcommand) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void DaemonDbusTest::completePollVersion() {
@@ -2607,22 +2636,28 @@ void DaemonDbusTest::pcPollerTracksPipeWireVolume() {
 
 void DaemonDbusTest::pcVolumeEdgeFiresStateChangeRule() {
     recreateDaemon(30s, {}, {}, 30ms);
-    const QString ruleId = addRuleReturningId(QStringLiteral(
+    // The action is absolute mute control: keypresses cannot target This PC.
+    // The PC starts muted, so the firing is a successful no-op — provable
+    // without any delivery bookkeeping.
+    addRuleReturningId(QStringLiteral(
         R"json({"name":"Night wind-down","devices":["LOCAL-PC"],)json"
         R"json("trigger":{"type":"stateChange","field":"volume","op":"lt","value":20},)json"
-        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+        R"json("actions":[{"type":"mute","muted":true}]})json"));
 
     completePcVolumePoll(QByteArrayLiteral("Volume: 0.25\n"));  // baseline above threshold
     QTest::qWait(50);
-    QCOMPARE(homeKeypressCount(), 0);
+    QVERIFY2(!rulesListing()
+                  .value(QStringLiteral("rules"))
+                  .toArray()
+                  .at(0)
+                  .toObject()
+                  .contains(QStringLiteral("lastRun")),
+             "the baseline observation must stay silent");
 
-    startRunnerCompleter();  // the firing waits for its delivery verdict
+    // Crossing below 20 fires synchronously inside this tick.
     completePcVolumePoll(QByteArrayLiteral("Volume: 0.05 [MUTED]\n"));
-    stopRunnerCompleter();
-    QCOMPARE(homeKeypressCount(), 1);
     const QJsonObject fired =
         rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
-    QCOMPARE(fired.value(QStringLiteral("id")).toString(), ruleId);
     QCOMPARE(fired.value(QStringLiteral("lastRun"))
                  .toObject()
                  .value(QStringLiteral("outcome"))
@@ -2704,23 +2739,36 @@ void DaemonDbusTest::playingEdgeFiresStateChangeRuleOnLocalPc() {
     const QString ruleId = addRuleReturningId(QStringLiteral(
         R"json({"name":"Pause the tv","devices":["LOCAL-PC"],)json"
         R"json("trigger":{"type":"stateChange","field":"playing","op":"is","value":true},)json"
-        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
-    // Nobody is playing yet: the baseline snapshot carries playing=false.
-    completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
+        R"json("actions":[{"type":"mute","muted":true}]})json"));
+    // Nobody is playing yet: the baseline snapshot carries playing=false, and
+    // the already-muted PC makes the authored action a clean no-op when the
+    // edge eventually fires.
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.40 [MUTED]\n"));
     QTest::qWait(50);
-    QCOMPARE(homeKeypressCount(), 0);
+    QVERIFY2(!rulesListing()
+                  .value(QStringLiteral("rules"))
+                  .toArray()
+                  .at(0)
+                  .toObject()
+                  .contains(QStringLiteral("lastRun")),
+             "nothing may fire before playback starts");
 
     FakeMprisPlayer player;
     QVERIFY(player.registerOnBus(QStringLiteral("org.mpris.MediaPlayer2.FakeTest")));
     player.setStatus(QStringLiteral("Playing"));
 
-    startRunnerCompleter();  // the firing waits for its delivery verdict
+    // Manual ticks are fully serialized: once the watcher's initial Get
+    // lands, the next snapshot flips playing and fires synchronously.
     bool fired = false;
     for (int attempts = 0; attempts < 100 && !fired; ++attempts) {
-        completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
-        fired = homeKeypressCount() > 0;
+        completePcVolumePoll(QByteArrayLiteral("Volume: 0.40 [MUTED]\n"));
+        fired = rulesListing()
+                    .value(QStringLiteral("rules"))
+                    .toArray()
+                    .at(0)
+                    .toObject()
+                    .contains(QStringLiteral("lastRun"));
     }
-    stopRunnerCompleter();
     QVERIFY(fired);
     const QJsonObject rule =
         rulesListing().value(QStringLiteral("rules")).toArray().at(0).toObject();
@@ -2730,6 +2778,139 @@ void DaemonDbusTest::playingEdgeFiresStateChangeRuleOnLocalPc() {
                  .value(QStringLiteral("outcome"))
                  .toString(),
              QStringLiteral("ok"));
+}
+
+void DaemonDbusTest::pcSetVolumeDispatchesExactWpctlShapeAndClampsToCeiling() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    const QDBusMessage ceiling =
+        waitForReply(m_proxy->UpdateDevice(
+            QStringLiteral("LOCAL-PC"), QStringLiteral(R"json({"volumeCeiling":50})json")));
+    QVERIFY2(ceiling.type() != QDBusMessage::ErrorMessage, qPrintable(ceiling.errorMessage()));
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));  // observed 30, unmuted
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Half volume","devices":["LOCAL-PC"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":80}]})json"));
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+
+    // The authored 80 clamps to the 50 ceiling and dispatches as one absolute
+    // wpctl call — no nudge walk.
+    // Only control invocations count here; the background get-volume poller
+    // shares the wpctl program name.
+    const auto controlRequests = [this] {
+        QList<ProcessRequest> out;
+        for (const ProcessRequest& request : m_runner->requests) {
+            if (request.program == QStringLiteral("wpctl") && !request.arguments.isEmpty()
+                && (request.arguments.first() == QStringLiteral("set-volume")
+                    || request.arguments.first() == QStringLiteral("set-mute"))) {
+                out.append(request);
+            }
+        }
+        return out;
+    };
+    QCOMPARE(controlRequests().size(), 1);
+    QCOMPARE(controlRequests().first().arguments,
+             QStringList({QStringLiteral("set-volume"),
+                          QStringLiteral("@DEFAULT_AUDIO_SINK@"),
+                          QStringLiteral("0.50")}));
+
+    // An exact match against the observed reading (30) is a clean no-op.
+    const QString noOpId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Already there","devices":["LOCAL-PC"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":30}]})json"));
+    startRunnerCompleter();
+    const QDBusMessage noOpRun = waitForReply(m_proxy->RunRule(noOpId));
+    stopRunnerCompleter();
+    QCOMPARE(noOpRun.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(controlRequests().size(), 1);  // the no-op dispatched nothing new
+}
+
+void DaemonDbusTest::pcMuteDispatchesToggleShapesAndNoOpsWhenEqual() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.40\n"));  // audible
+
+    const QString muteId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Hush","devices":["LOCAL-PC"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"mute","muted":true}]})json"));
+    startRunnerCompleter();
+    const QDBusMessage muted = waitForReply(m_proxy->RunRule(muteId));
+    stopRunnerCompleter();
+    QCOMPARE(muted.arguments().front().toString(), QStringLiteral("ok"));
+
+    // Only control invocations count here; the background get-volume poller
+    // shares the wpctl program name.
+    const auto controlRequests = [this] {
+        QList<ProcessRequest> out;
+        for (const ProcessRequest& request : m_runner->requests) {
+            if (request.program == QStringLiteral("wpctl") && !request.arguments.isEmpty()
+                && (request.arguments.first() == QStringLiteral("set-volume")
+                    || request.arguments.first() == QStringLiteral("set-mute"))) {
+                out.append(request);
+            }
+        }
+        return out;
+    };
+    QCOMPARE(controlRequests().size(), 1);
+    QCOMPARE(controlRequests().first().arguments,
+             QStringList({QStringLiteral("set-mute"),
+                          QStringLiteral("@DEFAULT_AUDIO_SINK@"),
+                          QStringLiteral("1")}));
+
+    // The daemon now observes the muted state: muting again is a no-op...
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.40 [MUTED]\n"));
+    startRunnerCompleter();
+    const QDBusMessage muteAgain = waitForReply(m_proxy->RunRule(muteId));
+    stopRunnerCompleter();
+    QCOMPARE(muteAgain.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(controlRequests().size(), 1);  // muting again dispatched nothing new
+
+    // ...and unmuting flips the flag with the 0 argument.
+    const QString unmuteId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Sound on","devices":["LOCAL-PC"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"mute","muted":false}]})json"));
+    startRunnerCompleter();
+    const QDBusMessage unmuted = waitForReply(m_proxy->RunRule(unmuteId));
+    stopRunnerCompleter();
+    QCOMPARE(unmuted.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(m_runner->lastRequest.program, QStringLiteral("wpctl"));
+    QCOMPARE(m_runner->lastRequest.arguments,
+             QStringList({QStringLiteral("set-mute"),
+                          QStringLiteral("@DEFAULT_AUDIO_SINK@"),
+                          QStringLiteral("0")}));
+}
+
+void DaemonDbusTest::keypressOnLocalPcIsRejectedWithoutTraffic() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.30\n"));
+    const int rdsTrafficBefore = static_cast<int>(std::count_if(
+        m_runner->requests.cbegin(), m_runner->requests.cend(),
+        [](const ProcessRequest& request) { return request.program == QLatin1String("rds"); }));
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Nothing to press","devices":["LOCAL-PC"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("failed"));
+
+    // A rejected attempt never leaves the machine: zero new rds traffic.
+    const int rdsTrafficAfter = static_cast<int>(std::count_if(
+        m_runner->requests.cbegin(), m_runner->requests.cend(),
+        [](const ProcessRequest& request) { return request.program == QLatin1String("rds"); }));
+    QCOMPARE(rdsTrafficAfter, rdsTrafficBefore);
 }
 
 void DaemonDbusTest::muteActionPressesVolumeMuteOnce() {
