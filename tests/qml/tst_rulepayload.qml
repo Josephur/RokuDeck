@@ -445,6 +445,34 @@ TestCase {
                 codes: ["ruleTargetInvalid"]
             },
             {
+                tag: "window-degenerate",
+                state: blankWith({
+                    name: "n",
+                    trigger: { type: "manual", windowEnabled: true,
+                               windowStart: "22:00", windowEnd: "22:00" },
+                    actions: [{ type: "keypress", key: "Home" }]
+                }),
+                codes: ["windowDegenerate"]
+            },
+            {
+                tag: "window-malformed",
+                state: blankWith({
+                    name: "n",
+                    trigger: { type: "manual", windowEnabled: true,
+                               windowStart: "7:5", windowEnd: "" },
+                    actions: [{ type: "keypress", key: "Home" }]
+                }),
+                codes: ["windowMalformed"]
+            },
+            {
+                tag: "script-name-invalid",
+                state: blankWith({
+                    name: "n", trigger: { type: "manual" },
+                    actions: [{ type: "runScript", script: "Movie Night!" }]
+                }),
+                codes: ["scriptNameInvalid"]
+            },
+            {
                 tag: "if-branch-empty",
                 state: blankWith({
                     name: "n", trigger: { type: "manual" },
@@ -531,5 +559,96 @@ TestCase {
                 '{"name":"Now playing","mode":"queued","devices":["LOCAL-PC"],'
                 + '"trigger":{"type":"stateChange","field":"playing","op":"is","value":true},'
                 + '"actions":[{"type":"mute","muted":true}]}');
+    }
+
+    function test_deviceScopedStateChangeTriggerIsBuilt() {
+        const payload = RulePayload.buildPayload(blankWith({
+            name: "This PC plays",
+            devices: ["LOCAL-PC"],
+            trigger: { type: "stateChange", device: "LOCAL-PC", field: "playing",
+                       op: "is", value: true },
+            actions: [{ type: "mute", muted: true }]
+        }), null);
+        compare(payload,
+                '{"name":"This PC plays","mode":"queued","devices":["LOCAL-PC"],'
+                + '"trigger":{"type":"stateChange","device":"LOCAL-PC",'
+                + '"field":"playing","op":"is","value":true},'
+                + '"actions":[{"type":"mute","muted":true}]}');
+
+        // Any device stays implicit, exactly like today's rules.
+        const anyPayload = RulePayload.buildPayload(blankWith({
+            name: "Any tv", devices: [],
+            trigger: { type: "stateChange", device: "*", field: "power",
+                       op: "is", value: "on" },
+            actions: [{ type: "keypress", key: "Home" }]
+        }), null);
+        verify(anyPayload.indexOf('"device"') < 0,
+               "a wildcard scope must not serialize a device key");
+    }
+
+    function test_activeWindowRoundsTripThroughTheForm() {
+        const state = blankWith({
+            name: "Overnight guard",
+            devices: ["LOCAL-PC"],
+            trigger: { type: "time", kind: "daily", time: "23:00",
+                       windowEnabled: true, windowStart: "22:00", windowEnd: "08:00" },
+            actions: [{ type: "mute", muted: true }]
+        });
+        const payload = RulePayload.buildPayload(state, null);
+        compare(payload,
+                '{"name":"Overnight guard","mode":"queued","devices":["LOCAL-PC"],'
+                + '"trigger":{"type":"time","kind":"daily","time":"23:00",'
+                + '"activeWindow":{"start":"22:00","end":"08:00"}},'
+                + '"actions":[{"type":"mute","muted":true}]}');
+
+        // The stored document reads back into the same form shape...
+        const form = RulePayload.toFormState(JSON.parse(payload));
+        compare(form.trigger.windowEnabled, true);
+        compare(form.trigger.windowStart, "22:00");
+        compare(form.trigger.windowEnd, "08:00");
+        // ...and rebuilds byte-for-byte.
+        const rebuilt = JSON.parse(
+            RulePayload.buildPayload(form, JSON.parse(payload)));
+        compare(JSON.stringify(rebuilt), JSON.stringify(JSON.parse(payload)));
+
+        // Anytime (the default) never emits a window block.
+        const anytime = RulePayload.buildPayload(blankWith({
+            name: "Anytime", devices: [], trigger: { type: "manual" },
+            actions: [{ type: "keypress", key: "Home" }]
+        }), null);
+        verify(anytime.indexOf("activeWindow") < 0,
+               "an absent window must not serialize");
+    }
+
+    function test_runScriptStepIsBuiltAndValidated() {
+        const payload = RulePayload.buildPayload(blankWith({
+            name: "Movie night",
+            devices: ["LOCAL-PC"],
+            trigger: { type: "manual" },
+            actions: [{ type: "runScript", script: "movie-night" }]
+        }), null);
+        compare(payload,
+                '{"name":"Movie night","mode":"queued","devices":["LOCAL-PC"],'
+                + '"trigger":{"type":"manual"},'
+                + '"actions":[{"type":"runScript","script":"movie-night"}]}');
+
+        const form = RulePayload.toFormState(JSON.parse(payload));
+        compare(form.actions[0].type, "runScript");
+        compare(form.actions[0].script, "movie-night");
+        compare(RulePayload.validate(form).length, 0);
+
+        // Client-side gate mirrors the daemon's name regex.
+        form.actions[0].script = "../evil";
+        let flagged = false;
+        for (const problem of RulePayload.validate(form)) {
+            if (problem.code === "scriptNameInvalid") {
+                flagged = true;
+            }
+        }
+        verify(flagged, "a path-ish script name must be flagged");
+        form.actions[0].script = "Movie-Night";
+        compare(RulePayload.validate(form)
+                    .filter(problem => problem.code === "scriptNameInvalid").length,
+                1, "an uppercase script name must be flagged too");
     }
 }

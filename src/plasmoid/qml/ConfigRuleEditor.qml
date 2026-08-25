@@ -100,6 +100,15 @@ Kirigami.Dialog {
             return KI18n.i18nc("@info", "Delays run between 1 and 600 seconds.");
         case "ruleTargetInvalid":
             return KI18n.i18nc("@info", "Pick which rule this step runs.");
+        case "scriptNameInvalid":
+            return KI18n.i18nc("@info",
+                "Script names use lowercase letters, numbers, dashes, or underscores, starting with a letter or number.");
+        case "windowMalformed":
+            return KI18n.i18nc("@info",
+                "Enter both window bounds as HH:MM.");
+        case "windowDegenerate":
+            return KI18n.i18nc("@info",
+                "The active window needs two different times.");
         case "branchEmpty":
             return KI18n.i18nc("@info", "The \"then\" branch needs at least one action.");
         case "conditionIncomplete":
@@ -151,6 +160,17 @@ Kirigami.Dialog {
                 stateChangeOpCombo.currentIndex = op;
             }
         }
+        const deviceChoices = stateChangeDeviceCombo.model;
+        for (let scope = 0; scope < deviceChoices.length; ++scope) {
+            if (deviceChoices[scope].value
+                === (root.formState.trigger.device ?? "*")) {
+                stateChangeDeviceCombo.currentIndex = scope;
+            }
+        }
+        windowRadio.checked = root.formState.trigger.windowEnabled === true;
+        anytimeRadio.checked = !windowRadio.checked;
+        windowStartField.text = String(root.formState.trigger.windowStart ?? "");
+        windowEndField.text = String(root.formState.trigger.windowEnd ?? "");
         stateChangeValue.field = root.formState.trigger.field;
         stateChangeValue.op = root.formState.trigger.op;
         stateChangeValue.value = root.formState.trigger.value;
@@ -424,6 +444,35 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
+                    id: stateChangeDeviceCombo
+
+                    objectName: "stateChangeDeviceCombo"
+
+                    visible: root.formState !== null
+                             && root.formState.trigger.type === "stateChange"
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "On:")
+                    textRole: "label"
+                    model: {
+                        const choices = [{
+                            label: KI18n.i18nc("@option any-device", "Any device"),
+                            value: "*"
+                        }];
+                        const entries = root.bridge !== null
+                                        && root.bridge.deviceEntries !== undefined
+                            ? root.bridge.deviceEntries() : [];
+                        for (let i = 0; i < entries.length; ++i) {
+                            choices.push({ label: String(entries[i].name),
+                                           value: String(entries[i].serial) });
+                        }
+                        return choices;
+                    }
+                    onActivated: index => {
+                        root.formState.trigger.device = model[index].value;
+                        root.touchForm();
+                    }
+                }
+
+                PlasmaComponents.ComboBox {
                     id: stateChangeFieldCombo
 
                     objectName: "stateChangeFieldCombo"
@@ -472,17 +521,97 @@ Kirigami.Dialog {
                 }
             }
 
-            PlasmaComponents.Label {
-                objectName: "stateChangeScopeCaption"
+            Kirigami.Separator {
+                Layout.fillWidth: true
+            }
 
+            PlasmaExtras.Heading {
+                level: 4
+                text: KI18n.i18nc("@title:group", "Active")
+            }
+
+            Kirigami.FormLayout {
+                Layout.fillWidth: true
+
+                QQC2.RadioButton {
+                    id: anytimeRadio
+
+                    objectName: "activeAnytimeRadio"
+
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "Fires:")
+                    text: KI18n.i18nc("@option", "Anytime")
+                    onToggled: {
+                        if (checked && root.formState !== null) {
+                            root.formState.trigger.windowEnabled = false;
+                            root.touchForm();
+                        }
+                    }
+                }
+
+                QQC2.RadioButton {
+                    id: windowRadio
+
+                    objectName: "activeWindowRadio"
+
+                    text: KI18n.i18nc("@option", "Between")
+                    onToggled: {
+                        if (checked && root.formState !== null) {
+                            root.formState.trigger.windowEnabled = true;
+                            root.touchForm();
+                        }
+                    }
+                }
+
+                RowLayout {
+                    visible: root.formRevision >= 0 && root.formState !== null
+                             && root.formState.trigger.windowEnabled === true
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.TextField {
+                        id: windowStartField
+
+                        objectName: "windowStartField"
+
+                        inputMask: "99:99"
+                        inputMethodHints: Qt.ImhPreferNumbers
+                        placeholderText: "22:00"
+                        onTextEdited: {
+                            root.formState.trigger.windowStart = text;
+                            root.touchForm();
+                        }
+                    }
+
+                    QQC2.Label {
+                        text: KI18n.i18nc("@label window separator", "to")
+                    }
+
+                    QQC2.TextField {
+                        id: windowEndField
+
+                        objectName: "windowEndField"
+
+                        inputMask: "99:99"
+                        inputMethodHints: Qt.ImhPreferNumbers
+                        placeholderText: "08:00"
+                        onTextEdited: {
+                            root.formState.trigger.windowEnd = text;
+                            root.touchForm();
+                        }
+                    }
+                }
+            }
+
+            PlasmaComponents.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 visible: root.formState !== null
-                         && root.formState.trigger.type === "stateChange"
+                         && root.formState.trigger.windowEnabled === true
+                         && (root.formState.trigger.windowStart ?? "").length === 4
+                         && (root.formState.trigger.windowEnd ?? "").length === 4
                 color: Kirigami.Theme.disabledTextColor
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 text: KI18n.i18nc("@info",
-                    "This trigger watches every device; narrow it to specific devices with extra conditions.")
+                    "A window past midnight wraps around, e.g. 22:00 to 08:00.")
             }
 
             Kirigami.Separator {

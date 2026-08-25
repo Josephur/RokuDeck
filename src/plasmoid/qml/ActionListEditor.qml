@@ -52,8 +52,8 @@ ColumnLayout {
     }
 
     function append(type) {
-        const blank = { type: type, key: "Home", appId: "", volume: 50,
-                        muted: false, seconds: 10, id: "", cond: null,
+        const blank = { type: type, key: "Home", appId: "", script: "",
+                        volume: 50, muted: false, seconds: 10, id: "", cond: null,
                         thenActions: [], elseActions: [] };
         const next = listRoot.actions.slice();
         next.push(blank);
@@ -225,6 +225,13 @@ ColumnLayout {
 
                 text: KI18n.i18nc("@item:inmenu", "Run another automation")
                 onTriggered: listRoot.append("runRule")
+            }
+
+            QQC2.MenuItem {
+                objectName: "addRunScriptStep"
+
+                text: KI18n.i18nc("@item:inmenu", "Run one of your scripts")
+                onTriggered: listRoot.append("runScript")
             }
 
             QQC2.MenuItem {

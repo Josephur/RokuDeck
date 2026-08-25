@@ -51,6 +51,7 @@ ColumnLayout {
         keyCombo.currentIndex = Math.max(0,
             RulePayload.keypressKeys.indexOf(String(node.key)));
         appIdField.text = String(node.appId ?? "");
+        scriptNameField.text = String(node.script ?? "");
         volumeSlider.value = Number(node.volume);
         muteCombo.currentIndex = node.muted === true ? 0 : 1;
         delaySpin.value = Number(node.seconds);
@@ -65,7 +66,8 @@ ColumnLayout {
     Component.onCompleted: {
         if (stepRoot.kind === "keypress" || stepRoot.kind === "launchApp"
             || stepRoot.kind === "setVolume" || stepRoot.kind === "mute"
-            || stepRoot.kind === "delay" || stepRoot.kind === "runRule") {
+            || stepRoot.kind === "delay" || stepRoot.kind === "runRule"
+            || stepRoot.kind === "runScript") {
             stepRoot.syncFromNode();
         }
     }
@@ -92,6 +94,8 @@ ColumnLayout {
                 return KI18n.i18nc("@title step", "Wait a while");
             case "runRule":
                 return KI18n.i18nc("@title step", "Run another automation");
+            case "runScript":
+                return KI18n.i18nc("@title step", "Run one of your scripts");
             case "ifThenElse":
                 return KI18n.i18nc("@title step", "Decide between two branches");
             default:
@@ -253,6 +257,41 @@ ColumnLayout {
                 stepRoot.node.id = text;
                 stepRoot.bubble();
             }
+        }
+    }
+
+    ColumnLayout {
+        visible: stepRoot.kind === "runScript"
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.smallSpacing
+
+        Kirigami.FormLayout {
+            Layout.fillWidth: true
+
+            QQC2.TextField {
+                id: scriptNameField
+
+                objectName: "scriptNameField"
+
+                Kirigami.FormData.label: KI18n.i18nc("@label:textbox", "Script:")
+                placeholderText: KI18n.i18nc("@info:placeholder", "movie-night")
+                onTextEdited: {
+                    stepRoot.node.script = text;
+                    stepRoot.bubble();
+                }
+            }
+        }
+
+        PlasmaComponents.Label {
+            objectName: "scriptNameValidation"
+
+            visible: stepRoot.kind === "runScript"
+                     && !RulePayload.scriptIsValid(stepRoot.node?.script ?? "")
+            color: Kirigami.Theme.neutralTextColor
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+            wrapMode: Text.WordWrap
+            text: KI18n.i18nc("@info",
+                "Script names use lowercase letters, numbers, dashes, or underscores, starting with a letter or number. The daemon runs scripts it finds in its own scripts folder.")
         }
     }
 

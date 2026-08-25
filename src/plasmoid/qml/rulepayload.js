@@ -17,10 +17,16 @@ var keypressKeys = ["Home", "Back", "Up", "Down", "Left", "Right", "Select",
                     "Play", "Pause", "Rev", "Fwd", "InstantReplay",
                     "FindRemote", "Power", "PowerOn"];
 var actionTypes = ["keypress", "launchApp", "setVolume", "mute", "delay",
-                   "runRule", "ifThenElse"];
+                   "runRule", "runScript", "ifThenElse"];
 
 function appIdIsValid(appId) {
     return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(appId));
+}
+
+// Mirrors the daemon's script-name grammar: lowercase names only, no
+// separators — raw paths never reach the daemon.
+function scriptIsValid(script) {
+    return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(String(script));
 }
 
 function ruleIdIsValid(ruleId) {
@@ -52,6 +58,10 @@ function blankRule() {
             time: "08:00",
             date: "",
             minutes: 30,
+            device: "*",
+            windowEnabled: false,
+            windowStart: "",
+            windowEnd: "",
             field: "power",
             op: "is",
             value: "on"
@@ -84,34 +94,61 @@ function triggerToForm(trigger) {
     if (!trigger || typeof trigger !== "object") {
         return state;
     }
+    // The device scope and active window ride on every trigger type.
+    const common = {
+        device: trigger.device === undefined || trigger.device === null
+            || String(trigger.device).length === 0 ? "*" : String(trigger.device),
+        windowEnabled: trigger.activeWindow !== undefined
+            && trigger.activeWindow !== null && typeof trigger.activeWindow === "object",
+        windowStart: "",
+        windowEnd: ""
+    };
+    if (common.windowEnabled) {
+        const start = timeIsValid(trigger.activeWindow.start)
+            ? String(trigger.activeWindow.start) : "";
+        const end = timeIsValid(trigger.activeWindow.end)
+            ? String(trigger.activeWindow.end) : "";
+        common.windowEnabled = start.length > 0 && end.length > 0
+            && start !== end;
+        common.windowStart = start;
+        common.windowEnd = end;
+    }
     switch (String(trigger.type)) {
     case "manual":
-        return { type: "manual", kind: state.kind, time: state.time, date: "",
-                 minutes: state.minutes, field: state.field, op: state.op,
-                 value: state.value };
+        return Object.assign(
+            { type: "manual", kind: state.kind, time: state.time, date: "",
+              minutes: state.minutes, field: state.field, op: state.op,
+              value: state.value },
+            common);
     case "time": {
         const kind = timeKinds.indexOf(String(trigger.kind)) >= 0
             ? String(trigger.kind) : "daily";
-        return { type: "time", kind: kind,
-                 time: timeIsValid(trigger.time) ? String(trigger.time) : state.time,
-                 date: kind === "once" ? String(trigger.date ?? "") : "",
-                 minutes: state.minutes, field: state.field, op: state.op,
-                 value: state.value };
+        return Object.assign(
+            { type: "time", kind: kind,
+              time: timeIsValid(trigger.time) ? String(trigger.time) : state.time,
+              date: kind === "once" ? String(trigger.date ?? "") : "",
+              minutes: state.minutes, field: state.field, op: state.op,
+              value: state.value },
+            common);
     }
     case "interval": {
         const minutes = Number(trigger.minutes);
-        return { type: "interval", kind: state.kind, time: state.time, date: "",
-                 minutes: isNaN(minutes) ? state.minutes : minutes,
-                 field: state.field, op: state.op, value: state.value };
+        return Object.assign(
+            { type: "interval", kind: state.kind, time: state.time, date: "",
+              minutes: isNaN(minutes) ? state.minutes : minutes,
+              field: state.field, op: state.op, value: state.value },
+            common);
     }
     case "stateChange":
-        return { type: "stateChange", kind: state.kind, time: state.time, date: "",
-                 minutes: state.minutes,
-                 field: fields.indexOf(String(trigger.field)) >= 0
-                     ? String(trigger.field) : state.field,
-                 op: ops.indexOf(String(trigger.op)) >= 0 ? String(trigger.op) : state.op,
-                 value: canonicalValue(String(trigger.field), String(trigger.op),
-                                       trigger.value) };
+        return Object.assign(
+            { type: "stateChange", kind: state.kind, time: state.time, date: "",
+              minutes: state.minutes,
+              field: fields.indexOf(String(trigger.field)) >= 0
+                  ? String(trigger.field) : state.field,
+              op: ops.indexOf(String(trigger.op)) >= 0 ? String(trigger.op) : state.op,
+              value: canonicalValue(String(trigger.field), String(trigger.op),
+                                    trigger.value) },
+            common);
     default:
         // Unknown future trigger: carried verbatim so editing anything else in
         // the rule never silently drops it; validate() flags the rule.
@@ -161,12 +198,12 @@ function blankLeaf() {
 
 function actionToForm(action) {
     if (!action || typeof action !== "object") {
-        return { type: "keypress", key: "Home", appId: "", volume: 50,
+        return { type: "keypress", key: "Home", appId: "", script: "", volume: 50,
                  muted: false, seconds: 10, id: "", cond: null,
                  thenActions: [], elseActions: [] };
     }
-    const state = { type: String(action.type), key: "Home", appId: "", volume: 50,
-                    muted: false, seconds: 10, id: "", cond: null,
+    const state = { type: String(action.type), key: "Home", appId: "", script: "",
+                    volume: 50, muted: false, seconds: 10, id: "", cond: null,
                     thenActions: [], elseActions: [], passthrough: null };
     switch (state.type) {
     case "keypress":
@@ -174,6 +211,9 @@ function actionToForm(action) {
         break;
     case "launchApp":
         state.appId = String(action.appId === undefined ? "" : action.appId);
+        break;
+    case "runScript":
+        state.script = String(action.script === undefined ? "" : action.script);
         break;
     case "setVolume": {
         const volume = Number(action.volume);
@@ -257,28 +297,50 @@ function conditionNodeJson(node) {
 }
 
 function triggerJson(trigger) {
+    let built;
     switch (String(trigger.type)) {
     case "manual":
-        return { type: "manual" };
+        built = { type: "manual" };
+        break;
     case "time": {
-        const built = { type: "time", kind: String(trigger.kind),
-                        time: String(trigger.time) };
+        built = { type: "time", kind: String(trigger.kind),
+                  time: String(trigger.time) };
         if (String(trigger.kind) === "once") {
             built.date = String(trigger.date);
         }
-        return built;
+        break;
     }
     case "interval":
-        return { type: "interval", minutes: Number(trigger.minutes) };
-    case "stateChange":
-        return { type: "stateChange", field: String(trigger.field),
-                 op: String(trigger.op),
-                 value: conditionValueJson({ field: String(trigger.field),
-                                             op: String(trigger.op),
-                                             value: trigger.value }) };
+        built = { type: "interval", minutes: Number(trigger.minutes) };
+        break;
+    case "stateChange": {
+        // A specific device serial scopes the trigger; the wildcard stays
+        // implicit so existing documents keep their shape. Insertion order
+        // mirrors the daemon's own serializer.
+        built = { type: "stateChange" };
+        const device = String(trigger.device ?? "*");
+        if (device.length > 0 && device !== "*") {
+            built.device = device;
+        }
+        built.field = String(trigger.field);
+        built.op = String(trigger.op);
+        built.value = conditionValueJson({ field: String(trigger.field),
+                                           op: String(trigger.op),
+                                           value: trigger.value });
+        break;
+    }
     default:
         return Object.assign({}, trigger);
     }
+    // The optional time-of-day window rides on every type; an incomplete or
+    // degenerate one is dropped here (validate() blocks the save anyway).
+    if (trigger.windowEnabled === true && timeIsValid(trigger.windowStart)
+        && timeIsValid(trigger.windowEnd)
+        && trigger.windowStart !== trigger.windowEnd) {
+        built.activeWindow = { start: String(trigger.windowStart),
+                               end: String(trigger.windowEnd) };
+    }
+    return built;
 }
 
 function actionJson(action) {
@@ -298,6 +360,8 @@ function actionJson(action) {
         return { type: "delay", seconds: Number(action.seconds) };
     case "runRule":
         return { type: "runRule", id: String(action.id) };
+    case "runScript":
+        return { type: "runScript", script: String(action.script) };
     case "ifThenElse": {
         const built = { type: "ifThenElse", cond: conditionNodeJson(action.cond) };
         const thenSteps = [];
@@ -428,6 +492,8 @@ function validateAction(action) {
     }
     case "runRule":
         return ruleIdIsValid(action.id) ? [] : [{ code: "ruleTargetInvalid" }];
+    case "runScript":
+        return scriptIsValid(action.script) ? [] : [{ code: "scriptNameInvalid" }];
     case "ifThenElse": {
         const problems = validateNodeDepth(action.cond, 0);
         const thenEntries = Array.isArray(action.thenActions) ? action.thenActions : [];
@@ -484,6 +550,16 @@ function validate(formState) {
     default:
         problems.push({ code: "unsupportedContent" });
         break;
+    }
+
+    // The optional active window applies to every trigger type: both bounds
+    // must be HH:MM and non-degenerate (the daemon wraps midnight itself).
+    if (trigger.windowEnabled === true) {
+        if (!timeIsValid(trigger.windowStart) || !timeIsValid(trigger.windowEnd)) {
+            problems.push({ code: "windowMalformed" });
+        } else if (String(trigger.windowStart) === String(trigger.windowEnd)) {
+            problems.push({ code: "windowDegenerate" });
+        }
     }
 
     // Extra conditions are optional; only a present tree must be complete.
