@@ -8,8 +8,9 @@ All notable changes to RokuDeck are documented in this file.
 
 - RokuDeck now reacts to the machine it runs on: the daemon auto-creates a reserved
   **This PC** device (`LOCAL-PC`) that cannot be removed and always allows automations
-  (rename and volume ceiling stay user-controlled). An enabled rule that names This PC —
-  or reaches it through the wildcard — keeps the daemon alive like scheduled rules do.
+  (rename and volume ceiling stay user-controlled). An enabled rule that explicitly names
+  This PC keeps the daemon alive like scheduled rules do; wildcard rules resolve to Roku
+  devices alone and never target the PC.
 - This PC state flows from the local machine itself: a 2 s PipeWire poll (`wpctl`) feeds
   volume/mute readings (three consecutive failures flip health to `offline`), and an MPRIS
   watcher tracks every media player on the session bus into a new boolean `playing` field.

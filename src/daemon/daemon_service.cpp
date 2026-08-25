@@ -2121,8 +2121,15 @@ void DaemonService::applyLocalPcSnapshot(DeviceSnapshot snapshot) {
     m_snapshots.insert(snapshot.serial, snapshot);
     Q_EMIT DeviceSnapshotChanged(snapshot.serial, snapshotJson(snapshot));
     if (hadPrevious) {
-        runStateChangeFirings(
-            dueStateChangeRuleIds(m_rules, snapshot.serial, previous, snapshot));
+        // Opt-in targeting (spec §1): only enabled rules that explicitly list
+        // This PC may fire from its edges; Roku edges keep the full list.
+        QList<RuleDocument> pcRules;
+        for (const RuleDocument& rule : std::as_const(m_rules)) {
+            if (rule.enabled && rule.devices.contains(QLatin1String(localPcSerial))) {
+                pcRules.append(rule);
+            }
+        }
+        runStateChangeFirings(dueStateChangeRuleIds(pcRules, snapshot.serial, previous, snapshot));
     }
 }
 
@@ -2153,9 +2160,9 @@ bool DaemonService::hasAcceptedWork() const {
            m_scheduleTimer.isActive() || hasEnabledLocalPcRules();
 }
 
-// Spec §5 idle parity: an enabled rule that can reach This PC — by naming it
-// or through the wildcard — keeps the daemon alive exactly like a scheduled
-// rule does, because PC state changes may fire it at any moment.
+// Opt-in idle parity: an enabled rule that explicitly names This PC keeps the
+// daemon alive exactly like a scheduled rule does, because PC state changes
+// may fire it at any moment. Wildcards never reach This PC.
 bool DaemonService::hasEnabledLocalPcRules() const {
     for (const RuleDocument& rule : m_rules) {
         // Explicit listing only: wildcards never reach This PC.

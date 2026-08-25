@@ -196,7 +196,8 @@ class DaemonService final : public QObject, protected QDBusContext {
     // Issues one async org.freedesktop.DBus.Properties.Get for PlaybackStatus.
     void queryMprisStatus(const QString& service);
     void storeMprisStatus(const QString& service, const QVariant& value);
-    void recomputeMprisPlaying();    [[nodiscard]] QString nextRuleId() const;
+    void recomputeMprisPlaying();
+    [[nodiscard]] QString nextRuleId() const;
     void announceRules();
     [[nodiscard]] QList<RuleDocument>::iterator findRule(const QString& ruleId);
     [[nodiscard]] ActionResult executeActions(const RuleDocument& rule,

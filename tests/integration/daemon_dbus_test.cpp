@@ -139,6 +139,7 @@ class DaemonDbusTest final : public QObject {
     void localPcRulesKeepTheDaemonAwake();
     void wildcardRulesDoNotKeepTheDaemonAwakeForTheLocalPc();
     void wildcardRulesDoNotTargetTheLocalPc();
+    void wildcardStateChangeRuleIgnoresLocalPcEdges();
     void deviceJsonIsVersionedAndAddressChangesPreserveIdentity();
     void addressChangeInvalidatesSnapshotAndRejectsStalePoll();
     void discoveryUpdatesSerialKeyedRegistry();
@@ -2942,6 +2943,62 @@ void DaemonDbusTest::keypressOnLocalPcIsRejectedWithoutTraffic() {
         m_runner->requests.cbegin(), m_runner->requests.cend(),
         [](const ProcessRequest& request) { return request.program == QLatin1String("rds"); }));
     QCOMPARE(rdsTrafficAfter, rdsTrafficBefore);
+}
+
+void DaemonDbusTest::wildcardStateChangeRuleIgnoresLocalPcEdges() {
+    recreateDaemon(30s, {}, {}, 30ms);
+    // Wildcard shape: no devices array at all.
+    const QString wildcardId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Any TV watcher","trigger":{"type":"stateChange","field":"volume",)json"
+        R"json("op":"lt","value":20},"actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.25\n"));   // baseline above threshold
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.05\n"));   // PC crosses below 20
+
+    const QJsonArray rulesAfterWildcard =
+        rulesListing().value(QStringLiteral("rules")).toArray();
+    QCOMPARE(rulesAfterWildcard.size(), 1);
+    QCOMPARE(rulesAfterWildcard.at(0).toObject().value(QStringLiteral("id")).toString(),
+             wildcardId);
+    QVERIFY2(!rulesAfterWildcard.at(0).toObject().contains(QStringLiteral("lastRun")),
+             "a wildcard stateChange rule must not fire on Local PC edges");
+
+    // The same rule shape, but naming This PC explicitly: identical crossings
+    // DO fire it. Keypress cannot act on the PC, so the honest record is a
+    // fired run whose lone attempt was rejected (spec §4).
+    const QString explicitId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"PC watcher","devices":["LOCAL-PC"],"trigger":{"type":"stateChange",)json"
+        R"json("field":"volume","op":"lt","value":20},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.25\n"));  // leave the predicate
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.05\n"));  // rising edge into it
+
+    const QJsonArray rulesAfterExplicit =
+        rulesListing().value(QStringLiteral("rules")).toArray();
+    QCOMPARE(rulesAfterExplicit.at(0).toObject().value(QStringLiteral("id")).toString(),
+             wildcardId);
+    QVERIFY2(!rulesAfterExplicit.at(0).toObject().contains(QStringLiteral("lastRun")),
+             "the wildcard rule stays silent even across later crossings");
+    QCOMPARE(rulesAfterExplicit.at(1).toObject().value(QStringLiteral("id")).toString(),
+             explicitId);
+    QCOMPARE(rulesAfterExplicit.at(1).toObject()
+                 .value(QStringLiteral("lastRun"))
+                 .toObject()
+                 .value(QStringLiteral("outcome"))
+                 .toString(),
+             QStringLiteral("failed"));
+
+    // Zero device traffic anywhere: nothing left the machine, for either rule.
+    QCOMPARE(homeKeypressCount(), 0);
+    for (const ProcessRequest& request : m_runner->requests) {
+        if (request.program == QLatin1String("wpctl")) {
+            QVERIFY(request.arguments.first() == QLatin1String("get-volume"));
+        } else {
+            QVERIFY2(request.arguments.first() != QLatin1String("keypress"),
+                     "no keypress may reach any runner invocation");
+        }
+    }
 }
 
 void DaemonDbusTest::muteActionPressesVolumeMuteOnce() {
