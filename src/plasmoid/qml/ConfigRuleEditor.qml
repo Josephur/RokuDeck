@@ -49,7 +49,14 @@ Kirigami.Dialog {
 
     // Generous by default: this form holds trigger, conditions, and action
     // sections; the content scrolls only when a macro list outgrows it.
-    preferredWidth: Kirigami.Units.gridUnit * 46
+    // Kirigami.Dialog's preferredWidth only feeds its DEFAULT contentItem
+    // wrapper; this editor overrides contentItem with a Flickable (which has
+    // no intrinsic width), so the popup must be sized directly. Bound by the
+    // config window so it never overflows the settings dialog.
+    width: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 720,
+                    Kirigami.Units.gridUnit * 48)
+    height: Math.min(parent ? parent.height - Kirigami.Units.gridUnit * 2 : 720,
+                     Kirigami.Units.gridUnit * 44)
 
     function openForAdd() {
         root.editingRule = null;
