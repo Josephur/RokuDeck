@@ -6,6 +6,26 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- Rules that watch one device now say so: `stateChange` triggers accept an optional
+  `device` serial (absent keeps the existing any-device meaning), so edges on other devices
+  no longer fire the rule — This PC still joins automations only when explicitly named,
+  wildcards included.
+- Any trigger can be restricted to a time-of-day window via an optional `activeWindow`
+  block (`start`/`end` in HH:MM), checked against the local wall clock before each firing —
+  inclusive start, exclusive end, `end < start` wraps midnight, and `start == end` is
+  rejected as degenerate. Out-of-window firings are recorded and announced with a new
+  `inactive-window` outcome across every origin (scheduled, state change, manual). The rule
+  editor gains an **Active** section (Anytime / Between two times) and a device picker that
+  scopes `stateChange` triggers.
+- New `runScript` action executes user-approved local scripts by name from the daemon's own
+  scripts directory — `QStandardPaths::AppDataLocation` + `/scripts`, i.e.
+  `~/.local/share/rokudeckd/scripts`. The security shape, honestly: rules reference script
+  *names* only (`[a-z0-9][a-z0-9_-]{0,63}`; raw command strings never cross D-Bus), and at
+  fire time the daemon resolves the canonical path and requires it to remain inside the
+  scripts directory (symlink escapes count as failures), executing only regular executable
+  files directly — no shell, no arguments, 30-second timeout; missing or non-executable
+  files are rejected attempts. The editor adds a Run-script step with the same name check;
+  scripts cannot re-enter automations.
 - RokuDeck now reacts to the machine it runs on: the daemon auto-creates a reserved
   **This PC** device (`LOCAL-PC`) that cannot be removed and always allows automations
   (rename and volume ceiling stay user-controlled). An enabled rule that explicitly names
