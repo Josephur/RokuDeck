@@ -331,6 +331,7 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
+                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: modeCombo
 
                     objectName: "modeCombo"
@@ -397,6 +398,7 @@ Kirigami.Dialog {
                 Layout.fillWidth: true
 
                 PlasmaComponents.ComboBox {
+                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: triggerTypeCombo
 
                     objectName: "triggerTypeCombo"
@@ -451,6 +453,7 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
+                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: stateChangeDeviceCombo
 
                     objectName: "stateChangeDeviceCombo"
@@ -480,6 +483,7 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
+                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: stateChangeFieldCombo
 
                     objectName: "stateChangeFieldCombo"
@@ -500,6 +504,7 @@ Kirigami.Dialog {
                 }
 
                 PlasmaComponents.ComboBox {
+                    popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
                     id: stateChangeOpCombo
 
                     objectName: "stateChangeOpCombo"

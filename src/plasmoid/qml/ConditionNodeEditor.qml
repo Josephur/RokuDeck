@@ -72,6 +72,7 @@ ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
 
         PlasmaComponents.ComboBox {
+            popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
             id: kindCombo
 
             objectName: "conditionKindCombo"

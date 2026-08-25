@@ -109,6 +109,7 @@ ColumnLayout {
         Layout.fillWidth: true
 
         PlasmaComponents.ComboBox {
+            popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
             id: keyCombo
 
             objectName: "keyChoiceCombo"
@@ -186,6 +187,7 @@ ColumnLayout {
         Layout.fillWidth: true
 
         PlasmaComponents.ComboBox {
+            popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
             id: muteCombo
 
             objectName: "muteChoiceCombo"
@@ -230,6 +232,7 @@ ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
 
         PlasmaComponents.ComboBox {
+            popup.parent: typeof applicationWindow !== "undefined" ? applicationWindow().overlay : undefined
             id: ruleCombo
 
             objectName: "runRuleChoiceCombo"
