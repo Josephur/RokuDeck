@@ -202,6 +202,7 @@ class DaemonDbusTest final : public QObject {
     void volumeActionsWithoutObservedAudioFailWithoutDispatching();
     void mixedAudioStateAcrossTargetsYieldsPartial();
     void ceilingClampsAnUpwardVolumeWalk();
+    void volumeWalkBeyondQueueCapDeliversEveryPress();
     void downwardWalksIgnoreTheCeiling();
     void setVolumeAtTheCeilingIsACleanNoOp();
     void mixedCeilingsKeepPartialOutcomesTruthful();
@@ -3165,6 +3166,33 @@ void DaemonDbusTest::ceilingClampsAnUpwardVolumeWalk() {
     QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
     QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
     QCOMPARE(keypressCount(QStringLiteral("VolumeUp")), 4);
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 0);
+}
+
+void DaemonDbusTest::volumeWalkBeyondQueueCapDeliversEveryPress() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.44")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+
+    // Observed 10 walking toward 90: a delta of 80, bounded to 30 presses.
+    // The per-device queue holds only 4 outstanding commands, so the walk
+    // must deliver in batches — every press lands, none are rejected.
+    completePollVersion();
+    completePollReadings(10);
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Crank it","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":90}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeUp")), 30);
     QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 0);
 }
 

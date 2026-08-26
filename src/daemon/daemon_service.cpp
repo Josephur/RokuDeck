@@ -1409,52 +1409,59 @@ DaemonService::ActionResult DaemonService::executeActions(const RuleDocument& ru
     // command's own completion deadline, which always emits a verdict) until
     // every dispatch this run made has either been acknowledged by rds or
     // expired, so the outcome reflects what actually happened on the devices.
-    if (!pendingRequests.isEmpty()) {
-        QStringList remaining = std::move(pendingRequests);
-        QEventLoop wait;
-        QTimer backstop;
-        backstop.setSingleShot(true);
-        // The per-command deadlines always emit verdicts themselves; this
-        // backstop only covers a wedged runner and must outlive even the
-        // longest script budget.
-        backstop.start(CommandContract::daemonCompletionDeadlineMs
-                       + CommandContract::scriptTimeoutMs + 5000);
-        auto harvest = [&]() {
-            for (auto it = remaining.begin(); it != remaining.end();) {
-                const auto verdict = m_deliveryOutcomes.constFind(*it);
-                if (verdict == m_deliveryOutcomes.cend()) {
-                    ++it;
-                    continue;
-                }
-                if (!verdict.value()) {
-                    ++deliveryFailures;
-                }
-                m_deliveryOutcomes.erase(verdict);
-                it = remaining.erase(it);
-            }
-            return remaining.isEmpty();
-        };
-        harvest();
-        const QMetaObject::Connection verdicts =
-            connect(this, &DaemonService::CommandFinished, &wait,
-                    [&](const QString&, const QString&) {
-                        if (harvest()) {
-                            wait.quit();
-                        }
-                    });
-        connect(&backstop, &QTimer::timeout, &wait, &QEventLoop::quit);
-        if (!remaining.isEmpty()) {
-            wait.exec();
-        }
-        disconnect(verdicts);
-        // Anything the backstop gave up on counts as a failure.
-        deliveryFailures += static_cast<int>(remaining.size());
-        for (const QString& requestId : remaining) {
-            m_deliveryOutcomes.remove(requestId);
-        }
-    }
+    waitForDeliveryVerdicts(pendingRequests, deliveryFailures);
 
     return {true, {}, dispatched, rejected, deliveryFailures, cycleDetected};
+}
+
+void DaemonService::waitForDeliveryVerdicts(QStringList& requestIds, int& deliveryFailures)
+{
+    if (requestIds.isEmpty()) {
+        return;
+    }
+    QStringList remaining = std::move(requestIds);
+    QEventLoop wait;
+    QTimer backstop;
+    backstop.setSingleShot(true);
+    // The per-command deadlines always emit verdicts themselves; this
+    // backstop only covers a wedged runner and must outlive even the
+    // longest script budget.
+    backstop.start(CommandContract::daemonCompletionDeadlineMs
+                   + CommandContract::scriptTimeoutMs + 5000);
+    auto harvest = [&]() {
+        for (auto it = remaining.begin(); it != remaining.end();) {
+            const auto verdict = m_deliveryOutcomes.constFind(*it);
+            if (verdict == m_deliveryOutcomes.cend()) {
+                ++it;
+                continue;
+            }
+            if (!verdict.value()) {
+                ++deliveryFailures;
+            }
+            m_deliveryOutcomes.erase(verdict);
+            it = remaining.erase(it);
+        }
+        return remaining.isEmpty();
+    };
+    harvest();
+    const QMetaObject::Connection verdicts =
+        connect(this, &DaemonService::CommandFinished, &wait,
+                [&](const QString&, const QString&) {
+                    if (harvest()) {
+                        wait.quit();
+                    }
+                });
+    connect(&backstop, &QTimer::timeout, &wait, &QEventLoop::quit);
+    if (!remaining.isEmpty()) {
+        wait.exec();
+    }
+    disconnect(verdicts);
+    // Anything the backstop gave up on counts as a failure.
+    deliveryFailures += static_cast<int>(remaining.size());
+    for (const QString& requestId : remaining) {
+        m_deliveryOutcomes.remove(requestId);
+    }
+    requestIds.clear();
 }
 
 bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
@@ -1654,17 +1661,49 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                     QStringLiteral("key"),
                     delta > 0 ? QStringLiteral("VolumeUp") : QStringLiteral("VolumeDown"));
                 const int presses = std::min(qAbs(delta), 30);
-                for (int press = 0; press < presses; ++press) {
-                    if (delta > 0) {
-                        // Relative keys cannot be clamped by the protocol, so
-                        // each upward nudge re-checks the latest observation
-                        // and stops at the ceiling (best-effort, spec §2).
-                        const DeviceSnapshot latest = m_snapshots.value(serial);
-                        if (latest.volume.has_value() && *latest.volume >= device->volumeCeiling) {
-                            break;
-                        }
+                // The per-device queue holds only a handful of outstanding
+                // commands, so a long walk delivers in batches: enqueue up to
+                // the queue cap, drain those verdicts, then claim the slots
+                // again. Batching is open-loop (the poller cadence makes
+                // mid-walk readings stale); the ceiling re-check uses the
+                // freshest observation available at each press.
+                int walked = 0;
+                while (walked < presses) {
+                    if (cancelToken && cancelToken->load()) {
+                        break;
                     }
-                    enqueue(serial, command);
+                    const int batchStart = pendingRequests.size();
+                    const int batchLimit =
+                        std::min(presses - walked, CommandContract::maximumOutstandingPerDevice);
+                    bool ceilingReached = false;
+                    for (int batchPress = 0; batchPress < batchLimit; ++batchPress) {
+                        if (delta > 0) {
+                            // Relative keys cannot be clamped by the protocol, so
+                            // each upward nudge re-checks the latest observation
+                            // and stops at the ceiling (best-effort, spec §2).
+                            const DeviceSnapshot latest = m_snapshots.value(serial);
+                            if (latest.volume.has_value()
+                                && *latest.volume >= device->volumeCeiling) {
+                                ceilingReached = true;
+                                break;
+                            }
+                        }
+                        enqueue(serial, command);
+                    }
+                    const int batchEnqueued = pendingRequests.size() - batchStart;
+                    walked += batchEnqueued;
+                    // A wedged full queue would yield an empty batch forever;
+                    // charge the un-enqueued presses as rejections and move on.
+                    rejected += batchLimit - batchEnqueued;
+                    if (batchEnqueued > 0) {
+                        QStringList batch = pendingRequests.mid(batchStart);
+                        pendingRequests.erase(pendingRequests.begin() + batchStart,
+                                              pendingRequests.end());
+                        waitForDeliveryVerdicts(batch, deliveryFailures);
+                    }
+                    if (ceilingReached || batchEnqueued == 0) {
+                        break;
+                    }
                 }
             }
             continue;

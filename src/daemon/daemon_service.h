@@ -223,6 +223,12 @@ class DaemonService final : public QObject, protected QDBusContext {
                                            QStringList& pendingRequests, bool& cycleDetected,
                                            const std::shared_ptr<std::atomic_bool>& cancelToken
                                                = {});
+    // Blocks (nested event pump, bounded by per-command deadlines plus a
+    // wedged-runner backstop) until every listed request has a delivery
+    // verdict; verdicts are harvested into deliveryFailures and the list is
+    // left empty. Used by the run tail AND between volume-walk batches, so a
+    // long walk never overflows the per-device command queue.
+    void waitForDeliveryVerdicts(QStringList& requestIds, int& deliveryFailures);
     void rearmScheduleTimer();
     // Consumes one completed wpctl reading: healthy output becomes an Online
     // snapshot, and the third consecutive failure flips health to Offline.
