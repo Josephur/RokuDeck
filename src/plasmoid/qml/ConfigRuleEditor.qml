@@ -270,6 +270,8 @@ Kirigami.Dialog {
     contentItem: Flickable {
         id: editorScroll
 
+        objectName: "ruleEditorScroll"
+
         // Deliberately NOT clipped: a clip here would also cut off every
         // ComboBox dropdown (popups render inside the control's subtree),
         // which is exactly the clipped-dropdown bug this dialog shipped once.
