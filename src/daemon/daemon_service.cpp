@@ -1683,6 +1683,7 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                     const int batchLimit =
                         std::min(presses - walked, CommandContract::maximumOutstandingPerDevice);
                     bool ceilingReached = false;
+                    int refused = 0;
                     for (int batchPress = 0; batchPress < batchLimit; ++batchPress) {
                         if (delta > 0) {
                             // Relative keys cannot be clamped by the protocol, so
@@ -1695,20 +1696,29 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                                 break;
                             }
                         }
+                        const int before = pendingRequests.size();
                         enqueue(serial, command);
+                        if (pendingRequests.size() == before) {
+                            ++refused;
+                        }
                     }
                     const int batchEnqueued = pendingRequests.size() - batchStart;
                     walked += batchEnqueued;
-                    // A wedged full queue would yield an empty batch forever;
-                    // charge the un-enqueued presses as rejections and move on.
-                    rejected += batchLimit - batchEnqueued;
+                    // A refused enqueue is retried in a later batch once the
+                    // queue drains, so it is not a rejected attempt yet. Only a
+                    // batch that makes no progress at all charges its presses.
+                    rejected -= refused;
+                    if (batchEnqueued == 0 && !ceilingReached) {
+                        rejected += batchLimit;
+                        break;
+                    }
                     if (batchEnqueued > 0) {
                         QStringList batch = pendingRequests.mid(batchStart);
                         pendingRequests.erase(pendingRequests.begin() + batchStart,
                                               pendingRequests.end());
                         waitForDeliveryVerdicts(batch, deliveryFailures);
                     }
-                    if (ceilingReached || batchEnqueued == 0) {
+                    if (ceilingReached) {
                         break;
                     }
                 }

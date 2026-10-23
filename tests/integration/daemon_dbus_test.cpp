@@ -203,6 +203,7 @@ class DaemonDbusTest final : public QObject {
     void mixedAudioStateAcrossTargetsYieldsPartial();
     void ceilingClampsAnUpwardVolumeWalk();
     void volumeWalkBeyondQueueCapDeliversEveryPress();
+    void volumeWalkWithBusyQueueDeliversEveryPress();
     void downwardWalksIgnoreTheCeiling();
     void setVolumeAtTheCeilingIsACleanNoOp();
     void mixedCeilingsKeepPartialOutcomesTruthful();
@@ -3189,6 +3190,47 @@ void DaemonDbusTest::volumeWalkBeyondQueueCapDeliversEveryPress() {
         R"json("actions":[{"type":"setVolume","volume":90}]})json"));
 
     startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(keypressCount(QStringLiteral("VolumeUp")), 30);
+    QCOMPARE(keypressCount(QStringLiteral("VolumeDown")), 0);
+}
+
+void DaemonDbusTest::volumeWalkWithBusyQueueDeliversEveryPress() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.45")});
+    const QDBusMessage registered = waitForReply(m_proxy->RegisterClient(
+        QStringLiteral("busy-audio-widget"), QStringList{QStringLiteral("SERIAL-A")}, 1u));
+    QVERIFY2(registered.type() != QDBusMessage::ErrorMessage,
+             qPrintable(registered.errorMessage()));
+    // Observed 10 walking toward 90: 30 upward presses across several
+    // delivery batches.
+    completePollVersion();
+    completePollReadings(10);
+
+    // Occupy the per-device queue with unrelated widget commands before the
+    // run starts. The first walk batch can only claim the one free slot; the
+    // presses that do not fit must wait for a later batch, not count as
+    // rejected attempts (that would report a false "partial" even though
+    // every press landed).
+    const QString widgetCommand =
+        QStringLiteral(R"json({"operation":"keypress","key":"Back"})json");
+    for (int press = 0; press < 3; ++press) {
+        const QDBusMessage queued =
+            waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), widgetCommand));
+        QVERIFY2(queued.type() != QDBusMessage::ErrorMessage, qPrintable(queued.errorMessage()));
+    }
+
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Crank it while busy","devices":["SERIAL-A"],)json"
+        R"json("trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"setVolume","volume":90}]})json"));
+
+    // Let the run begin with the queue already busy, then drain everything
+    // from inside its delivery wait.
+    QTimer::singleShot(10, this, [this] { startRunnerCompleter(); });
     const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
     stopRunnerCompleter();
     QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
