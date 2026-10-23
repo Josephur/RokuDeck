@@ -447,6 +447,44 @@ void RuleModelTest::rejectsMalformedRules_data()
                            QJsonObject{{"start"_L1, "22:00"_L1}}}});
            })
         << "active window";
+    QTest::newRow("enabled-not-boolean")
+        << mutated([](QJsonObject& o) { o.insert("enabled"_L1, 1); })
+        << "enabled must be a boolean";
+    QTest::newRow("devices-not-array")
+        << mutated([](QJsonObject& o) { o.insert("devices"_L1, "SERIAL-A"_L1); })
+        << "devices must be an array";
+    QTest::newRow("devices-null")
+        << mutated([](QJsonObject& o) { o.insert("devices"_L1, QJsonValue::Null); })
+        << "devices must be an array";
+    QTest::newRow("ifthenelse-then-not-array")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{
+                       {"type"_L1, "ifThenElse"_L1},
+                       {"cond"_L1,
+                           QJsonObject{{"leaf"_L1,
+                               QJsonObject{{"device"_L1, "*"_L1},
+                                   {"field"_L1, "power"_L1},
+                                   {"op"_L1, "is"_L1},
+                                   {"value"_L1, "on"_L1}}}}},
+                       {"then"_L1, QJsonObject{}}}});
+           })
+        << "then must be an array";
+    QTest::newRow("ifthenelse-else-not-array")
+        << mutated([](QJsonObject& o) {
+               o.insert("actions"_L1,
+                   QJsonArray{QJsonObject{
+                       {"type"_L1, "ifThenElse"_L1},
+                       {"cond"_L1,
+                           QJsonObject{{"leaf"_L1,
+                               QJsonObject{{"device"_L1, "*"_L1},
+                                   {"field"_L1, "power"_L1},
+                                   {"op"_L1, "is"_L1},
+                                   {"value"_L1, "on"_L1}}}}},
+                       {"then"_L1, QJsonArray{}},
+                       {"else"_L1, QStringLiteral("nope")}}});
+           })
+        << "else must be an array";
     QTest::newRow("runscript-uppercase")
         << mutated([](QJsonObject& o) {
                o.insert("actions"_L1,

@@ -493,7 +493,12 @@ constexpr int maximumDepth = 16;
         return {ParseError{condition.error()}};
     }
     action.condition = std::move(condition.value());
-    const QJsonArray thenArray = object.value(QStringLiteral("then")).toArray();
+    const QJsonValue thenValue = object.value(QStringLiteral("then"));
+    if (!thenValue.isArray()) {
+        return {ParseError{ParseError::Code::InvalidValue,
+            QStringLiteral("ifThenElse then must be an array")}};
+    }
+    const QJsonArray thenArray = thenValue.toArray();
     for (const auto& entry : thenArray) {
         auto parsed = parseAction(entry.toObject(), depth + 1);
         if (!parsed) {
@@ -502,7 +507,12 @@ constexpr int maximumDepth = 16;
         action.thenActions.append(std::move(parsed.value()));
     }
     if (object.contains(QStringLiteral("else"))) {
-        const QJsonArray elseArray = object.value(QStringLiteral("else")).toArray();
+        const QJsonValue elseValue = object.value(QStringLiteral("else"));
+        if (!elseValue.isArray()) {
+            return {ParseError{ParseError::Code::InvalidValue,
+                QStringLiteral("ifThenElse else must be an array")}};
+        }
+        const QJsonArray elseArray = elseValue.toArray();
         for (const auto& entry : elseArray) {
             auto parsed = parseAction(entry.toObject(), depth + 1);
             if (!parsed) {
@@ -618,9 +628,21 @@ ParseResult<RuleDocument> parseRule(const QJsonObject& object)
             QStringLiteral("unknown mode %1").arg(rule.mode)}};
     }
     const QJsonValue enabled = object.value(QStringLiteral("enabled"));
+    if (!enabled.isUndefined() && !enabled.isBool()) {
+        return {ParseError{ParseError::Code::InvalidValue,
+            QStringLiteral("enabled must be a boolean")}};
+    }
     rule.enabled = enabled.isUndefined() ? true : enabled.toBool();
 
-    const QJsonArray devices = object.value(QStringLiteral("devices")).toArray();
+    // An omitted list keeps its documented meaning (wildcard / no branch);
+    // a wrongly typed one is an error, never a silent widening to every
+    // device or a silently dropped branch.
+    const QJsonValue devicesValue = object.value(QStringLiteral("devices"));
+    if (!devicesValue.isUndefined() && !devicesValue.isArray()) {
+        return {ParseError{ParseError::Code::InvalidValue,
+            QStringLiteral("devices must be an array")}};
+    }
+    const QJsonArray devices = devicesValue.toArray();
     for (const auto& entry : devices) {
         if (!entry.isString() || entry.toString().isEmpty()) {
             return {ParseError{ParseError::Code::InvalidValue,
