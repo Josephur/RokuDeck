@@ -29,7 +29,7 @@ TestCase {
         property bool available: true
 
         function deviceEntries() {
-            return [];
+            return [{ serial: "SERIAL-B", name: "Bedroom TV" }];
         }
     }
 
@@ -103,5 +103,63 @@ TestCase {
         compare(combo.model[1].label, "Unmuted");
         compare(combo.currentIndex, 0);
         compare(combo.currentText, "Muted");
+    }
+
+    // The M8 editor surfaces: a device scope on stateChange triggers, a
+    // time-of-day window, and the run-script step. AGENTS.md requires new
+    // editor surfaces to be pinned here, not just in the payload tests.
+    function test_scopedDeviceWindowAndScriptRoundTripIntoTheEditor() {
+        const editor = editorComponent.createObject(testCase);
+        verify(editor !== null);
+        editor.openForEdit({
+            id: "rWindowed",
+            name: "Overnight movie",
+            enabled: true,
+            mode: "queued",
+            devices: [],
+            trigger: {
+                type: "stateChange",
+                device: "SERIAL-B",
+                field: "playing",
+                op: "is",
+                value: true,
+                activeWindow: { start: "22:00", end: "08:00" }
+            },
+            actions: [{ type: "runScript", script: "movie-night" }]
+        });
+
+        const deviceCombo = findItem(editor, "stateChangeDeviceCombo");
+        verify(deviceCombo !== null, "the scoped-device picker must exist");
+        compare(deviceCombo.model.length, 2, "Any plus the known device");
+        compare(deviceCombo.model[0].value, "*");
+        compare(deviceCombo.model[1].value, "SERIAL-B");
+        compare(deviceCombo.currentIndex, 1,
+                "a scoped rule must select its device, not fall back to Any");
+
+        const windowRadio = findItem(editor, "activeWindowRadio");
+        verify(windowRadio !== null, "the window radio must exist");
+        verify(windowRadio.checked, "an activeWindow rule must open on Between");
+        const startField = findItem(editor, "windowStartField");
+        const endField = findItem(editor, "windowEndField");
+        verify(startField !== null && endField !== null);
+        compare(startField.text, "22:00");
+        compare(endField.text, "08:00");
+
+        const scriptField = findItem(editor, "scriptNameField");
+        verify(scriptField !== null, "the run-script step editor must exist");
+        compare(scriptField.text, "movie-night");
+
+        editor.destroy();
+    }
+
+    function test_anytimeRuleHasNoWindowFieldsVisible() {
+        const editor = editorComponent.createObject(testCase);
+        verify(editor !== null);
+        editor.openForAdd();
+        const windowRow = findItem(editor, "windowStartField");
+        verify(windowRow !== null, "the window fields exist for later rules");
+        verify(!windowRow.visible,
+               "an Anytime rule must not show window bounds");
+        editor.destroy();
     }
 }
