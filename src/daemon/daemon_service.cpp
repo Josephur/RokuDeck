@@ -1424,10 +1424,9 @@ void DaemonService::waitForDeliveryVerdicts(QStringList& requestIds, int& delive
     QTimer backstop;
     backstop.setSingleShot(true);
     // The per-command deadlines always emit verdicts themselves; this
-    // backstop only covers a wedged runner and must outlive even the
-    // longest script budget.
-    backstop.start(CommandContract::daemonCompletionDeadlineMs
-                   + CommandContract::scriptTimeoutMs + 5000);
+    // backstop only covers a wedged runner and must outlive even the longest
+    // automation queue drain (a full queue of script steps).
+    backstop.start(CommandContract::automationCommandDeadlineMs + 5000);
     auto harvest = [&]() {
         for (auto it = remaining.begin(); it != remaining.end();) {
             const auto verdict = m_deliveryOutcomes.constFind(*it);
@@ -1507,7 +1506,7 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
         }
         const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         queue.enqueue({requestId, serial, validated.arguments,
-                       QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs,
+                       QDeadlineTimer(CommandContract::automationCommandDeadlineMs,
                                       Qt::PreciseTimer),
                        true});
         pendingRequests.append(requestId);
@@ -1515,12 +1514,12 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
         processNextCommand(serial);
     };
     // This PC control runs wpctl directly: the arguments are final, so no rds
-    // schema validation applies — only the shared queue bounds do. The
-    // deadline is per call: device commands use the shared contract budget,
-    // scripts their own generous one (ruling 4).
+    // schema validation applies — only the shared queue bounds do. Every
+    // automation command gets automationCommandDeadlineMs, which leaves room
+    // for the script steps that may run ahead of it (ruling 4); the process
+    // budget itself is chosen per program in processNextCommand.
     auto enqueueProcess = [&](const QString& serial, const QString& program,
-                              const QStringList& arguments,
-                              qint64 deadlineMs = CommandContract::daemonCompletionDeadlineMs) {
+                              const QStringList& arguments) {
         QQueue<QueuedCommand>& queue = m_commandQueues[serial];
         if (queue.size() >= CommandContract::maximumOutstandingPerDevice) {
             ++rejected;
@@ -1528,7 +1527,8 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
         }
         const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         queue.enqueue({requestId, serial, arguments,
-                       QDeadlineTimer(deadlineMs, Qt::PreciseTimer),
+                       QDeadlineTimer(CommandContract::automationCommandDeadlineMs,
+                                      Qt::PreciseTimer),
                        true, program});
         pendingRequests.append(requestId);
         ++dispatched;
@@ -1583,8 +1583,7 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
                 ++rejected;
                 continue;
             }
-            enqueueProcess(QLatin1String(localPcSerial), canonical, {},
-                           CommandContract::scriptTimeoutMs);
+            enqueueProcess(QLatin1String(localPcSerial), canonical, {});
             continue;
         }
         if (action.type == QStringLiteral("mute")) {
