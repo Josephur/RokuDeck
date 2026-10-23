@@ -10,6 +10,8 @@ import org.kde.ki18n
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
 
+import "rulepayload.js" as RulePayload
+
 // One ordered action list: the rule's Then, or a branch inside an
 // ifThenElse. Steps are plain JS objects from rulepayload.js; structural
 // edits replace the array and raise structureChanged so the host revision
@@ -52,8 +54,12 @@ ColumnLayout {
     }
 
     function append(type) {
+        // An ifThenElse step is meaningless without its condition; seed a
+        // blank leaf so the nested condition editor has a live node instead
+        // of the null it cannot edit.
         const blank = { type: type, key: "Home", appId: "", script: "",
-                        volume: 50, muted: false, seconds: 10, id: "", cond: null,
+                        volume: 50, muted: false, seconds: 10, id: "",
+                        cond: type === "ifThenElse" ? RulePayload.blankLeaf() : null,
                         thenActions: [], elseActions: [] };
         const next = listRoot.actions.slice();
         next.push(blank);

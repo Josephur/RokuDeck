@@ -25,6 +25,10 @@ RowLayout {
     property string field: "power"
     property string op: "is"
     property var value: "on"
+    // Set while an owner reloads the three properties: canonicalization still
+    // happens, but the transient intermediate states must not be published
+    // back or they would overwrite the stored value being loaded.
+    property bool syncing: false
 
     readonly property bool isBetween: root.op === "between"
     readonly property var canonicalValues: root.field === "power"
@@ -39,17 +43,22 @@ RowLayout {
     spacing: Kirigami.Units.smallSpacing
 
     onFieldChanged: {
-        if (!root.isBetween) {
-            root.value = RulePayload.canonicalValue(root.field, root.op, root.value);
-        }
+        // A field change can invalidate the old value (volume 50 is not a
+        // power state), so canonicalize for the new field and publish it:
+        // owners keep one source of truth and the picker never lies.
+        root.value = RulePayload.canonicalValueForField(root.field, root.op, root.value);
         root.refreshEditors();
+        if (!root.syncing) {
+            root.valueEdited(root.value);
+        }
     }
 
     onOpChanged: {
-        if (root.isBetween || root.field === "volume") {
-            root.value = RulePayload.canonicalValue(root.field, root.op, root.value);
-        }
+        root.value = RulePayload.canonicalValueForField(root.field, root.op, root.value);
         root.refreshEditors();
+        if (!root.syncing) {
+            root.valueEdited(root.value);
+        }
     }
 
     // Owners re-assign value when reloading form state; declarative bindings
@@ -76,8 +85,7 @@ RowLayout {
                                   ? "" : root.value);
         }
         if (betweenRow.visible) {
-            const pair = Array.isArray(root.value) && root.value.length === 2
-                ? root.value : [0, 100];
+            const pair = RulePayload.isValuePair(root.value) ? root.value : [0, 100];
             betweenLowSpin.value = Number(pair[0]) || 0;
             betweenHighSpin.value = Number(pair[1]) || 0;
         }
@@ -172,10 +180,9 @@ RowLayout {
             to: 10000
             editable: true
             onValueModified: {
-                const pair = Array.isArray(root.value) ? root.value.slice() : [0, 100];
-                pair[0] = value;
-                root.value = pair;
-                root.valueEdited(pair);
+                const pair = RulePayload.isValuePair(root.value) ? root.value : [0, 100];
+                root.value = [value, Number(pair[1])];
+                root.valueEdited(root.value);
             }
         }
 
@@ -192,10 +199,9 @@ RowLayout {
             to: 10000
             editable: true
             onValueModified: {
-                const pair = Array.isArray(root.value) ? root.value.slice() : [0, 100];
-                pair[1] = value;
-                root.value = pair;
-                root.valueEdited(pair);
+                const pair = RulePayload.isValuePair(root.value) ? root.value : [0, 100];
+                root.value = [Number(pair[0]), value];
+                root.valueEdited(root.value);
             }
         }
     }

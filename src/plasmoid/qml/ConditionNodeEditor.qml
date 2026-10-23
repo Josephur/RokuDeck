@@ -33,6 +33,9 @@ ColumnLayout {
     spacing: Kirigami.Units.smallSpacing
 
     function chooseKind(nextKind) {
+        if (nodeRoot.node === null || nodeRoot.node === undefined) {
+            return;  // no live node to edit; hosts seed one before showing this
+        }
         if (nodeRoot.node.kind === nextKind) {
             return;
         }
@@ -44,6 +47,10 @@ ColumnLayout {
         } else if (nextKind === "not" && !Array.isArray(nodeRoot.node.children)) {
             nodeRoot.node.children = [];
         }
+        // Update this node's own gates immediately: branch editors live
+        // outside the page-level condition tree, so the host's refreshGates()
+        // never reaches them.
+        nodeRoot.refreshGates();
         nodeRoot.structureChanged();
     }
 

@@ -16,7 +16,8 @@ var healthValues = ["online", "standby", "degraded", "offline"];
 var mediaValues = ["playing", "paused", "stopped", "idle"];
 var keypressKeys = ["Home", "Back", "Up", "Down", "Left", "Right", "Select",
                     "Play", "Pause", "Rev", "Fwd", "InstantReplay",
-                    "FindRemote", "Power", "PowerOn"];
+                    "FindRemote", "Power", "PowerOn",
+                    "VolumeUp", "VolumeDown", "VolumeMute"];
 var actionTypes = ["keypress", "launchApp", "setVolume", "mute", "delay",
                    "runRule", "runScript", "ifThenElse"];
 
@@ -38,12 +39,31 @@ function timeIsValid(time) {
     return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(String(time));
 }
 
+// A two-number range. Deliberately not Array.isArray: values round-trip
+// through QML `var` properties and signals, where a JS array can arrive as an
+// array-like list whose Array.isArray() is false. Shape is what matters.
+function isValuePair(value) {
+    return value !== null && typeof value === "object"
+        && typeof value.length === "number" && value.length === 2
+        && !isNaN(Number(value[0])) && !isNaN(Number(value[1]));
+}
+
 function dateIsValid(date) {
-    if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(String(date))) {
+    const text = String(date);
+    if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(text)) {
         return false;
     }
-    const parsed = new Date(String(date) + "T00:00:00");
-    return !isNaN(parsed.getTime());
+    // new Date() rolls impossible days over (Feb 31 becomes Mar 3), which the
+    // daemon's QDate parser rejects. Compare the components back so the two
+    // validators agree on what exists.
+    const year = Number(text.slice(0, 4));
+    const month = Number(text.slice(5, 7));
+    const day = Number(text.slice(8, 10));
+    const parsed = new Date(text + "T00:00:00");
+    return !isNaN(parsed.getTime())
+        && parsed.getFullYear() === year
+        && parsed.getMonth() === month - 1
+        && parsed.getDate() === day;
 }
 
 // A fresh form state for the add flow; every picker starts coherent.
@@ -74,10 +94,8 @@ function blankRule() {
 
 function canonicalValue(field, op, value) {
     if (op === "between") {
-        const low = typeof value === "object" && value !== null && value.length === 2
-            ? Number(value[0]) : NaN;
-        const high = typeof value === "object" && value !== null && value.length === 2
-            ? Number(value[1]) : NaN;
+        const low = isValuePair(value) ? Number(value[0]) : NaN;
+        const high = isValuePair(value) ? Number(value[1]) : NaN;
         return [isNaN(low) ? 0 : low, isNaN(high) ? 100 : high];
     }
     if (field === "muted" || field === "playing") {
@@ -88,6 +106,39 @@ function canonicalValue(field, op, value) {
         return isNaN(number) ? 0 : number;
     }
     return String(value === undefined || value === null ? "" : value);
+}
+
+// The canonical value a field falls back to when the previous value means
+// nothing for it (for example volume 50 after switching to power).
+function defaultValue(field) {
+    switch (String(field)) {
+    case "muted":
+    case "playing":
+        return false;
+    case "volume":
+        return 0;
+    case "screensaver":
+        return "inactive";
+    case "health":
+        return "online";
+    case "media":
+        return "playing";
+    case "app":
+        return "";
+    default:
+        return "on";
+    }
+}
+
+// Value for a predicate whose field or comparison just changed: keep the old
+// value when it is meaningful for the new pair, otherwise use the field's
+// default, so the picker and the stored value can never disagree.
+function canonicalValueForField(field, op, value) {
+    const candidate = canonicalValue(field, op, value);
+    if (validatePredicate(field, op, candidate).length === 0) {
+        return candidate;
+    }
+    return op === "between" ? [0, 100] : defaultValue(field);
 }
 
 function triggerToForm(trigger) {
@@ -233,7 +284,7 @@ function actionToForm(action) {
         state.id = String(action.id === undefined ? "" : action.id);
         break;
     case "ifThenElse":
-        state.cond = nodeToForm(action.cond);
+        state.cond = nodeToForm(action.cond) ?? blankLeaf();
         state.thenActions = (Array.isArray(action.then) ? action.then : [])
             .map(actionToForm);
         state.elseActions = (Array.isArray(action.else) ? action.else : [])
@@ -263,8 +314,7 @@ function toFormState(rule) {
 
 function conditionValueJson(node) {
     if (node.op === "between") {
-        const pair = Array.isArray(node.value) && node.value.length === 2
-            ? node.value : [0, 100];
+        const pair = isValuePair(node.value) ? node.value : [0, 100];
         return [Number(pair[0]), Number(pair[1])];
     }
     if (node.field === "muted" || node.field === "playing") {
@@ -421,8 +471,7 @@ function validatePredicate(field, op, value) {
         return problems;
     }
     if (op === "between") {
-        if (!Array.isArray(value) || value.length !== 2
-            || isNaN(Number(value[0])) || isNaN(Number(value[1]))) {
+        if (!isValuePair(value)) {
             problems.push({ code: "betweenNeedsTwoNumbers" });
         }
         return problems;
@@ -447,7 +496,7 @@ function validateNodeDepth(node, depth) {
     if (!node) {
         return [{ code: "conditionIncomplete" }];
     }
-    if (depth > 12) {
+    if (depth > 16) {
         return [{ code: "tooDeep" }];
     }
     if (node.kind === "leaf") {
@@ -572,6 +621,9 @@ function validate(formState) {
     const actions = Array.isArray(formState.actions) ? formState.actions : [];
     if (actions.length === 0) {
         problems.push({ code: "actionsEmpty" });
+    } else if (actions.length > 32) {
+        // The daemon accepts at most 32 top-level actions.
+        problems.push({ code: "tooManyActions" });
     }
     for (let i = 0; i < actions.length; ++i) {
         problems.push.apply(problems, validateAction(actions[i]));

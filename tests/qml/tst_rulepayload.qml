@@ -292,7 +292,8 @@ TestCase {
     function test_validateRejectsBrokenForms() {
         const deepNotChain = (() => {
             let node = leaf("*", "power", "is", "on");
-            for (let depth = 0; depth < 13; ++depth) {
+            // One level deeper than the daemon's maximumDepth (16).
+            for (let depth = 0; depth < 17; ++depth) {
                 node = notGroup(node);
             }
             return node;
@@ -532,6 +533,21 @@ TestCase {
         compare(typeof rebuilt.actions[0].volume, "number", "volumes stay numeric");
     }
 
+    // A field or comparison change must never leave a value that means
+    // nothing for the new pair, or the picker and the stored value disagree.
+    function test_canonicalValueForFieldRepairsMeaninglessValues() {
+        compare(RulePayload.canonicalValueForField("power", "is", 50), "on");
+        compare(RulePayload.canonicalValueForField("muted", "is", "50"), false);
+        compare(RulePayload.canonicalValueForField("playing", "is", "true"), false);
+        compare(RulePayload.canonicalValueForField("volume", "is", "on"), 0);
+        compare(RulePayload.canonicalValueForField("screensaver", "is", true), "inactive");
+        compare(RulePayload.canonicalValueForField("volume", "between", 50), [0, 100]);
+        compare(RulePayload.canonicalValueForField("volume", "between", [10, 20]), [10, 20]);
+        // A value that still makes sense survives the switch untouched.
+        compare(RulePayload.canonicalValueForField("power", "is", "standby"), "standby");
+        compare(RulePayload.canonicalValueForField("health", "is", "degraded"), "degraded");
+    }
+
     function test_playingFieldJoinsTheVocabulary() {
         verify(RulePayload.fields.indexOf("playing") >= 0,
                "the editor field picker must list playing");
@@ -663,5 +679,32 @@ TestCase {
         compare(RulePayload.validate(form)
                     .filter(problem => problem.code === "scriptNameInvalid").length,
                 1, "an uppercase script name must be flagged too");
+    }
+
+    // The client gate must accept exactly what the daemon parser accepts and
+    // reject what it rejects, or the editor blocks valid rules (or lets an
+    // invalid one make a pointless round trip).
+    function test_clientValidationMatchesTheDaemon() {
+        verify(RulePayload.dateIsValid("2024-02-29"), "a leap day exists");
+        verify(!RulePayload.dateIsValid("2026-02-29"), "2026 is not a leap year");
+        verify(!RulePayload.dateIsValid("2026-02-31"),
+               "an impossible calendar day must be rejected, not rolled over");
+        verify(!RulePayload.dateIsValid("2026-13-01"));
+
+        // Volume keys are valid keypress actions server-side.
+        verify(RulePayload.keypressKeys.indexOf("VolumeUp") >= 0);
+        verify(RulePayload.keypressKeys.indexOf("VolumeMute") >= 0);
+
+        const actions = [];
+        for (let i = 0; i < 33; ++i) {
+            actions.push({ type: "keypress", key: "Home" });
+        }
+        const problems = RulePayload.validate({
+            name: "Many", mode: "queued", devices: [], conditions: null,
+            trigger: { type: "manual" },
+            actions: actions
+        });
+        verify(problems.some(problem => problem.code === "tooManyActions"),
+               "33 top-level actions exceed the daemon's cap");
     }
 }

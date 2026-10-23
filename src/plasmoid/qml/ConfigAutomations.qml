@@ -292,7 +292,7 @@ KCM.SimpleKCM {
 
                             visible: ruleCard.lastFired.length > 0
                             wrapMode: Text.WordWrap
-                            font.pointSize: Kirigami.Theme.smallestFont.pointSize
+                            font.pointSize: Kirigami.Theme.smallFont.pointSize
                             color: Kirigami.Theme.disabledTextColor
                             text: KI18n.i18nc("@info", "Last ran %1", ruleCard.lastFired)
                         }

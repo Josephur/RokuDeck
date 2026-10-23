@@ -36,6 +36,9 @@ ColumnLayout {
     property bool showLeaf: false
     property bool showNot: false
     property bool showGroup: false
+    // Whether the "not" node already has its child. Plain JS fields are not
+    // observable, so this real property is what the bindings below read.
+    property bool hasNotChild: false
 
     property var _childLoaders: []
 
@@ -64,6 +67,7 @@ ColumnLayout {
         showLeaf = active && node.kind === "leaf";
         showNot = active && node.kind === "not";
         showGroup = active && (node.kind === "all" || node.kind === "any");
+        hasNotChild = active && node.child !== null && node.child !== undefined;
         for (let i = 0; i < _childLoaders.length; ++i) {
             const loader = _childLoaders[i];
             if (loader.item !== null && loader.item.body !== undefined
@@ -87,6 +91,7 @@ ColumnLayout {
 
     function addNotChild() {
         nodeRoot.node.child = RulePayload.blankLeaf();
+        nodeRoot.refreshGates();
         nodeRoot.structureChanged();
     }
 
@@ -154,9 +159,11 @@ ColumnLayout {
                 opCombo.currentIndex = op;
             }
         }
+        leafValue.syncing = true;
         leafValue.field = nodeRoot.node.field;
         leafValue.op = nodeRoot.node.op;
         leafValue.value = nodeRoot.node.value;
+        leafValue.syncing = false;
     }
 
     Component.onCompleted: {
@@ -216,11 +223,9 @@ ColumnLayout {
             model: RulePayload.fields
             onActivated: index => {
                 nodeRoot.node.field = model[index];
-                nodeRoot.node.value =
-                    RulePayload.canonicalValue(model[index], nodeRoot.node.op,
-                                               nodeRoot.node.value);
+                // RuleValueInput canonicalizes for the new field and reports
+                // the value back through onValueEdited.
                 leafValue.field = model[index];
-                leafValue.value = nodeRoot.node.value;
                 nodeRoot.bubble();
             }
         }
@@ -260,7 +265,7 @@ ColumnLayout {
         ColumnLayout {
             objectName: "conditionNotChild"
 
-            visible: nodeRoot.showNot && nodeRoot.node.child !== null
+            visible: nodeRoot.showNot && nodeRoot.hasNotChild
             Layout.fillWidth: true
             spacing: 0
 
@@ -269,7 +274,7 @@ ColumnLayout {
 
                 objectName: "notChildLoader"
 
-                active: nodeRoot.showNot && nodeRoot.node.child !== null
+                active: nodeRoot.showNot && nodeRoot.hasNotChild
                 Layout.fillWidth: true
                 source: "ConditionNodeEditor.qml"
                 onLoaded: nodeRoot.bindChild(notChildLoader, nodeRoot.node.child, false)
@@ -285,7 +290,7 @@ ColumnLayout {
         QQC2.Button {
             objectName: "conditionAddNotChildButton"
 
-            visible: nodeRoot.showNot && nodeRoot.node.child === null
+            visible: nodeRoot.showNot && !nodeRoot.hasNotChild
             enabled: nodeRoot.canNestDeeper
             icon.name: "list-add"
             text: KI18n.i18nc("@action:button", "Add inverted condition")
@@ -293,7 +298,7 @@ ColumnLayout {
         }
 
         QQC2.Label {
-            visible: nodeRoot.showNot && nodeRoot.node.child === null
+            visible: nodeRoot.showNot && !nodeRoot.hasNotChild
                      && !nodeRoot.canNestDeeper
             wrapMode: Text.WordWrap
             color: Kirigami.Theme.disabledTextColor

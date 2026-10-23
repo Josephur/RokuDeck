@@ -12,6 +12,7 @@ import QtQuick
 import QtTest
 
 import "../../src/plasmoid/qml" as RokuDeck
+import "../../src/plasmoid/qml/rulepayload.js" as RulePayload
 
 TestCase {
     id: testCase
@@ -160,6 +161,126 @@ TestCase {
         verify(windowRow !== null, "the window fields exist for later rules");
         verify(!windowRow.visible,
                "an Anytime rule must not show window bounds");
+        editor.destroy();
+    }
+
+    // Plain-JS form state is not observable, so every mutating editor must
+    // bump the revision that drives validation. Typing the name last is the
+    // common add-rule flow: add an action, then name the rule.
+    function test_typingTheNameRerunsValidation() {
+        const editor = editorComponent.createObject(testCase);
+        verify(editor !== null);
+        editor.openForAdd();
+        const list = findItem(editor, "thenActionsEditor");
+        verify(list !== null, "the action list must exist");
+        list.append("keypress");
+        compare(editor.problems.length, 1, "only the missing name may remain");
+
+        const name = findItem(editor, "nameField");
+        verify(name !== null);
+        // Emitting the edit signal is exactly the user path; assigning .text
+        // alone would bypass the handler under test.
+        name.text = "N";
+        name.textEdited();
+        compare(editor.formState.name, "N");
+        compare(editor.problems.length, 0,
+                "typing the name must re-run validation so Save can enable");
+        editor.destroy();
+    }
+
+    // Switching the comparison to Between must rewrite the stored value into
+    // a range; otherwise the picker shows "From 0 to 100" while validation
+    // rejects the unchanged scalar and Save looks broken.
+    function test_switchingComparisonToBetweenRepairsTheValue() {
+        const editor = editorComponent.createObject(testCase);
+        verify(editor !== null);
+        editor.openForAdd();
+        editor.applyTriggerChoice("stateChange");
+
+        const fieldCombo = findItem(editor, "stateChangeFieldCombo");
+        verify(fieldCombo !== null);
+        const volumeIndex = RulePayload.fields.indexOf("volume");
+        verify(volumeIndex >= 0);
+        fieldCombo.currentIndex = volumeIndex;
+        fieldCombo.activated(volumeIndex);
+        compare(editor.formState.trigger.field, "volume");
+        compare(editor.formState.trigger.value, 0,
+                "a volume predicate must hold a number");
+
+        const opCombo = findItem(editor, "stateChangeOpCombo");
+        verify(opCombo !== null);
+        const betweenIndex = RulePayload.ops.indexOf("between");
+        verify(betweenIndex >= 0);
+        opCombo.currentIndex = betweenIndex;
+        opCombo.activated(betweenIndex);
+        compare(editor.formState.trigger.op, "between");
+        verify(Array.isArray(editor.formState.trigger.value)
+               || typeof editor.formState.trigger.value.length === "number",
+               "Between must store a two-number range, got "
+               + JSON.stringify(editor.formState.trigger.value));
+        compare(Number(editor.formState.trigger.value.length), 2,
+                "Between must store exactly two bounds");
+        for (let i = 0; i < editor.problems.length; ++i) {
+            verify(editor.problems[i].code !== "betweenNeedsTwoNumbers",
+                   "the editor must not reject the value it just wrote");
+        }
+        editor.destroy();
+    }
+
+    // A conditional step must be born with a condition node; a null node is
+    // not editable at all (the kind picker dereferences it).
+    function test_ifThenElseStepStartsWithAnEditableCondition() {
+        const editor = editorComponent.createObject(testCase);
+        verify(editor !== null);
+        editor.openForAdd();
+        const list = findItem(editor, "thenActionsEditor");
+        verify(list !== null);
+        list.append("ifThenElse");
+        compare(editor.formState.actions.length, 1);
+        const cond = editor.formState.actions[0].cond;
+        verify(cond !== null && cond !== undefined,
+               "an ifThenElse step must own a condition node");
+        compare(String(cond.kind), "leaf");
+
+        let branch = null;
+        tryVerify(function() {
+            branch = findItem(editor, "branchConditionEditor");
+            return branch !== null;
+        }, 5000, "the branch condition editor must load");
+        verify(branch.body.showLeaf,
+               "the seeded leaf condition must render its fields");
+        editor.destroy();
+    }
+
+    // Adding the "not" child mutates a plain-JS field; without a real
+    // property the child editor never appears and the condition saves hidden.
+    function test_invertedConditionChildBecomesVisible() {
+        const editor = editorComponent.createObject(testCase);
+        verify(editor !== null);
+        editor.openForAdd();
+        editor.formState.conditions = {
+            kind: "not", children: [], child: null, device: "*",
+            field: "power", op: "is", value: "on"
+        };
+        editor.touchForm();
+        const nodeEditor = findItem(editor, "conditionsEditor");
+        verify(nodeEditor !== null);
+        verify(nodeEditor.body.showNot, "the not body must render");
+        verify(!nodeEditor.body.hasNotChild);
+
+        const addButton = findItem(editor, "conditionAddNotChildButton");
+        verify(addButton !== null && addButton.visible,
+               "the add-child affordance must be visible while empty");
+        nodeEditor.body.addNotChild();
+        verify(nodeEditor.body.hasNotChild,
+               "the added child must be tracked by a real property");
+        verify(!addButton.visible, "the add affordance must retire once a child exists");
+
+        let loader = null;
+        tryVerify(function() {
+            loader = findItem(editor, "notChildLoader");
+            return loader !== null && loader.active;
+        }, 5000, "the inverted child editor must load");
         editor.destroy();
     }
 }

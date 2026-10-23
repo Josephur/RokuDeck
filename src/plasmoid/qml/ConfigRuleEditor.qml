@@ -121,7 +121,9 @@ Kirigami.Dialog {
         case "conditionIncomplete":
             return KI18n.i18nc("@info", "Finish or remove the unfinished condition.");
         case "tooDeep":
-            return KI18n.i18nc("@info", "Conditions nest at most 12 levels deep.");
+            return KI18n.i18nc("@info", "Conditions nest at most 16 levels deep.");
+        case "tooManyActions":
+            return KI18n.i18nc("@info", "An automation can hold at most 32 actions.");
         case "unsupportedContent":
             return KI18n.i18nc("@info",
                 "This rule contains parts the editor cannot change; editing it here would drop them.");
@@ -178,9 +180,11 @@ Kirigami.Dialog {
         anytimeRadio.checked = !windowRadio.checked;
         windowStartField.text = String(root.formState.trigger.windowStart ?? "");
         windowEndField.text = String(root.formState.trigger.windowEnd ?? "");
+        stateChangeValue.syncing = true;
         stateChangeValue.field = root.formState.trigger.field;
         stateChangeValue.op = root.formState.trigger.op;
         stateChangeValue.value = root.formState.trigger.value;
+        stateChangeValue.syncing = false;
         for (let row = 0; row < deviceChecks.count; ++row) {
             const entry = deviceChecks.itemAt(row);
             entry.checked = root.formState.devices.indexOf(entry.serial) >= 0;
@@ -238,6 +242,7 @@ Kirigami.Dialog {
             }
         }
         root.syncFromForm();
+        root.touchForm();
     }
 
     footer: QQC2.DialogButtonBox {
@@ -323,7 +328,10 @@ Kirigami.Dialog {
 
                     Kirigami.FormData.label: KI18n.i18nc("@label:textbox", "Name:")
                     placeholderText: KI18n.i18nc("@info:placeholder", "Night volume")
-                    onTextEdited: root.formState.name = text
+                    onTextEdited: {
+                        root.formState.name = text;
+                        root.touchForm();
+                    }
                 }
 
                 QQC2.Switch {
@@ -424,7 +432,10 @@ Kirigami.Dialog {
                     inputMethodHints: Qt.ImhPreferNumbers
                     Kirigami.FormData.label: KI18n.i18nc("@label:textbox", "Time of day:")
                     placeholderText: "23:00"
-                    onTextEdited: root.formState.trigger.time = text
+                    onTextEdited: {
+                        root.formState.trigger.time = text;
+                        root.touchForm();
+                    }
                 }
 
                 QQC2.TextField {
@@ -438,7 +449,10 @@ Kirigami.Dialog {
                     inputMethodHints: Qt.ImhPreferNumbers
                     Kirigami.FormData.label: KI18n.i18nc("@label:textbox", "Date:")
                     placeholderText: "2026-12-31"
-                    onTextEdited: root.formState.trigger.date = text
+                    onTextEdited: {
+                        root.formState.trigger.date = text;
+                        root.touchForm();
+                    }
                 }
 
                 QQC2.SpinBox {
@@ -453,7 +467,10 @@ Kirigami.Dialog {
                     editable: true
                     Kirigami.FormData.label:
                         KI18n.i18nc("@label spinbox minutes", "Every (minutes):")
-                    onValueModified: root.formState.trigger.minutes = value
+                    onValueModified: {
+                        root.formState.trigger.minutes = value;
+                        root.touchForm();
+                    }
                 }
 
                 PlasmaComponents.ComboBox {
@@ -496,12 +513,10 @@ Kirigami.Dialog {
                     model: RulePayload.fields
                     onActivated: index => {
                         root.formState.trigger.field = model[index];
-                        root.formState.trigger.value =
-                            RulePayload.canonicalValue(model[index],
-                                                       root.formState.trigger.op,
-                                                       root.formState.trigger.value);
+                        // RuleValueInput canonicalizes for the new field and
+                        // reports the value back through onValueEdited.
                         stateChangeValue.field = model[index];
-                        stateChangeValue.value = root.formState.trigger.value;
+                        root.touchForm();
                     }
                 }
 
@@ -517,6 +532,7 @@ Kirigami.Dialog {
                     onActivated: index => {
                         root.formState.trigger.op = model[index];
                         stateChangeValue.op = model[index];
+                        root.touchForm();
                     }
                 }
 
@@ -530,6 +546,7 @@ Kirigami.Dialog {
                              && root.formState.trigger.type === "stateChange"
                     onValueEdited: value => {
                         root.formState.trigger.value = value;
+                        root.touchForm();
                     }
                 }
             }
