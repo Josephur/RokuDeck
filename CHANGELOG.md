@@ -6,6 +6,26 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- Automation settings no longer misreport a rejected change: device toggles
+  (automations consent, wake-on-LAN, refresh policy) and the per-rule enable
+  switch keep mirroring the daemon's stored value instead of showing an
+  unconfirmed edit.
+- The rule editor is reliable again: every field, time, date, interval, and
+  value edit re-runs validation immediately (Save no longer stays disabled
+  after typing the name last); switching a comparison to Between stores a real
+  two-number range; a new conditional step opens with an editable condition;
+  an inverted condition shows the child you add; and a name/device/window
+  round-trip never rewrites the stored values.
+- Rules that run local scripts now summarize as "Run script <name>" instead of
+  "Custom rule"; a scripted run no longer trips libdbus's 25 s `RunRule` reply
+  default; and a mute or keypress queued behind a script waits for it instead
+  of being swept as a timeout. The "run another automation" picker lists the
+  other rules, and "Rule finished: <outcome>" finally appears after Run now.
+- Hardening: a non-array `devices`/`then`/`else` value is now a parse error
+  instead of silently widening a rule to every device (or dropping a branch);
+  an unparsable stored rule survives later saves instead of being deleted from
+  disk; and a pending connection test gets a typed failure when the daemon
+  stops.
 - Rules that watch one device now say so: `stateChange` triggers accept an optional
   `device` serial (absent keeps the existing any-device meaning), so edges on other devices
   no longer fire the rule — This PC still joins automations only when explicitly named,

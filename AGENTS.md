@@ -36,13 +36,38 @@ reached users this way. When using a plasma/kirigami type for the first time,
 check it exists: `ls /usr/lib/qt6/qml/org/kde/plasma/{extras,components}/`.
 Valid names seen in this repo: extras → `Heading`, `PlaceholderMessage`;
 components → `Label`, `ComboBox`, `ToolButton`; extras has NO `ToolButton`,
-NO `PlaceHolder`.
+NO `PlaceHolder`. Same rule for themed properties: `Kirigami.Theme` has
+`defaultFont`/`smallFont`/`fixedWidthFont` — `smallestFont` does not exist
+(it silently renders a TypeError at runtime).
+
+## QML form state (plain-JS objects)
+
+- **Plain JS objects are not observable.** Validation that reads
+  `formState` only re-runs when a tracked property changes. Every editor
+  handler that mutates the form must bump the revision
+  (`ConfigRuleEditor.touchForm()`), or Save silently stays disabled.
+- **Values round-tripped through `property var` / signals can arrive as
+  array-likes where `Array.isArray()` is false.** Use shape checks
+  (`rulepayload.isValuePair`) for `between` ranges; `Array.isArray` silently
+  rejects an editor value it just wrote.
+- **A `checked:` / `currentIndex:` binding dies on the first user write.**
+  Controls that mirror a daemon record must report the click and re-arm the
+  binding (`onClicked: { bridge.call(...); checked = Qt.binding(...) }`), or a
+  rejected daemon change leaves the control showing a value the device does
+  not have. `nextCheckState` exists on `CheckBox` only — not on
+  `RadioButton`/`Switch` in Qt 6.12.
+- **A conditional action needs a seeded node.** `ifThenElse` with `cond: null`
+  cannot be edited (the kind picker dereferences it); `ActionListEditor.append`
+  seeds `RulePayload.blankLeaf()`.
 
 ## Toolchain
 
 - **GCC 16 (this machine) rejects declaration + in-class inline definition**
   ("cannot be overloaded with"). Define QtTest slot bodies OUTSIDE the class
   with `ClassName::slot()` qualification. Every existing test file does this.
+- **`daemon-dbus-test` needs its private session bus and isolated XDG dirs** —
+  run it via `ctest` (or duplicate the `dbus-run-session` + `XDG_DATA_DIRS`
+  wrapper from `tests/CMakeLists.txt`), or `registerOnBus()` fails instantly.
 - **clangd/LSP diagnostics are pre-existing include-path noise** across this
   repo ("QHash file not found" etc.). The `-Werror` ninja build is the only
   real compile gate. Never chase LSP errors.
