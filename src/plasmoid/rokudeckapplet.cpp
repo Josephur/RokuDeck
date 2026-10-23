@@ -39,6 +39,7 @@ RokuDeckApplet::RokuDeckApplet(QObject* parent, const KPluginMetaData& data,
     connect(&m_daemon, &DaemonProxy::deviceTestFinished, this,
             &RokuDeckApplet::deviceTestFinished);
     connect(&m_daemon, &DaemonProxy::discoveryFinished, this, &RokuDeckApplet::discoveryFinished);
+    connect(&m_daemon, &DaemonProxy::ruleRunFinished, this, &RokuDeckApplet::ruleRunFinished);
     connect(this, &Plasma::Applet::destroyedChanged, this, [this](bool destroyed) {
         if (destroyed) {
             m_daemon.stop();
@@ -151,6 +152,10 @@ void RokuDeckApplet::updateRule(const QString& ruleJson) {
 
 QVariantMap RokuDeckApplet::ruleDocument(const QString& ruleId) const {
     return m_daemon.ruleDocument(ruleId);
+}
+
+QVariantList RokuDeckApplet::ruleEntries(const QString& excludingId) const {
+    return m_automations.ruleEntries(excludingId);
 }
 
 void RokuDeckApplet::deleteRule(const QString& ruleId) {

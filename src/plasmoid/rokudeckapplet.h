@@ -54,6 +54,9 @@ class RokuDeckApplet final : public Plasma::Applet {
     Q_INVOKABLE void addRule(const QString& ruleJson);
     Q_INVOKABLE void updateRule(const QString& ruleJson);
     Q_INVOKABLE QVariantMap ruleDocument(const QString& ruleId) const;
+    // Choices for the editor's runRule step; the rule being edited is
+    // excluded so a macro cannot call itself.
+    Q_INVOKABLE [[nodiscard]] QVariantList ruleEntries(const QString& excludingId = {}) const;
 
   Q_SIGNALS:
     void selectedSerialChanged();
@@ -64,6 +67,7 @@ class RokuDeckApplet final : public Plasma::Applet {
     void deviceTestFinished(const QString& address, const QVariantMap& snapshot,
                             const QString& error);
     void discoveryFinished(const QString& error);
+    void ruleRunFinished(const QString& ruleId, const QString& outcome);
 
   private:
     void ensureSelectedSerial();

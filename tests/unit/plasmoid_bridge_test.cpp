@@ -367,6 +367,7 @@ class PlasmoidBridgeTest : public QObject {
     void bridgeIsTheConcreteAppletType();
     void appletInstancesOwnIndependentRegistrationAndSelection();
     void appletDestroyedLifecycleUnregistersAndReregisters();
+    void appletExposesRuleChoicesAndForwardsRunOutcomes();
     void destroyingOneAppletLeavesTheOtherRegistered();
     void partialSnapshotPreservesMissingFieldsAndExplicitlyClearsNullFields();
     void malformedPayloadMarksExistingStateStale();
@@ -859,6 +860,29 @@ QString rulesFixtureJson() {
 }
 
 } // namespace
+
+void PlasmoidBridgeTest::appletExposesRuleChoicesAndForwardsRunOutcomes() {
+    m_fake->rulesJson = rulesFixtureJson();
+    auto applet = createApplet<RokuDeckApplet>();
+    QTRY_COMPARE_WITH_TIMEOUT(applet->automations()->rowCount(), 2, 2000);
+
+    // The run-rule picker asks the bridge for rule choices, excluding the
+    // rule being edited so a macro cannot target itself.
+    const QVariantList entries = applet->ruleEntries(QStringLiteral("rAAA11111"));
+    QCOMPARE(entries.size(), 1);
+    QCOMPARE(entries.at(0).toMap().value(QStringLiteral("id")).toString(),
+             QStringLiteral("rBBB22222"));
+    QCOMPARE(entries.at(0).toMap().value(QStringLiteral("name")).toString(),
+             QStringLiteral("Nudge"));
+
+    // The daemon's run outcome must reach QML, which shows "Rule finished".
+    QSignalSpy finished(applet.get(), &RokuDeckApplet::ruleRunFinished);
+    m_fake->nextRunOutcome = QStringLiteral("ok");
+    applet->runRule(QStringLiteral("rAAA11111"));
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(0).toString(), QStringLiteral("rAAA11111"));
+    QCOMPARE(finished.at(0).at(1).toString(), QStringLiteral("ok"));
+}
 
 void PlasmoidBridgeTest::automationsModelLoadsAndTracksRulesChanged() {
     DevicesModel devices;
