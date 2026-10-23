@@ -113,6 +113,38 @@ QList<RuleDocument> ConfigStore::loadRules() const {
 }
 
 void ConfigStore::saveRules(const QList<RuleDocument>& rules) {
+    // A rule this build cannot parse is preserved verbatim. loadRules() skips
+    // such entries for display, but rewriting [Rules] from the parsed list
+    // alone would delete them from disk — a downgrade or a hand edit must not
+    // turn into permanent data loss.
+    struct PreservedRule {
+        QString name;
+        bool enabled = true;
+        QString definition;
+        int sortIndex = 0;
+    };
+    QList<PreservedRule> preserved;
+    {
+        const KConfigGroup existing(m_config, QStringLiteral("Rules"));
+        for (const QString& groupName : existing.groupList()) {
+            const KConfigGroup group(&existing, groupName);
+            const QString definition = group.readEntry("Definition", QString());
+            if (definition.isEmpty()) {
+                continue;
+            }
+            QJsonParseError parseError;
+            const QJsonDocument document =
+                QJsonDocument::fromJson(definition.toUtf8(), &parseError);
+            if (parseError.error == QJsonParseError::NoError && document.isObject()
+                && parseRule(document.object()).has_value()) {
+                continue;  // a live rule; rewritten from `rules` below
+            }
+            preserved.append({group.readEntry("Name", QString()),
+                group.readEntry("Enabled", true), definition,
+                group.readEntry("SortIndex", static_cast<int>(preserved.size()))});
+        }
+    }
+
     m_config->deleteGroup(QStringLiteral("Rules"));
     KConfigGroup rulesGroup(m_config, QStringLiteral("Rules"));
     for (qsizetype index = 0; index < rules.size(); ++index) {
@@ -123,6 +155,15 @@ void ConfigStore::saveRules(const QList<RuleDocument>& rules) {
         ruleGroup.writeEntry("Definition",
             QString::fromUtf8(QJsonDocument(ruleJson(rule)).toJson()));
         ruleGroup.writeEntry("SortIndex", static_cast<int>(index));
+    }
+    for (qsizetype index = 0; index < preserved.size(); ++index) {
+        const PreservedRule& entry = preserved.at(index);
+        KConfigGroup ruleGroup(&rulesGroup,
+            QStringLiteral("Rule%1").arg(rules.size() + index));
+        ruleGroup.writeEntry("Name", entry.name);
+        ruleGroup.writeEntry("Enabled", entry.enabled);
+        ruleGroup.writeEntry("Definition", entry.definition);
+        ruleGroup.writeEntry("SortIndex", entry.sortIndex);
     }
     m_config->sync();
 }

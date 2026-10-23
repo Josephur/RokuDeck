@@ -36,6 +36,7 @@ class ConfigStoreTest final : public QObject {
 private Q_SLOTS:
     void rulesRoundTripPreservesOrderAndFlags();
     void corruptRuleEntriesAreSkipped();
+    void corruptRuleSurvivesALaterSave();
     void devicesRoundTripPreservesVolumeCeiling();
     void absentVolumeCeilingDefaultsToUnrestricted();
 };
@@ -103,6 +104,49 @@ void ConfigStoreTest::corruptRuleEntriesAreSkipped()
     const QList<RuleDocument> loaded = store.loadRules();
     QCOMPARE(loaded.size(), 1);
     QCOMPARE(loaded.first().name, QStringLiteral("Good"));
+}
+
+void ConfigStoreTest::corruptRuleSurvivesALaterSave()
+{
+    QTemporaryDir dir;
+    auto config = KSharedConfig::openConfig(
+        dir.path() + QStringLiteral("/store.rc"), KConfig::SimpleConfig);
+    const QString corruptDefinition = QStringLiteral("{not json");
+    {
+        KConfigGroup rulesGroup(config, QStringLiteral("Rules"));
+        KConfigGroup good(&rulesGroup, QStringLiteral("0"));
+        good.writeEntry("Name", QStringLiteral("Good"));
+        good.writeEntry("Enabled", true);
+        good.writeEntry("Definition",
+            QJsonDocument(manualRuleJson(QStringLiteral("Good"))).toJson());
+        KConfigGroup bad(&rulesGroup, QStringLiteral("1"));
+        bad.writeEntry("Name", QStringLiteral("Broken"));
+        bad.writeEntry("Enabled", false);
+        bad.writeEntry("Definition", corruptDefinition);
+        bad.writeEntry("SortIndex", 1);
+        config->sync();
+    }
+
+    ConfigStore store(config);
+    QList<RuleDocument> loaded = store.loadRules();
+    QCOMPARE(loaded.size(), 1);
+    // Any later edit rewrites [Rules]; the unparsable sibling must survive it
+    // instead of being silently deleted from disk.
+    loaded.first().enabled = false;
+    store.saveRules(loaded);
+
+    QCOMPARE(store.loadRules().size(), 1);
+    const KConfigGroup rulesGroup(config, QStringLiteral("Rules"));
+    bool preserved = false;
+    for (const QString& groupName : rulesGroup.groupList()) {
+        const KConfigGroup group(&rulesGroup, groupName);
+        if (group.readEntry("Definition", QString()) == corruptDefinition) {
+            preserved = true;
+            QCOMPARE(group.readEntry("Name", QString()), QStringLiteral("Broken"));
+            QCOMPARE(group.readEntry("Enabled", true), false);
+        }
+    }
+    QVERIFY2(preserved, "an unparsable rule must survive a later save verbatim");
 }
 
 void ConfigStoreTest::devicesRoundTripPreservesVolumeCeiling()
