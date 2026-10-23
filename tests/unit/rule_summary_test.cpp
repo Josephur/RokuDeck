@@ -129,6 +129,10 @@ void RuleSummaryTest::rendersKnownTriggerAndActionShapes_data() {
         << fixtureRule(trigger("manual"_L1), QJsonArray{QJsonObject{{"type"_L1, "runRule"_L1},
                                                                    {"id"_L1, "rABC123"_L1}}})
         << QStringLiteral("Manually run \u00b7 Run rule rABC123");
+    QTest::newRow("runscript-action")
+        << fixtureRule(trigger("manual"_L1), QJsonArray{QJsonObject{{"type"_L1, "runScript"_L1},
+                                                                   {"script"_L1, "movie-night"_L1}}})
+        << QStringLiteral("Manually run \u00b7 Run script movie-night");
     QTest::newRow("daily-window")
         << fixtureRule(QJsonObject{{"type"_L1, "time"_L1},
                                    {"kind"_L1, "daily"_L1},

@@ -154,6 +154,10 @@ namespace {
         const QString id = action.value(QStringLiteral("id")).toString();
         return id.isEmpty() ? QString() : QStringLiteral("Run rule %1").arg(id);
     }
+    if (type == QStringLiteral("runScript")) {
+        const QString script = action.value(QStringLiteral("script")).toString();
+        return script.isEmpty() ? QString() : QStringLiteral("Run script %1").arg(script);
+    }
     if (type == QStringLiteral("ifThenElse")) {
         if (!action.value(QStringLiteral("cond")).isObject() ||
             !action.value(QStringLiteral("then")).isArray()) {
