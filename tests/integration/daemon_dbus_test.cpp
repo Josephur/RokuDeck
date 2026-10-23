@@ -233,6 +233,7 @@ class DaemonDbusTest final : public QObject {
     void runScriptNonZeroExitFailsTheRun();
     void runScriptRejectsBadFilesWithoutTraffic();
     void runScriptAcceptsSymlinkedScriptsDirectory();
+    void automationReplyBudgetOutlivesTheLargestScriptStep();
     void addRuleRejectsInvalidScriptNames();
 
   private:
@@ -4199,6 +4200,22 @@ void DaemonDbusTest::runScriptAcceptsSymlinkedScriptsDirectory() {
     QCOMPARE(m_runner->requests.size(), 1);
     QCOMPARE(m_runner->lastRequest.program, QFileInfo(scriptPath).canonicalFilePath());
     QVERIFY(m_runner->lastRequest.arguments.isEmpty());
+}
+
+void DaemonDbusTest::automationReplyBudgetOutlivesTheLargestScriptStep() {
+    // RunRule replies only after the whole run finished. libdbus defaults an
+    // unbudgeted method call to 25 s, which one script step alone can exceed,
+    // so the plasmoid sets this explicit budget.
+    QCOMPARE(CommandContract::automationReplyTimeoutMs,
+             CommandContract::scriptTimeoutMs + 5000);
+    QVERIFY2(CommandContract::automationReplyTimeoutMs > 25000,
+             "the RunRule reply budget must outlive libdbus's 25 s default");
+    // A mute or keypress dispatched after a script shares that device's queue:
+    // its own deadline must leave room for a full queue of script steps.
+    QCOMPARE(CommandContract::automationCommandDeadlineMs,
+             CommandContract::daemonCompletionDeadlineMs
+                 + CommandContract::maximumOutstandingPerDevice
+                     * CommandContract::scriptTimeoutMs);
 }
 
 void DaemonDbusTest::addRuleRejectsInvalidScriptNames() {

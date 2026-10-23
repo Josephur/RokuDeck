@@ -3,6 +3,7 @@
 #include "daemonproxy.h"
 
 #include "automationsmodel.h"
+#include "command_contract.h"
 #include "core/rule_summary.h"
 #include "devicesmodel.h"
 #include "rokudeck1_interface.h"
@@ -11,6 +12,7 @@
 
 #include <QDBusConnection>
 #include <QDBusError>
+#include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusServiceWatcher>
@@ -442,10 +444,18 @@ void DaemonProxy::runRule(const QString& ruleId) {
         return;
     }
     // RunRule carries the run's outcome as its reply payload, so it gets its
-    // own watcher rather than the void-reply device-call helper.
+    // own watcher rather than the void-reply device-call helper. The reply
+    // arrives only after the run finished, and one script step may take
+    // scriptTimeoutMs — far past libdbus's 25 s default. Set the budget for
+    // this one call, then restore the interface's setting immediately: the
+    // pending call captured its timeout when it was sent.
     const quint64 generation = m_generation;
     setBusyCount(m_busyCount + 1);
-    auto* watcher = new QDBusPendingCallWatcher(m_interface->RunRule(ruleId), this);
+    const int previousTimeout = m_interface->timeout();
+    m_interface->setTimeout(CommandContract::automationReplyTimeoutMs);
+    const QDBusPendingCall call = m_interface->RunRule(ruleId);
+    m_interface->setTimeout(previousTimeout);
+    auto* watcher = new QDBusPendingCallWatcher(call, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this, watcher, generation, ruleId]() {
                 const QDBusPendingReply<QString> reply = *watcher;
