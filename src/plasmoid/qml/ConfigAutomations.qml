@@ -220,10 +220,19 @@ KCM.SimpleKCM {
                     spacing: Kirigami.Units.smallSpacing
 
                     QQC2.Switch {
+                        id: ruleEnabledSwitch
+
                         objectName: "ruleEnabledSwitch"
 
                         checked: ruleCard.enabled
-                        onToggled: root.bridge.setRuleEnabled(ruleCard.ruleId, checked)
+                        // Ask the daemon instead of flipping locally, then
+                        // re-arm the binding: the switch mirrors the stored
+                        // rule until the daemon confirms, so a rejected change
+                        // cannot leave it lying.
+                        onClicked: {
+                            root.bridge.setRuleEnabled(ruleCard.ruleId, !ruleCard.enabled);
+                            checked = Qt.binding(function() { return ruleCard.enabled; });
+                        }
                         QQC2.ToolTip.text: KI18n.i18nc("@info:tooltip", "Enable or disable this automation")
                         QQC2.ToolTip.visible: hovered
                     }

@@ -143,11 +143,14 @@ ColumnLayout {
         }
 
         QQC2.RadioButton {
+            id: defaultDeviceButton
             objectName: "defaultDeviceButton"
             Kirigami.FormData.label: KI18n.i18nc("@label", "Opens by default:")
             enabled: root.shownInWidget
-            checked: root.isDefault
             text: KI18n.i18nc("@option:radio", "Select this device when the widget opens")
+            checked: root.isDefault
+            // Local widget configuration, not a daemon value: the exclusive
+            // group and the page's model keep the radios honest.
             onToggled: {
                 if (checked) {
                     root.madeDefault();
@@ -156,26 +159,45 @@ ColumnLayout {
         }
 
         QQC2.CheckBox {
+            id: allowAutomationsBox
             objectName: "allowAutomationsBox"
             Kirigami.FormData.label: KI18n.i18nc("@label", "Automations:")
-            checked: root.allowAutomations
             text: KI18n.i18nc("@option:check", "Let automations control this device")
-            onToggled: root.automationsToggled(checked)
+            checked: root.allowAutomations
+            // Report the click, then re-arm the binding: the control mirrors
+            // the stored record until the daemon confirms the change, so a
+            // rejection can never leave it lying about the device.
+            onClicked: {
+                root.automationsToggled(!root.allowAutomations);
+                checked = Qt.binding(function() { return root.allowAutomations; });
+            }
         }
 
         QQC2.CheckBox {
+            id: wakeOnWlanBox
             objectName: "wakeOnWlanBox"
-            checked: root.wakeOnWlan
             text: KI18n.i18nc("@option:check", "May be woken over the network")
-            onToggled: root.wakeToggled(checked)
+            checked: root.wakeOnWlan
+            onClicked: {
+                root.wakeToggled(!root.wakeOnWlan);
+                checked = Qt.binding(function() { return root.wakeOnWlan; });
+            }
         }
 
         QQC2.ComboBox {
+            id: refreshPolicyBox
             objectName: "refreshPolicyBox"
             Kirigami.FormData.label: KI18n.i18nc("@label:listbox", "Refresh policy:")
             model: root.refreshPolicies.map(policy => root.policyLabel(policy))
             currentIndex: Math.max(0, root.refreshPolicies.indexOf(root.refreshPolicy))
-            onActivated: index => root.refreshPolicyChosen(root.refreshPolicies[index])
+            onActivated: index => {
+                root.refreshPolicyChosen(root.refreshPolicies[index]);
+                // Re-arm the binding: the selection follows the stored policy
+                // until the daemon confirms (activated does not re-fire here).
+                currentIndex = Qt.binding(function() {
+                    return Math.max(0, root.refreshPolicies.indexOf(root.refreshPolicy));
+                });
+            }
         }
     }
 

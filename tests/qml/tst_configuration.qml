@@ -220,6 +220,29 @@ TestCase {
                 "removing a device must drop it from this widget too");
     }
 
+    // A user toggle writes the control's property and kills a plain binding;
+    // the control must keep following the record, or a rejected daemon edit
+    // leaves the checkbox telling a different story than the stored device.
+    function test_controlsKeepFollowingTheDeviceRecordAfterAClick() {
+        const fixture = createDevices([
+            { serial: "SERIAL-A", name: "Living Room", capabilities: ["power"] }
+        ], { cfg_selectedSerials: ["SERIAL-A"] });
+        const entry = findChild(fixture.page, "deviceEntry-SERIAL-A");
+        const box = findChild(entry, "allowAutomationsBox");
+        compare(box.checked, true);
+        mouseClick(box);
+        // The click asks the daemon for the change; the control keeps showing
+        // the stored record until the daemon confirms it.
+        compare(fixture.bridge.updatedDevices[0].changes.allowAutomations, false);
+        compare(box.checked, true,
+                "a control must not drift from the record on an unconfirmed change");
+
+        // The daemon accepted and the refreshed record now says false.
+        entry.allowAutomations = false;
+        compare(box.checked, false,
+                "the control must follow the record once it changes");
+    }
+
     function test_identifyIsOfferedOnlyWhenTheDeviceSupportsIt() {
         const fixture = createDevices([
             { serial: "SERIAL-A", name: "Living Room", capabilities: ["power"] },
