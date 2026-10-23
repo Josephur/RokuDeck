@@ -231,6 +231,7 @@ class DaemonDbusTest final : public QObject {
     void runScriptHappyRunIsDeliveredAsOk();
     void runScriptNonZeroExitFailsTheRun();
     void runScriptRejectsBadFilesWithoutTraffic();
+    void runScriptAcceptsSymlinkedScriptsDirectory();
     void addRuleRejectsInvalidScriptNames();
 
   private:
@@ -4121,6 +4122,41 @@ void DaemonDbusTest::runScriptRejectsBadFilesWithoutTraffic() {
         QCOMPARE(run.arguments().front().toString(), QStringLiteral("failed"));
     }
     QVERIFY(m_runner->requests.isEmpty());
+}
+
+void DaemonDbusTest::runScriptAcceptsSymlinkedScriptsDirectory() {
+    m_daemon->upsertDevice(
+        {QStringLiteral("SERIAL-A"), QStringLiteral("Fixture Room"), QStringLiteral("192.0.2.57")});
+    QTemporaryDir realScripts;
+    QVERIFY(realScripts.isValid());
+    const QString scriptPath = realScripts.filePath(QStringLiteral("movie-night"));
+    {
+        QFile script(scriptPath);
+        QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Text));
+        QVERIFY(script.write("#!/bin/sh\nexit 0\n") > 0);
+        script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    }
+    // A scripts directory that is itself a symlink (dotfile managers and
+    // secondary drives do this): containment must compare canonical paths on
+    // BOTH sides, otherwise every legitimate script is rejected.
+    QTemporaryDir links;
+    QVERIFY(links.isValid());
+    const QString linkedDirectory = links.filePath(QStringLiteral("scripts"));
+    QVERIFY(QFile::link(realScripts.path(), linkedDirectory));
+
+    recreateDaemon(30s, {}, [this] { return m_now; }, 1h, linkedDirectory);
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Linked scripts","devices":["SERIAL-A"],"trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"runScript","script":"movie-night"}]})json"));
+
+    startRunnerCompleter();
+    const QDBusMessage run = waitForReply(m_proxy->RunRule(ruleId));
+    stopRunnerCompleter();
+    QVERIFY2(run.type() != QDBusMessage::ErrorMessage, qPrintable(run.errorMessage()));
+    QCOMPARE(run.arguments().front().toString(), QStringLiteral("ok"));
+    QCOMPARE(m_runner->requests.size(), 1);
+    QCOMPARE(m_runner->lastRequest.program, QFileInfo(scriptPath).canonicalFilePath());
+    QVERIFY(m_runner->lastRequest.arguments.isEmpty());
 }
 
 void DaemonDbusTest::addRuleRejectsInvalidScriptNames() {

@@ -1567,12 +1567,19 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
             // per step, executed on This PC itself (the reserved device owns
             // a queue slot like any other target).
             const QDir scriptsDirectory(m_scriptsDirectory);
+            // Containment compares canonical paths on BOTH sides: the
+            // configured directory may itself be a symlink (dotfile managers,
+            // secondary drives), and resolving only the script would then
+            // reject every legitimate file.
+            const QString canonicalDirectory =
+                QFileInfo(m_scriptsDirectory).canonicalFilePath();
             const QFileInfo candidate(scriptsDirectory.filePath(action.script));
             const QString canonical = candidate.canonicalFilePath();
             const bool contained = !canonical.isEmpty()
-                && QDir(canonical).absolutePath().startsWith(
-                    scriptsDirectory.absolutePath() + QLatin1Char('/'));
-            if (!contained || !candidate.isFile() || !candidate.isExecutable()) {
+                && !canonicalDirectory.isEmpty()
+                && canonical.startsWith(canonicalDirectory + QLatin1Char('/'));
+            if (!contained || !QFileInfo(canonical).isFile()
+                || !QFileInfo(canonical).isExecutable()) {
                 ++rejected;
                 continue;
             }
