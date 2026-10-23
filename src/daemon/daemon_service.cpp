@@ -765,10 +765,22 @@ DaemonService::validateDeviceJson(const QString& deviceJson,
 
     if (object.contains(QStringLiteral("address"))) {
         const QJsonValue value = object.value(QStringLiteral("address"));
-        if (!value.isString() || !isRoutableIpv4(value.toString().trimmed())) {
+        if (!value.isString()) {
             return {{}, QStringLiteral("address must be a routable IPv4 address")};
         }
-        device.address = value.toString().trimmed();
+        const QString requested = value.toString().trimmed();
+        // This PC's loopback address is not a routable IPv4, yet it is what
+        // ListDevices reports for the reserved device. A client that
+        // round-trips the object it just read must not be rejected; the
+        // address itself is never user-editable.
+        const bool reservedRoundTrip =
+            base && base->serial == QLatin1String(localPcSerial) && requested == base->address;
+        if (!reservedRoundTrip && !isRoutableIpv4(requested)) {
+            return {{}, QStringLiteral("address must be a routable IPv4 address")};
+        }
+        if (!reservedRoundTrip) {
+            device.address = requested;
+        }
     }
     if (device.address.isEmpty()) {
         return {{}, QStringLiteral("address is required")};

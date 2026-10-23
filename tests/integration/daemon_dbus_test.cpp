@@ -717,6 +717,17 @@ void DaemonDbusTest::daemonBootstrapsThisPcAndShieldsIt() {
         call(QStringLiteral("UpdateDevice"),
              {QStringLiteral("LOCAL-PC"), QStringLiteral(R"json({"displayName":"Dev Box"})json")});
     QVERIFY2(renamed.type() != QDBusMessage::ErrorMessage, qPrintable(renamed.errorMessage()));
+    // A client that round-trips the record it just read must be accepted: the
+    // reserved device's loopback address is not routable, but it is not a
+    // user-editable field either.
+    const QDBusMessage roundTrip =
+        call(QStringLiteral("UpdateDevice"),
+             {QStringLiteral("LOCAL-PC"),
+              QString::fromUtf8(QJsonDocument(deviceEntry(
+                                    jsonResult(waitForReply(m_proxy->ListDevices())),
+                                    QStringLiteral("LOCAL-PC")))
+                                    .toJson(QJsonDocument::Compact))});
+    QVERIFY2(roundTrip.type() != QDBusMessage::ErrorMessage, qPrintable(roundTrip.errorMessage()));
     recreateDaemon();
     const QJsonObject persisted =
         deviceEntry(jsonResult(waitForReply(m_proxy->ListDevices())), QStringLiteral("LOCAL-PC"));
