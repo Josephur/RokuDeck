@@ -392,6 +392,16 @@ DaemonService::~DaemonService() {
             QStringLiteral("RokuDeck stopped before discovery completed")));
     }
     m_discoveryReplies.clear();
+    // Connection tests are delayed replies too; leaving them unanswered would
+    // strand each caller until the bus name disappears.
+    for (const QList<QDBusMessage>& requests : std::as_const(m_deviceTestReplies)) {
+        for (const QDBusMessage& request : requests) {
+            m_connection.send(request.createErrorReply(
+                QString::fromLatin1(DbusError::transportFailure),
+                QStringLiteral("RokuDeck stopped before the connection test completed")));
+        }
+    }
+    m_deviceTestReplies.clear();
     if (m_registeredOnBus) {
         m_connection.unregisterService(QString::fromLatin1(serviceName));
         m_connection.unregisterObject(QString::fromLatin1(objectPath));

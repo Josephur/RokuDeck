@@ -164,6 +164,7 @@ class DaemonDbusTest final : public QObject {
     void volumeCeilingPersistsAndEchoesThroughDeviceJson();
     void volumeCeilingRejectsOutOfRangeAndNonIntegralValues();
     void testDeviceProbesAnAddressWithoutRegisteringIt();
+    void pendingConnectionTestFailsOnShutdown();
     void refreshPolicyBoundsHowOftenTheDaemonPollsADevice();
     void aUserChosenNameSurvivesDiscoveryAndPolling();
     void powerAndAudioKeypressesHonourObservedDeviceState();
@@ -1672,6 +1673,19 @@ void DaemonDbusTest::testDeviceProbesAnAddressWithoutRegisteringIt() {
     QVERIFY2(listedSerials(jsonResult(waitForReply(m_proxy->ListDevices()))) ==
                  QStringList{QStringLiteral("LOCAL-PC")},
              "testing an address must never register it behind the user's back");
+}
+
+void DaemonDbusTest::pendingConnectionTestFailsOnShutdown() {
+    const QDBusPendingReply<QString> probe = m_proxy->TestDevice(QStringLiteral("198.51.100.55"));
+    QTRY_COMPARE_WITH_TIMEOUT(m_runner->requests.size(), 1, 500);
+
+    // Tear the daemon down while the probe is in flight: the caller must get
+    // a typed failure instead of waiting for the bus name to vanish.
+    m_daemon.reset();
+    const QDBusMessage reply = waitForReply(probe);
+    QCOMPARE(reply.type(), QDBusMessage::ErrorMessage);
+    QVERIFY2(reply.errorMessage().contains(QStringLiteral("stopped before")),
+             qPrintable(reply.errorMessage()));
 }
 
 void DaemonDbusTest::refreshPolicyBoundsHowOftenTheDaemonPollsADevice() {
