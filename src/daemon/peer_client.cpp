@@ -95,7 +95,13 @@ PeerPairOutcome PeerClient::pair(const QString& address, quint16 port,
                                             : QStringLiteral("timeout");
         outcome.errorMessage = transportFailed
             ? transportError
-            : QStringLiteral("the peer did not answer within %1 ms").arg(timeout.count());
+            // A silent timeout is overwhelmingly a default-deny firewall
+            // dropping the port (verified live with ufw): say so, or the
+            // user debugs the wrong machine.
+            : QStringLiteral("the peer did not answer within %1 ms — a firewall on the "
+                             "peer may be silently dropping this port (e.g. sudo ufw "
+                             "allow 49160/tcp)")
+                  .arg(timeout.count());
         return outcome;
     }
 

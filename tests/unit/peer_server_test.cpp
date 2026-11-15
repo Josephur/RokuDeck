@@ -14,6 +14,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QSet>
+#include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTest>
@@ -48,6 +49,7 @@ class PeerServerTest final : public QObject {
     void oversizedLinesDropTheConnection();
     void unknownSnapshotStateIsHonestInEnvelope();
     void actionsExecuteThroughTheInjectedExecutor();
+    void aPairTimeoutExplainsTheFirewallPossibility();
     void pairClientReceivesIdentityAndToken();
 
   private:
@@ -418,6 +420,30 @@ void PeerServerTest::actionsExecuteThroughTheInjectedExecutor() {
                              {QStringLiteral("value"), 30}});
     QCOMPARE(foreign.value(QStringLiteral("error")).toString(), QStringLiteral("unauthorized"));
     QVERIFY2(executed.size() == 2, "a rejected request must never reach the executor");
+}
+
+void PeerServerTest::aPairTimeoutExplainsTheFirewallPossibility() {
+    // A default-deny firewall silently DROPS the port: the TCP handshake
+    // completes against a listener that never answers, which is exactly the
+    // black hole below. The pairing outcome must name that possibility
+    // instead of leaving the user debugging the wrong machine.
+    QTcpServer blackHole;
+    QVERIFY(blackHole.listen(QHostAddress::LocalHost));
+    QObject::connect(&blackHole, &QTcpServer::newConnection, &blackHole, [&blackHole]() {
+        while (QTcpSocket* connection = blackHole.nextPendingConnection()) {
+            connection->setParent(&blackHole);  // accepted, then deliberately silent
+        }
+    });
+
+    PeerClient client;
+    const PeerPairOutcome outcome =
+        client.pair(QStringLiteral("127.0.0.1"), blackHole.serverPort(),
+                    QStringLiteral("ABCD2345"), QLatin1String(kControllerId),
+                    QLatin1String(kControllerHost), std::chrono::milliseconds(400));
+    QVERIFY(!outcome.ok);
+    QCOMPARE(outcome.errorCode, QStringLiteral("timeout"));
+    QVERIFY2(outcome.errorMessage.contains(QStringLiteral("firewall")),
+             qPrintable(outcome.errorMessage));
 }
 
 void PeerServerTest::pairClientReceivesIdentityAndToken() {
