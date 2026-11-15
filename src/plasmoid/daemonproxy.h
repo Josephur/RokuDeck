@@ -50,6 +50,18 @@ class DaemonProxy final : public QObject {
     void deleteRule(const QString& ruleId);
     void runRule(const QString& ruleId);
 
+    // Peer management (M9a). Mutations flow through watchDeviceCall, so the
+    // widget's busy state and the deviceOperationFailed/Succeeded pair stay
+    // uniform with device management.
+    void setPeerListenerEnabled(bool enabled);
+    void pairPeer(const QString& address, quint32 port, const QString& code);
+    void removePeerTarget(const QString& machineId);
+    void revokePairedController(const QString& machineId);
+    // Fast synchronous reads: mint a one-time pairing code, and fetch the
+    // listing the config page renders (never carries connection tokens).
+    [[nodiscard]] QString peerPairingCode();
+    [[nodiscard]] QVariantMap listPeers();
+
     // The complete definition the daemon last announced for a rule, so
     // editors can round-trip documents without owning any rule state.
     [[nodiscard]] QVariantMap ruleDocument(const QString& ruleId) const;

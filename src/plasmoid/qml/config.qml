@@ -26,6 +26,11 @@ ConfigModel {
         source: "ConfigAutomations.qml"
     }
     ConfigCategory {
+        name: i18nc("@title", "Peers")
+        icon: "network-wireless"
+        source: "ConfigPeers.qml"
+    }
+    ConfigCategory {
         name: i18nc("@title", "Advanced")
         icon: "configure"
         source: "ConfigAdvanced.qml"

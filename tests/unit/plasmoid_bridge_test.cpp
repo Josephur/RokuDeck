@@ -130,6 +130,14 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     bool delayNextDeviceCall = false;
     bool rejectNextCall = false;
     bool rejectNextRuleCall = false;
+    // Peer management (M9a) fixtures: the calls are recorded, the listing is
+    // a fixed shape, and rejectNextPeerCall makes the next peer call fail.
+    QStringList peerListenerToggles;
+    QList<QJsonObject> pairedPeers;
+    QStringList removedTargets;
+    QStringList revokedControllers;
+    int pairingCodeRequests = 0;
+    bool rejectNextPeerCall = false;
     // Tests driving two overlapping commands (rapid mute taps) need distinct
     // request ids; the default keeps the historical REQUEST-ONE contract.
     bool useNumberedRequestIds = false;
@@ -159,6 +167,13 @@ class FakeDaemon final : public QObject, protected QDBusContext {
                         {QStringLiteral("rules"), array}})
                                           .toJson(QJsonDocument::Compact));
         Q_EMIT RulesChanged(rulesJson);
+    }
+
+    void rejectNextPeerIfNeeded() {
+        if (rejectNextPeerCall) {
+            rejectNextPeerCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("fixture rejection"));
+        }
     }
 
     bool registerOnBus() {
@@ -356,6 +371,52 @@ class FakeDaemon final : public QObject, protected QDBusContext {
         return fullSnapshot(QStringLiteral("SERIAL-A"));
     }
 
+    void SetPeerListenerEnabled(bool enabled) {
+        peerListenerToggles.append(enabled ? QStringLiteral("on") : QStringLiteral("off"));
+        rejectNextPeerIfNeeded();
+    }
+
+    QString PeerPairingCode() {
+        ++pairingCodeRequests;
+        rejectNextPeerIfNeeded();
+        return QStringLiteral("CODE1234");
+    }
+
+    QString ListPeers() const {
+        return QStringLiteral(
+            R"json({"schemaVersion":1,"listener":{"enabled":true,"listening":true,"port":49160,"boundPort":0},)json"
+            R"json("controllers":[{"machineId":"11111111111111111111111111111111","addedAt":"2026-11-14T09:00:00.000"}],)json"
+            R"json("targets":[{"machineId":"22222222222222222222222222222222","displayName":"machine-two","address":"127.0.0.1","port":49160}]})json");
+    }
+
+    QString PairPeer(const QString& address, uint port, const QString& code) {
+        Q_UNUSED(code)
+        if (rejectNextPeerCall) {
+            rejectNextPeerCall = false;
+            sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("fixture rejection"));
+            return {};
+        }
+        const QJsonObject peer{{QStringLiteral("machineId"),
+                                   QStringLiteral("22222222222222222222222222222222")},
+                               {QStringLiteral("displayName"), QStringLiteral("machine-two")},
+                               {QStringLiteral("address"), address},
+                               {QStringLiteral("port"), static_cast<qint64>(port)}};
+        pairedPeers.append(peer);
+        return QString::fromUtf8(QJsonDocument(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                                                           {QStringLiteral("peer"), peer}})
+                                     .toJson(QJsonDocument::Compact));
+    }
+
+    void RemovePeerTarget(const QString& machineId) {
+        removedTargets.append(machineId);
+        rejectNextPeerIfNeeded();
+    }
+
+    void RevokePairedController(const QString& machineId) {
+        revokedControllers.append(machineId);
+        rejectNextPeerIfNeeded();
+    }
+
   Q_SIGNALS:
     void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
     void DeviceListChanged(const QString& devicesJson);
@@ -398,6 +459,7 @@ class PlasmoidBridgeTest : public QObject {
     void deviceListExposesDaemonOwnedPreferences();
     void aMalformedVolumeCeilingKeepsTheStrictListRejection();
     void deviceManagementReachesTheDaemonAndReportsRejection();
+    void peerManagementReachesTheDaemonAndReportsRejection();
     void testDeviceReportsTheProbedSnapshot();
     void anInFlightOperationIsReportedThroughPlasmasBusyProperty();
     void automationsModelLoadsAndTracksRulesChanged();
@@ -1015,6 +1077,46 @@ void PlasmoidBridgeTest::deviceManagementReachesTheDaemonAndReportsRejection() {
     QCOMPARE(failed.first().at(0).toString(), QStringLiteral("addDevice"));
     QVERIFY2(!failed.first().at(1).toString().isEmpty(),
              "a rejected device change must explain itself to the user");
+}
+
+void PlasmoidBridgeTest::peerManagementReachesTheDaemonAndReportsRejection() {
+    auto applet = createApplet<RokuDeckApplet>();
+    QTRY_COMPARE_WITH_TIMEOUT(applet->devices()->rowCount(), 2, 2000);
+    QSignalSpy succeeded(applet.get(), &RokuDeckApplet::deviceOperationSucceeded);
+    QSignalSpy failed(applet.get(), &RokuDeckApplet::deviceOperationFailed);
+
+    // The listing flows through to the page unchanged, tokens absent.
+    const QVariantMap listing = applet->listPeers();
+    QCOMPARE(listing.value(QStringLiteral("listener")).toMap()
+                 .value(QStringLiteral("port")).toInt(), 49160);
+    QCOMPARE(listing.value(QStringLiteral("targets")).toList().size(), 1);
+    QVERIFY(!listing.contains(QStringLiteral("token")));
+
+    applet->setPeerListenerEnabled(true);
+    applet->pairPeer(QStringLiteral("127.0.0.1"), 49160, QStringLiteral("ABCD2345"));
+    applet->removePeerTarget(QStringLiteral("22222222222222222222222222222222"));
+    applet->revokePairedController(QStringLiteral("11111111111111111111111111111111"));
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->peerListenerToggles.size(), 1, 2000);
+    QCOMPARE(m_fake->peerListenerToggles.first(), QStringLiteral("on"));
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->pairedPeers.size(), 1, 2000);
+    QCOMPARE(m_fake->pairedPeers.first().value(QStringLiteral("displayName")).toString(),
+             QStringLiteral("machine-two"));
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->removedTargets.size(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(m_fake->revokedControllers.size(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(succeeded.size(), 4, 2000);
+
+    QCOMPARE(applet->peerPairingCode(), QStringLiteral("CODE1234"));
+    QCOMPARE(m_fake->pairingCodeRequests, 1);
+
+    // A rejection flows back as a typed operation failure naming the
+    // operation, exactly like device management.
+    QCOMPARE(failed.size(), 0);
+    m_fake->rejectNextPeerCall = true;
+    applet->removePeerTarget(QStringLiteral("unknown-machine"));
+    QTRY_COMPARE_WITH_TIMEOUT(failed.size(), 1, 2000);
+    QCOMPARE(failed.first().at(0).toString(), QStringLiteral("removePeerTarget"));
+    QVERIFY2(!failed.first().at(1).toString().isEmpty(),
+             "a rejected peer change must explain itself to the user");
 }
 
 void PlasmoidBridgeTest::testDeviceReportsTheProbedSnapshot() {

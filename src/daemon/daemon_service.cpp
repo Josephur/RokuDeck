@@ -6,6 +6,8 @@
 #include "core/qprocess_runner.h"
 #include "core/rule_conditions.h"
 #include "dbus_error_contract.h"
+#include "peer_client.h"
+#include "peer_server.h"
 #include "rokudeck1_adaptor.h"
 
 #include <QDBusError>
@@ -280,7 +282,8 @@ DaemonService::DaemonService(QDBusConnection connection,
                              std::chrono::milliseconds idleGrace,
                              DeadlineRemaining deadlineRemaining, WallClock wallClock,
                              std::chrono::milliseconds localPcPollInterval,
-                             QString scriptsDir, QObject* parent)
+                             QString scriptsDir, PeerIdentity peerIdentity,
+                             QObject* parent)
     : QObject(parent), m_connection(std::move(connection)),
       m_hasEnabledAutomations(hasEnabledAutomations ? std::move(hasEnabledAutomations)
                                                     : [] { return false; }),
@@ -295,6 +298,18 @@ DaemonService::DaemonService(QDBusConnection connection,
       m_rdsClient(m_processRunner.get()), m_ownerWatcher(this),
       m_wallClock(wallClock ? std::move(wallClock)
                             : [] { return QDateTime::currentDateTime(); }),
+      m_peerIdentity(peerIdentity.machineId.isEmpty() || peerIdentity.hostName.isEmpty()
+              ? PeerIdentity{peerIdentity.machineId.isEmpty() ? localMachineId()
+                                                              : peerIdentity.machineId,
+                             peerIdentity.hostName.isEmpty() ? localHostName()
+                                                             : peerIdentity.hostName}
+              : std::move(peerIdentity)),
+      m_peerServer(std::make_unique<PeerServer>(
+          m_configStore.get(),
+          // The listener serves the machine it runs on: always the live
+          // LOCAL-PC reading, whatever it currently says (design §4).
+          [this]() { return m_snapshots.value(QLatin1String(localPcSerial)); },
+          m_wallClock, m_peerIdentity.machineId, m_peerIdentity.hostName)),
       // Ruling 3: the scripts directory resolves once — an injected path for
       // tests, else the standard app-data location.
       m_scriptsDirectory(scriptsDir.isEmpty()
@@ -361,6 +376,14 @@ DaemonService::DaemonService(QDBusConnection connection,
     connect(&m_scheduleTimer, &QTimer::timeout, this, &DaemonService::evaluateDueRules);
     rearmScheduleTimer();
     evaluateDueRules();  // spec §4.2: fresh missed `once` rules fire once at boot
+
+    // Network-peers design §10: an explicitly enabled listener comes back up
+    // with the daemon. A failed bind (port taken) leaves it stopped —
+    // ListPeers reports the honest listening state and re-enabling retries.
+    if (const PeerListenerSettings listener = m_configStore->loadPeerListener();
+        listener.enabled) {
+        static_cast<void>(m_peerServer->start(listener.port));
+    }
 
     m_idleTimer.setSingleShot(true);
     m_idleTimer.setInterval(static_cast<int>(std::min<std::chrono::milliseconds::rep>(
@@ -1299,6 +1322,155 @@ void DaemonService::finishRuleRun(const QString& ruleId,
     }
     // Superseded while still the registered owner: clear the field.
     m_runStates.remove(ruleId);
+}
+
+void DaemonService::SetPeerListenerEnabled(bool enabled) {
+    PeerListenerSettings settings = m_configStore->loadPeerListener();
+    if (!enabled) {
+        settings.enabled = false;
+        m_peerServer->stop();
+        m_configStore->savePeerListener(settings);
+        updateIdleTimer();
+        return;
+    }
+    // Enable only once the socket actually serves: a config that claims
+    // enabled without a listening socket would lie to every peer and to the
+    // idle-exit parity in hasAcceptedWork().
+    if (!m_peerServer->start(settings.port)) {
+        sendErrorReply(QString::fromLatin1(DbusError::transportFailure),
+                       QStringLiteral("could not bind the peer listener on port %1")
+                           .arg(settings.port));
+        return;
+    }
+    settings.enabled = true;
+    m_configStore->savePeerListener(settings);
+    updateIdleTimer();
+}
+
+QString DaemonService::PeerPairingCode() {
+    if (!m_peerServer->isListening()) {
+        // Codes are useless without a listener to receive them on: minting
+        // one while the machine refuses connections would be exactly the
+        // confusing dead end explicit enable exists to avoid.
+        sendErrorReply(QDBusError::InvalidArgs,
+                       QStringLiteral("the peer listener is not enabled"));
+        return {};
+    }
+    return m_peerServer->mintPairingCode();
+}
+
+QString DaemonService::ListPeers() const {
+    const PeerListenerSettings listener = m_configStore->loadPeerListener();
+    QJsonObject object{{QStringLiteral("schemaVersion"), 1}};
+    object.insert(QStringLiteral("listener"),
+                  QJsonObject{{QStringLiteral("enabled"), listener.enabled},
+                              {QStringLiteral("listening"), m_peerServer->isListening()},
+                              {QStringLiteral("port"), listener.port},
+                              // The port the socket actually bound (0 when
+                              // stopped): config and reality can differ after
+                              // a failed bind, and the difference is the truth.
+                              {QStringLiteral("boundPort"),
+                               m_peerServer->isListening()
+                                   ? QJsonValue(m_peerServer->listeningPort())
+                                   : QJsonValue(0)}});
+    QJsonArray controllers;
+    for (const PairedController& controller : m_configStore->loadPairedControllers()) {
+        controllers.append(QJsonObject{
+            {QStringLiteral("machineId"), controller.machineId},
+            {QStringLiteral("addedAt"), controller.addedAt.isValid()
+                ? QJsonValue(controller.addedAt.toString(Qt::ISODateWithMs))
+                : QJsonValue(QJsonValue::Null)}});
+        // The connection token is a secret: it never appears on D-Bus.
+    }
+    object.insert(QStringLiteral("controllers"), controllers);
+    QJsonArray targets;
+    for (const PeerTarget& target : m_configStore->loadPeerTargets()) {
+        targets.append(QJsonObject{{QStringLiteral("machineId"), target.machineId},
+                                   {QStringLiteral("displayName"), target.displayName},
+                                   {QStringLiteral("address"), target.address},
+                                   {QStringLiteral("port"), target.port}});
+        // The stored token stays private for the same reason.
+    }
+    object.insert(QStringLiteral("targets"), targets);
+    return compactJson(object);
+}
+
+QString DaemonService::PairPeer(const QString& address, uint port, const QString& code) {
+    if (address.isEmpty() || port == 0 || port > 65535 || code.isEmpty()) {
+        sendErrorReply(QDBusError::InvalidArgs,
+                       QStringLiteral("address, port and code are all required"));
+        return {};
+    }
+    PeerClient client;
+    const PeerPairOutcome outcome = client.pair(address, static_cast<quint16>(port), code,
+                                                m_peerIdentity.machineId,
+                                                m_peerIdentity.hostName);
+    if (!outcome.ok) {
+        // The peer's own typed refusals are a pairing failure; everything
+        // else (unreachable, silent, unparseable) is transport.
+        const bool peerRefused = outcome.errorCode == QLatin1String("invalidCode")
+            || outcome.errorCode == QLatin1String("codeExpired")
+            || outcome.errorCode == QLatin1String("limitReached")
+            || outcome.errorCode == QLatin1String("unauthorized");
+        const auto error = peerRefused ? DbusError::pairingRejected
+                                       : DbusError::transportFailure;
+        sendErrorReply(QString::fromLatin1(error),
+                       outcome.errorMessage.isEmpty() ? outcome.errorCode
+                                                      : outcome.errorMessage);
+        return {};
+    }
+    QList<PeerTarget> targets = m_configStore->loadPeerTargets();
+    auto existing =
+        std::find_if(targets.begin(), targets.end(), [&outcome](const PeerTarget& target) {
+            return target.machineId == outcome.machineId;
+        });
+    if (existing == targets.end()) {
+        PeerTarget target;
+        target.machineId = outcome.machineId;
+        targets.append(std::move(target));
+        existing = std::prev(targets.end());
+    }
+    existing->displayName = outcome.displayName;
+    existing->address = address;
+    existing->port = static_cast<quint16>(port);
+    existing->token = outcome.token;
+    m_configStore->savePeerTargets(targets);
+
+    const QJsonObject peerJson{{QStringLiteral("schemaVersion"), 1},
+                               {QStringLiteral("peer"),
+                                QJsonObject{{QStringLiteral("machineId"), existing->machineId},
+                                            {QStringLiteral("displayName"), existing->displayName},
+                                            {QStringLiteral("address"), existing->address},
+                                            {QStringLiteral("port"), existing->port}}}};
+    return compactJson(peerJson);
+}
+
+void DaemonService::RemovePeerTarget(const QString& machineId) {
+    QList<PeerTarget> targets = m_configStore->loadPeerTargets();
+    const auto existing =
+        std::find_if(targets.begin(), targets.end(), [&machineId](const PeerTarget& target) {
+            return target.machineId == machineId;
+        });
+    if (existing == targets.end()) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknown peer"));
+        return;
+    }
+    targets.erase(existing);
+    m_configStore->savePeerTargets(targets);
+}
+
+void DaemonService::RevokePairedController(const QString& machineId) {
+    QList<PairedController> controllers = m_configStore->loadPairedControllers();
+    const auto existing = std::find_if(
+        controllers.begin(), controllers.end(), [&machineId](const PairedController& peer) {
+            return peer.machineId == machineId;
+        });
+    if (existing == controllers.end()) {
+        sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("unknown peer"));
+        return;
+    }
+    controllers.erase(existing);
+    m_configStore->savePairedControllers(controllers);
 }
 
 void DaemonService::recordSuppressedFiring(const QString& ruleId, const QString& outcome) {
@@ -2307,7 +2479,11 @@ void DaemonService::updateIdleTimer() {
 bool DaemonService::hasAcceptedWork() const {
     return m_discoveryActive || !m_deviceTestReplies.isEmpty() ||
            !m_activeCommandSerials.isEmpty() || !m_commandQueues.isEmpty() ||
-           m_scheduleTimer.isActive() || hasEnabledLocalPcRules();
+           m_scheduleTimer.isActive() || hasEnabledLocalPcRules() ||
+           // Idle parity (network-peers design §3): an explicitly enabled
+           // listener is accepted work — paired peers must stay answerable
+           // even with no widget client running.
+           (m_peerServer != nullptr && m_peerServer->isListening());
 }
 
 // Opt-in idle parity: an enabled rule that explicitly names This PC keeps the

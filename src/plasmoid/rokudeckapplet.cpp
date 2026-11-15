@@ -168,6 +168,35 @@ void RokuDeckApplet::runRule(const QString& ruleId) {
     m_daemon.runRule(ruleId);
 }
 
+void RokuDeckApplet::setPeerListenerEnabled(bool enabled) {
+    setLastError({});
+    m_daemon.setPeerListenerEnabled(enabled);
+}
+
+void RokuDeckApplet::pairPeer(const QString& address, uint port, const QString& code) {
+    setLastError({});
+    m_daemon.pairPeer(address, port, code);
+}
+
+void RokuDeckApplet::removePeerTarget(const QString& machineId) {
+    setLastError({});
+    m_daemon.removePeerTarget(machineId);
+}
+
+void RokuDeckApplet::revokePairedController(const QString& machineId) {
+    setLastError({});
+    m_daemon.revokePairedController(machineId);
+}
+
+QString RokuDeckApplet::peerPairingCode() {
+    setLastError({});
+    return m_daemon.peerPairingCode();
+}
+
+QVariantMap RokuDeckApplet::listPeers() {
+    return m_daemon.listPeers();
+}
+
 void RokuDeckApplet::ensureSelectedSerial() {
     if (m_devices.containsSerial(m_selectedSerial)) {
         return;

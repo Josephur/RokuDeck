@@ -58,6 +58,15 @@ class RokuDeckApplet final : public Plasma::Applet {
     // excluded so a macro cannot call itself.
     Q_INVOKABLE [[nodiscard]] QVariantList ruleEntries(const QString& excludingId = {}) const;
 
+    // Peer management (M9a): listener toggle, pairing both directions, and
+    // the listing the Peers config page renders.
+    Q_INVOKABLE void setPeerListenerEnabled(bool enabled);
+    Q_INVOKABLE void pairPeer(const QString& address, uint port, const QString& code);
+    Q_INVOKABLE void removePeerTarget(const QString& machineId);
+    Q_INVOKABLE void revokePairedController(const QString& machineId);
+    Q_INVOKABLE [[nodiscard]] QString peerPairingCode();
+    Q_INVOKABLE [[nodiscard]] QVariantMap listPeers();
+
   Q_SIGNALS:
     void selectedSerialChanged();
     void availableChanged();

@@ -168,4 +168,93 @@ void ConfigStore::saveRules(const QList<RuleDocument>& rules) {
     m_config->sync();
 }
 
+PeerListenerSettings ConfigStore::loadPeerListener() const {
+    const KConfigGroup group(m_config, QStringLiteral("PeerListener"));
+    PeerListenerSettings settings;
+    settings.enabled = group.readEntry("Enabled", false);
+    settings.port = static_cast<quint16>(
+        group.readEntry("Port", static_cast<int>(PeerListenerSettings{}.port)));
+    return settings;
+}
+
+void ConfigStore::savePeerListener(const PeerListenerSettings& settings) {
+    KConfigGroup group(m_config, QStringLiteral("PeerListener"));
+    group.writeEntry("Enabled", settings.enabled);
+    group.writeEntry("Port", static_cast<int>(settings.port));
+    m_config->sync();
+}
+
+QList<PairedController> ConfigStore::loadPairedControllers() const {
+    const KConfigGroup peersGroup(m_config, QStringLiteral("Peers"));
+    QList<PairedController> controllers;
+    const QStringList groups = peersGroup.groupList();
+    controllers.reserve(groups.size());
+    for (const QString& groupName : groups) {
+        const KConfigGroup controllerGroup(&peersGroup, groupName);
+        PairedController controller;
+        controller.machineId = controllerGroup.readEntry("MachineId", QString());
+        controller.token = controllerGroup.readEntry("Token", QString());
+        controller.addedAt = QDateTime::fromString(
+            controllerGroup.readEntry("AddedAt", QString()), Qt::ISODateWithMs);
+        if (!controller.machineId.isEmpty() && !controller.token.isEmpty()) {
+            controllers.append(std::move(controller));
+        }
+    }
+    return controllers;
+}
+
+void ConfigStore::savePairedControllers(const QList<PairedController>& controllers) {
+    m_config->deleteGroup(QStringLiteral("Peers"));
+    KConfigGroup peersGroup(m_config, QStringLiteral("Peers"));
+    // The machine id is the identity and may contain characters KConfig group
+    // names mangle, so entries stay named by index and carry the id as data.
+    for (qsizetype index = 0; index < controllers.size(); ++index) {
+        const PairedController& controller = controllers.at(index);
+        KConfigGroup controllerGroup(&peersGroup, QStringLiteral("Controller%1").arg(index));
+        controllerGroup.writeEntry("MachineId", controller.machineId);
+        controllerGroup.writeEntry("Token", controller.token);
+        if (controller.addedAt.isValid()) {
+            controllerGroup.writeEntry("AddedAt",
+                controller.addedAt.toString(Qt::ISODateWithMs));
+        }
+    }
+    m_config->sync();
+}
+
+QList<PeerTarget> ConfigStore::loadPeerTargets() const {
+    const KConfigGroup targetsGroup(m_config, QStringLiteral("PeerTargets"));
+    QList<PeerTarget> targets;
+    const QStringList groups = targetsGroup.groupList();
+    targets.reserve(groups.size());
+    for (const QString& groupName : groups) {
+        const KConfigGroup targetGroup(&targetsGroup, groupName);
+        PeerTarget target;
+        target.machineId = targetGroup.readEntry("MachineId", QString());
+        target.displayName = targetGroup.readEntry("DisplayName", QString());
+        target.address = targetGroup.readEntry("Address", QString());
+        target.port = static_cast<quint16>(targetGroup.readEntry("Port", 0));
+        target.token = targetGroup.readEntry("Token", QString());
+        if (!target.machineId.isEmpty() && !target.token.isEmpty() && !target.address.isEmpty()
+            && target.port > 0) {
+            targets.append(std::move(target));
+        }
+    }
+    return targets;
+}
+
+void ConfigStore::savePeerTargets(const QList<PeerTarget>& targets) {
+    m_config->deleteGroup(QStringLiteral("PeerTargets"));
+    KConfigGroup targetsGroup(m_config, QStringLiteral("PeerTargets"));
+    for (qsizetype index = 0; index < targets.size(); ++index) {
+        const PeerTarget& target = targets.at(index);
+        KConfigGroup targetGroup(&targetsGroup, QStringLiteral("Target%1").arg(index));
+        targetGroup.writeEntry("MachineId", target.machineId);
+        targetGroup.writeEntry("DisplayName", target.displayName);
+        targetGroup.writeEntry("Address", target.address);
+        targetGroup.writeEntry("Port", static_cast<int>(target.port));
+        targetGroup.writeEntry("Token", target.token);
+    }
+    m_config->sync();
+}
+
 } // namespace RokuDeck

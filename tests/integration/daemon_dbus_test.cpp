@@ -6,6 +6,7 @@
 #include "rokudeck1_interface.h"
 #include "support/fake_process_runner.h"
 
+#include <KConfigGroup>
 #include <KSharedConfig>
 
 #include <QDBusAbstractAdaptor>
@@ -168,6 +169,9 @@ class DaemonDbusTest final : public QObject {
     void refreshPolicyBoundsHowOftenTheDaemonPollsADevice();
     void aUserChosenNameSurvivesDiscoveryAndPolling();
     void powerAndAudioKeypressesHonourObservedDeviceState();
+    void peerListenerRequiresExplicitEnable();
+    void peerListenerKeepsTheDaemonAliveAndReportsHonestState();
+    void peersPairAcrossRealTcpWithTypedFailures();
     void addRuleAssignsIdPersistsAndAnnounces();
     void addRuleRejectsClientOwnedAndMalformedPayloads();
     void updateRuleReplacesDefinitionInPlaceAndPersists();
@@ -256,7 +260,8 @@ class DaemonDbusTest final : public QObject {
                         DaemonService::DeadlineRemaining deadlineRemaining = {},
                         DaemonService::WallClock wallClock = {},
                         std::chrono::milliseconds localPcPollInterval = 1h,
-                        const QString& scriptsDir = {});
+                        const QString& scriptsDir = {},
+                        const DaemonService::PeerIdentity& peerIdentity = {});
     QString addManualRule(const QString& name);
     QString addRuleReturningId(const QString& payload);
     QJsonObject rulesListing() const;
@@ -322,7 +327,8 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
                                     DaemonService::DeadlineRemaining deadlineRemaining,
                                     DaemonService::WallClock wallClock,
                                     std::chrono::milliseconds localPcPollInterval,
-                                    const QString& scriptsDir) {
+                                    const QString& scriptsDir,
+                                    const DaemonService::PeerIdentity& peerIdentity) {
     m_proxy.reset();
     m_daemon.reset();
     auto runner = std::make_unique<FakeProcessRunner>();
@@ -332,7 +338,7 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
     m_daemon = std::make_unique<DaemonService>(
         QDBusConnection::sessionBus(), [this] { return m_automationEnabled; }, std::move(runner),
         std::move(configStore), idleGrace, std::move(deadlineRemaining), std::move(wallClock),
-        localPcPollInterval, scriptsDir);
+        localPcPollInterval, scriptsDir, peerIdentity);
     QVERIFY2(m_daemon->registerOnBus(),
              "the test daemon could not own its private session-bus name");
     if (!m_clientConnection) {
@@ -437,6 +443,8 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
         QStringLiteral("io.github.josephur.RokuDeck1.Error.InvalidRule")));
     QVERIFY(introspectionXml.contains(
         QStringLiteral("io.github.josephur.RokuDeck1.Error.UnknownRule")));
+    QVERIFY(introspectionXml.contains(
+        QStringLiteral("io.github.josephur.RokuDeck1.Error.PairingRejected")));
 
     QHash<QString, QStringList> methods;
     QHash<QString, QStringList> signals;
@@ -466,7 +474,7 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
         }
     }
     QVERIFY2(!xml.hasError(), qPrintable(xml.errorString()));
-    QCOMPARE(methods.size(), 18);
+    QCOMPARE(methods.size(), 24);
     QCOMPARE(methods.value(QStringLiteral("ListDevices")), QStringList{QStringLiteral("out:s")});
     QCOMPARE(methods.value(QStringLiteral("GetSnapshot")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
@@ -503,6 +511,17 @@ void DaemonDbusTest::generatedProxyAndAdaptorExposeExactContract() {
              QStringList({QStringLiteral("in:s"), QStringLiteral("in:b")}));
     QCOMPARE(methods.value(QStringLiteral("RunRule")),
              QStringList({QStringLiteral("in:s"), QStringLiteral("out:s")}));
+    QCOMPARE(methods.value(QStringLiteral("SetPeerListenerEnabled")),
+             QStringList{QStringLiteral("in:b")});
+    QCOMPARE(methods.value(QStringLiteral("PeerPairingCode")), QStringList{QStringLiteral("out:s")});
+    QCOMPARE(methods.value(QStringLiteral("ListPeers")), QStringList{QStringLiteral("out:s")});
+    QCOMPARE(methods.value(QStringLiteral("PairPeer")),
+             QStringList({QStringLiteral("in:s"), QStringLiteral("in:u"), QStringLiteral("in:s"),
+                          QStringLiteral("out:s")}));
+    QCOMPARE(methods.value(QStringLiteral("RemovePeerTarget")),
+             QStringList{QStringLiteral("in:s")});
+    QCOMPARE(methods.value(QStringLiteral("RevokePairedController")),
+             QStringList{QStringLiteral("in:s")});
     QCOMPARE(signals.size(), 4);
     QCOMPARE(signals.value(QStringLiteral("DeviceSnapshotChanged")),
              QStringList({QStringLiteral("s"), QStringLiteral("s")}));
@@ -1903,6 +1922,171 @@ void DaemonDbusTest::powerAndAudioKeypressesHonourObservedDeviceState() {
     QVERIFY2(power.type() != QDBusMessage::ErrorMessage, qPrintable(power.errorMessage()));
     waitForKeypressRequest(QStringLiteral("Power"));
     m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
+}
+
+void DaemonDbusTest::peerListenerRequiresExplicitEnable() {
+    // Fresh daemon: the listener has never been enabled, so the pairing-code
+    // mint must refuse — a code without a listening machine is a dead end.
+    const QJsonObject peers = jsonResult(waitForReply(m_proxy->ListPeers()));
+    QCOMPARE(peers.value(QStringLiteral("schemaVersion")).toInt(), 1);
+    const QJsonObject listener = peers.value(QStringLiteral("listener")).toObject();
+    QCOMPARE(listener.value(QStringLiteral("enabled")).toBool(), false);
+    QCOMPARE(listener.value(QStringLiteral("listening")).toBool(), false);
+    QCOMPARE(listener.value(QStringLiteral("port")).toInt(), 49160);
+    QCOMPARE(listener.value(QStringLiteral("boundPort")).toInt(), 0);
+    QCOMPARE(peers.value(QStringLiteral("controllers")).toArray().size(), 0);
+    QCOMPARE(peers.value(QStringLiteral("targets")).toArray().size(), 0);
+
+    const QDBusMessage refused = waitForReply(m_proxy->PeerPairingCode());
+    QCOMPARE(refused.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(refused.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+}
+
+void DaemonDbusTest::peerListenerKeepsTheDaemonAliveAndReportsHonestState() {
+    // With no clients, no automations and no other accepted work, the daemon
+    // plans its idle exit.
+    m_automationEnabled = false;
+    m_daemon->automationEnablementChanged();
+    QTRY_VERIFY(m_daemon->idleTimerActive());
+
+    // Port 0 keeps the test deterministic: the OS assigns a free port.
+    KSharedConfig::openConfig(m_configPath, KConfig::SimpleConfig)
+        ->group(QStringLiteral("PeerListener"))
+        .writeEntry(QStringLiteral("Port"), 0);
+
+    // Enabling the listener is accepted work (design §3 idle parity): paired
+    // peers must stay answerable even with no widget running.
+    static_cast<void>(m_proxy->SetPeerListenerEnabled(true));
+    const QJsonObject peers = jsonResult(waitForReply(m_proxy->ListPeers()));
+    const QJsonObject listener = peers.value(QStringLiteral("listener")).toObject();
+    QCOMPARE(listener.value(QStringLiteral("enabled")).toBool(), true);
+    QCOMPARE(listener.value(QStringLiteral("listening")).toBool(), true);
+    QVERIFY(listener.value(QStringLiteral("boundPort")).toInt() > 0);
+    QVERIFY(!m_daemon->idleTimerActive());
+
+    // Minting works once the listener is serving.
+    const QDBusMessage codeReply = waitForReply(m_proxy->PeerPairingCode());
+    QVERIFY2(codeReply.type() != QDBusMessage::ErrorMessage,
+             qPrintable(codeReply.errorMessage()));
+    QVERIFY(codeReply.arguments().front().toString().size() >= 6);
+
+    // Disabling returns the daemon to its idle planning.
+    static_cast<void>(m_proxy->SetPeerListenerEnabled(false));
+    const QJsonObject disabled = jsonResult(waitForReply(m_proxy->ListPeers()));
+    QCOMPARE(disabled.value(QStringLiteral("listener")).toObject()
+                 .value(QStringLiteral("listening")).toBool(), false);
+    QTRY_VERIFY(m_daemon->idleTimerActive());
+
+    // The enable decision survives a daemon restart.
+    static_cast<void>(m_proxy->SetPeerListenerEnabled(true));
+    QCOMPARE(jsonResult(waitForReply(m_proxy->ListPeers()))
+                 .value(QStringLiteral("listener")).toObject()
+                 .value(QStringLiteral("listening")).toBool(), true);
+    m_automationEnabled = true;
+    recreateDaemon();
+    QCOMPARE(jsonResult(waitForReply(m_proxy->ListPeers()))
+                 .value(QStringLiteral("listener")).toObject()
+                 .value(QStringLiteral("listening")).toBool(), true);
+}
+
+void DaemonDbusTest::peersPairAcrossRealTcpWithTypedFailures() {
+    // Machine one (the controller) drives the widget proxy; machine two is a
+    // second daemon instance in the same process acting purely as the peer:
+    // its listener serves TCP without owning the D-Bus name.
+    recreateDaemon(30s, {}, [this] { return m_now; }, 1h, QString(),
+                   DaemonService::PeerIdentity{
+                       QStringLiteral("11111111111111111111111111111111"),
+                       QStringLiteral("machine-one")});
+
+    const QString peerConfigPath =
+        m_configDirectory.filePath(QStringLiteral("peers-real-tcp-peer.rc"));
+    auto peerConfig = KSharedConfig::openConfig(peerConfigPath, KConfig::SimpleConfig);
+    auto peerDaemon = std::make_unique<DaemonService>(
+        QDBusConnection::sessionBus(), [] { return false; },
+        std::make_unique<FakeProcessRunner>(),
+        std::make_unique<ConfigStore>(std::move(peerConfig)), 30s,
+        DaemonService::DeadlineRemaining{}, DaemonService::WallClock{}, 1h, QString(),
+        DaemonService::PeerIdentity{
+            QStringLiteral("22222222222222222222222222222222"),
+            QStringLiteral("machine-two")});
+    peerDaemon->SetPeerListenerEnabled(true);
+
+    // The peer listens on an OS-assigned port; ask it directly for its bound
+    // state — ListPeers is const and safe to call outside D-Bus.
+    const QJsonObject peerState =
+        QJsonDocument::fromJson(peerDaemon->ListPeers().toUtf8()).object();
+    const int peerPort =
+        peerState.value(QStringLiteral("listener")).toObject()
+            .value(QStringLiteral("boundPort")).toInt();
+    QVERIFY(peerPort > 0);
+
+    // Pairing with a wrong code is the peer's own typed refusal.
+    const QDBusMessage wrongCode =
+        waitForReply(m_proxy->PairPeer(QStringLiteral("127.0.0.1"), peerPort,
+                                       QStringLiteral("WRONGCOD")));
+    QCOMPARE(wrongCode.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(wrongCode.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.PairingRejected"));
+
+    // An unreachable address is transport, not pairing.
+    const QDBusMessage unreachable =
+        waitForReply(m_proxy->PairPeer(QStringLiteral("127.0.0.1"), 1,
+                                       QStringLiteral("ABCD2345")));
+    QCOMPARE(unreachable.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(unreachable.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.TransportFailure"));
+
+    // The real handshake: controller submits the peer's one-time code.
+    const QString code = peerDaemon->PeerPairingCode();
+    QVERIFY(!code.isEmpty());
+    const QDBusMessage paired = waitForReply(
+        m_proxy->PairPeer(QStringLiteral("127.0.0.1"), peerPort, code));
+    QVERIFY2(paired.type() != QDBusMessage::ErrorMessage, qPrintable(paired.errorMessage()));
+    const QJsonObject peerEntry = jsonResult(paired).value(QStringLiteral("peer")).toObject();
+    QCOMPARE(peerEntry.value(QStringLiteral("machineId")).toString(),
+             QStringLiteral("22222222222222222222222222222222"));
+    QCOMPARE(peerEntry.value(QStringLiteral("displayName")).toString(),
+             QStringLiteral("machine-two"));
+    QCOMPARE(peerEntry.value(QStringLiteral("address")).toString(), QStringLiteral("127.0.0.1"));
+    QCOMPARE(peerEntry.value(QStringLiteral("port")).toInt(), peerPort);
+
+    // Both sides see the pairing, and no connection token reaches D-Bus.
+    const QJsonObject controllerListing =
+        jsonResult(waitForReply(m_proxy->ListPeers()));
+    QCOMPARE(controllerListing.value(QStringLiteral("targets")).toArray().size(), 1);
+    QCOMPARE(controllerListing.value(QStringLiteral("targets")).toArray().at(0).toObject()
+                 .value(QStringLiteral("machineId")).toString(),
+             QStringLiteral("22222222222222222222222222222222"));
+    const QJsonObject peerListing =
+        QJsonDocument::fromJson(peerDaemon->ListPeers().toUtf8()).object();
+    QCOMPARE(peerListing.value(QStringLiteral("controllers")).toArray().size(), 1);
+    QCOMPARE(peerListing.value(QStringLiteral("controllers")).toArray().at(0)
+                 .toObject().value(QStringLiteral("machineId")).toString(),
+             QStringLiteral("11111111111111111111111111111111"));
+    QVERIFY(!peerDaemon->ListPeers().contains(QStringLiteral("token")));
+
+    // Removing an unknown target is a typed rejection; removing the real one
+    // empties the list, and a second removal refuses.
+    const QDBusMessage unknownRemoval =
+        waitForReply(m_proxy->RemovePeerTarget(QStringLiteral("ffffffffffffffffffffffffffffffff")));
+    QCOMPARE(unknownRemoval.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(unknownRemoval.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+
+    static_cast<void>(waitForReply(m_proxy->RemovePeerTarget(
+        QStringLiteral("22222222222222222222222222222222"))));
+    QCOMPARE(jsonResult(waitForReply(m_proxy->ListPeers()))
+                 .value(QStringLiteral("targets")).toArray().size(), 0);
+
+    // Revocation on the peer side drops the controller; revoking an unknown
+    // controller refuses.
+    peerDaemon->RevokePairedController(QStringLiteral("11111111111111111111111111111111"));
+    QCOMPARE(QJsonDocument::fromJson(peerDaemon->ListPeers().toUtf8()).object()
+                 .value(QStringLiteral("controllers")).toArray().size(), 0);
+    const QDBusMessage unknownRevocation =
+        waitForReply(m_proxy->RevokePairedController(
+            QStringLiteral("11111111111111111111111111111111")));
+    QCOMPARE(unknownRevocation.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(unknownRevocation.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
 }
 
 void DaemonDbusTest::addRuleAssignsIdPersistsAndAnnounces() {

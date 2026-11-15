@@ -15,6 +15,7 @@ target_link_libraries(rokudeck-cli
 
 add_executable(rokudeckctl main.cpp)
 target_link_libraries(rokudeckctl PRIVATE RokuDeck::Cli)
+target_compile_definitions(rokudeckctl PRIVATE ROKUDECK_VERSION="${PROJECT_VERSION}")
 set_target_properties(rokudeckctl PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )

@@ -10,5 +10,9 @@ inline constexpr auto unsupportedCapability =
 inline constexpr auto safetyRejected = "io.github.josephur.RokuDeck1.Error.SafetyRejected";
 inline constexpr auto timeout = "io.github.josephur.RokuDeck1.Error.Timeout";
 inline constexpr auto transportFailure = "io.github.josephur.RokuDeck1.Error.TransportFailure";
+// The peer-side pairing handshake was refused by the remote listener: the
+// code was invalid or expired, or the peer is at its pairing limit. Transport
+// trouble (unreachable, silent, unparseable) is transportFailure instead.
+inline constexpr auto pairingRejected = "io.github.josephur.RokuDeck1.Error.PairingRejected";
 
 } // namespace RokuDeck::DbusError

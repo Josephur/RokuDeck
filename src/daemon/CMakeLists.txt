@@ -6,6 +6,8 @@ set(rokudeck_daemon_sources
   client_registry.cpp
   config_store.cpp
   daemon_service.cpp
+  peer_client.cpp
+  peer_server.cpp
 )
 qt_add_dbus_adaptor(rokudeck_daemon_sources
   ${rokudeck_dbus_xml}
@@ -30,6 +32,7 @@ target_link_libraries(rokudeck-daemon
     KF6::ConfigCore
     Qt6::Core
     Qt6::DBus
+    Qt6::Network
 )
 
 set(rokudeck_dbus_interface_sources)

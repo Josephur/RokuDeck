@@ -11,6 +11,7 @@
     <annotation name="io.github.josephur.RokuDeck1.Error.TransportFailure" value="exitCode=7"/>
     <annotation name="io.github.josephur.RokuDeck1.Error.InvalidRule" value="exitCode=8"/>
     <annotation name="io.github.josephur.RokuDeck1.Error.UnknownRule" value="exitCode=9"/>
+    <annotation name="io.github.josephur.RokuDeck1.Error.PairingRejected" value="exitCode=10"/>
     <method name="ListDevices">
       <arg direction="out" type="s" name="devicesJson"/>
     </method>
@@ -93,5 +94,28 @@
     <signal name="RulesChanged">
       <arg type="s" name="rulesJson"/>
     </signal>
+    <!-- Network peers (M9a): listener + pairing. State moves as JSON
+         envelopes; connection tokens never appear in any of it. -->
+    <method name="SetPeerListenerEnabled">
+      <arg direction="in" type="b" name="enabled"/>
+    </method>
+    <method name="PeerPairingCode">
+      <arg direction="out" type="s" name="code"/>
+    </method>
+    <method name="ListPeers">
+      <arg direction="out" type="s" name="peersJson"/>
+    </method>
+    <method name="PairPeer">
+      <arg direction="in" type="s" name="address"/>
+      <arg direction="in" type="u" name="port"/>
+      <arg direction="in" type="s" name="code"/>
+      <arg direction="out" type="s" name="peerJson"/>
+    </method>
+    <method name="RemovePeerTarget">
+      <arg direction="in" type="s" name="machineId"/>
+    </method>
+    <method name="RevokePairedController">
+      <arg direction="in" type="s" name="machineId"/>
+    </method>
   </interface>
 </node>

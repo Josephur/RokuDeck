@@ -30,8 +30,9 @@ ParseResult parseCommandLine(const QStringList& arguments) {
                                          QStringLiteral("Suppress successful output."));
     parser.addOption(jsonOption);
     parser.addOption(quietOption);
-    parser.addPositionalArgument(QStringLiteral("command"),
-                                 QStringLiteral("One of: devices, status, discover, command."));
+    parser.addPositionalArgument(
+        QStringLiteral("command"),
+        QStringLiteral("One of: devices, status, discover, command, peers."));
     parser.addPositionalArgument(QStringLiteral("arguments"),
                                  QStringLiteral("Arguments required by the selected command."),
                                  QStringLiteral("[arguments...]"));
@@ -86,6 +87,48 @@ ParseResult parseCommandLine(const QStringList& arguments) {
         result.options.command = Command::SendCommand;
         result.options.device = commandArguments.at(0);
         result.options.action = commandArguments.at(1);
+    } else if (command == QStringLiteral("peers")) {
+        result.options.command = Command::Peers;
+        result.options.peerArguments = commandArguments;
+        const QString subcommand = commandArguments.value(0);
+        const QStringList subArguments = commandArguments.mid(1);
+        if (subcommand == QStringLiteral("list")) {
+            if (!subArguments.isEmpty()) {
+                return usageError(QStringLiteral("peers list does not accept arguments"));
+            }
+        } else if (subcommand == QStringLiteral("code")) {
+            if (!subArguments.isEmpty()) {
+                return usageError(QStringLiteral("peers code does not accept arguments"));
+            }
+        } else if (subcommand == QStringLiteral("pair")) {
+            if (subArguments.size() != 3) {
+                return usageError(QStringLiteral(
+                    "peers pair requires exactly ADDRESS PORT and CODE"));
+            }
+            bool portValid = false;
+            const int port = subArguments.at(1).toInt(&portValid);
+            if (!portValid || port <= 0 || port > 65535) {
+                return usageError(QStringLiteral("peers pair requires a PORT between 1 and 65535"));
+            }
+        } else if (subcommand == QStringLiteral("remove")) {
+            if (subArguments.size() != 1) {
+                return usageError(QStringLiteral("peers remove requires exactly MACHINEID"));
+            }
+        } else if (subcommand == QStringLiteral("revoke")) {
+            if (subArguments.size() != 1) {
+                return usageError(QStringLiteral("peers revoke requires exactly MACHINEID"));
+            }
+        } else if (subcommand == QStringLiteral("listener")) {
+            if (subArguments.size() != 1
+                || (subArguments.front() != QLatin1String("on")
+                    && subArguments.front() != QLatin1String("off"))) {
+                return usageError(QStringLiteral("peers listener requires exactly ON or OFF"));
+            }
+        } else {
+            return usageError(QStringLiteral(
+                "unknown peers subcommand '%1' (try list, code, pair, remove, revoke, listener)")
+                .arg(subcommand));
+        }
     } else {
         return usageError(QStringLiteral("unknown command '%1'").arg(command));
     }

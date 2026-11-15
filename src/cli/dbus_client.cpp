@@ -105,6 +105,27 @@ template <typename PendingReply>
     return list ? listResult(reply.value()) : parseObject(reply.value());
 }
 
+// The generated proxy's void methods return void, silently dropping D-Bus
+// error replies. Peer removal/revocation and the listener toggle must report
+// their rejections, so they go through a synchronous call whose reply carries
+// the error name and message.
+[[nodiscard]] ClientResult voidCall(const QString& method, const QVariantList& arguments) {
+    QDBusInterface interface(QString::fromLatin1(serviceName),
+                             QString::fromLatin1(objectPath),
+                             QString::fromLatin1(serviceName),
+                             QDBusConnection::sessionBus());
+    const QDBusMessage reply = interface.callWithArgumentList(QDBus::AutoDetect, method, arguments);
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        const QString name = reply.errorName();
+        const ExitCode code =
+            isUnavailableError(name) ? ExitCode::ServiceUnavailable : exitCodeForError(name);
+        const QString detail =
+            reply.errorMessage().isEmpty() ? name : reply.errorMessage();
+        return failure(code, QStringLiteral("D-Bus request failed: %1").arg(detail));
+    }
+    return {ExitCode::Success, {}, {}};
+}
+
 } // namespace
 
 ExitCode exitCodeForError(const QString& errorCode) {
@@ -123,6 +144,9 @@ ExitCode exitCodeForError(const QString& errorCode) {
         code.compare(QStringLiteral("staleSafetyData"), Qt::CaseInsensitive) == 0 ||
         code.compare(QStringLiteral("volumeMaximumExceeded"), Qt::CaseInsensitive) == 0) {
         return ExitCode::SafetyRejected;
+    }
+    if (code.compare(QStringLiteral("pairingRejected"), Qt::CaseInsensitive) == 0) {
+        return ExitCode::PairingRejected;
     }
     return ExitCode::TransportFailure;
 }
@@ -192,6 +216,48 @@ ClientResult DbusClient::sendCommand(const QString& device, const QString& actio
                        QStringLiteral("timed out waiting for command completion"));
     }
     return *completed;
+}
+
+ClientResult DbusClient::peersList() const {
+    auto proxy = makeProxy();
+    return stringReply(proxy.ListPeers(), false);
+}
+
+ClientResult DbusClient::peersCode() const {
+    auto proxy = makeProxy();
+    QDBusPendingReply<QString> reply = proxy.PeerPairingCode();
+    reply.waitForFinished();
+    if (reply.isError()) {
+        return dbusFailure(reply.error());
+    }
+    // The code is a bare token, not an envelope; wrap it so --json has a shape.
+    return {ExitCode::Success,
+            QJsonDocument(QJsonObject{{QStringLiteral("code"), reply.value()}}), {}};
+}
+
+ClientResult DbusClient::peersPair(const QString& address, uint port,
+                                   const QString& code) const {
+    auto proxy = makeProxy();
+    proxy.setTimeout(CommandContract::clientCompletionTimeoutMs);
+    return stringReply(proxy.PairPeer(address, port, code), false);
+}
+
+ClientResult DbusClient::peersRemove(const QString& machineId) const {
+    return voidCall(QStringLiteral("RemovePeerTarget"), {machineId});
+}
+
+ClientResult DbusClient::peersRevoke(const QString& machineId) const {
+    return voidCall(QStringLiteral("RevokePairedController"), {machineId});
+}
+
+ClientResult DbusClient::peersSetListener(bool enabled) const {
+    const ClientResult toggled = voidCall(QStringLiteral("SetPeerListenerEnabled"), {enabled});
+    if (!toggled.succeeded()) {
+        return toggled;
+    }
+    // The toggle itself has no useful reply body; the fresh listing is the
+    // confirmation the user can actually read (bound port or "off").
+    return peersList();
 }
 
 } // namespace RokuDeck::Cli

@@ -78,6 +78,11 @@ target_include_directories(config-store-test
 target_link_libraries(config-store-test PRIVATE RokuDeck::Daemon Qt6::Core Qt6::Test)
 add_test(NAME config-store COMMAND config-store-test)
 
+add_executable(peer-server-test unit/peer_server_test.cpp)
+target_include_directories(peer-server-test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(peer-server-test PRIVATE RokuDeck::Daemon Qt6::Core Qt6::Network Qt6::Test)
+add_test(NAME peer-server COMMAND peer-server-test)
+
 add_executable(poll-scheduler-test unit/poll_scheduler_test.cpp)
 target_include_directories(poll-scheduler-test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(poll-scheduler-test PRIVATE RokuDeck::Core Qt6::Core Qt6::Test)

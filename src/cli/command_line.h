@@ -11,6 +11,7 @@ enum class Command {
     Status,
     Discover,
     SendCommand,
+    Peers,
 };
 
 enum class ExitCode : int {
@@ -21,6 +22,7 @@ enum class ExitCode : int {
     UnsupportedCommand = 5,
     SafetyRejected = 6,
     TransportFailure = 7,
+    PairingRejected = 10,
 };
 
 struct Options {
@@ -29,6 +31,8 @@ struct Options {
     bool quiet = false;
     QString device;
     QString action;
+    // For Command::Peers: [subcommand, ...arguments], validated by the parser.
+    QStringList peerArguments;
 };
 
 struct ParseResult {

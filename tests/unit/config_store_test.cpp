@@ -39,6 +39,9 @@ private Q_SLOTS:
     void corruptRuleSurvivesALaterSave();
     void devicesRoundTripPreservesVolumeCeiling();
     void absentVolumeCeilingDefaultsToUnrestricted();
+    void peerListenerSettingsRoundTripAndDefaults();
+    void pairedControllersRoundTripAndSkipNamelessEntries();
+    void peerTargetsRoundTripAndSkipIncompleteEntries();
 };
 
 void ConfigStoreTest::rulesRoundTripPreservesOrderAndFlags()
@@ -188,6 +191,96 @@ void ConfigStoreTest::absentVolumeCeilingDefaultsToUnrestricted()
     const QList<DeviceRecord> loaded = store.loadDevices();
     QCOMPARE(loaded.size(), 1);
     QCOMPARE(loaded.first().volumeCeiling, 100);
+}
+
+void ConfigStoreTest::peerListenerSettingsRoundTripAndDefaults()
+{
+    QTemporaryDir dir;
+    auto config = KSharedConfig::openConfig(
+        dir.path() + QStringLiteral("/store.rc"), KConfig::SimpleConfig);
+
+    // Defaults: explicitly disabled, the design's default port.
+    ConfigStore fresh(config);
+    const PeerListenerSettings defaults = fresh.loadPeerListener();
+    QCOMPARE(defaults.enabled, false);
+    QCOMPARE(defaults.port, static_cast<quint16>(49160));
+
+    PeerListenerSettings settings;
+    settings.enabled = true;
+    settings.port = 0;  // OS-assigned, a legitimate stored choice
+    fresh.savePeerListener(settings);
+
+    ConfigStore reload(config);
+    const PeerListenerSettings loaded = reload.loadPeerListener();
+    QCOMPARE(loaded.enabled, true);
+    QCOMPARE(loaded.port, static_cast<quint16>(0));
+}
+
+void ConfigStoreTest::pairedControllersRoundTripAndSkipNamelessEntries()
+{
+    QTemporaryDir dir;
+    auto config = KSharedConfig::openConfig(
+        dir.path() + QStringLiteral("/store.rc"), KConfig::SimpleConfig);
+    ConfigStore store(config);
+
+    PairedController controller;
+    controller.machineId = QStringLiteral("aaaabbbbccccdddd1111222233334444");
+    controller.token = QStringLiteral("token-secret");
+    controller.addedAt = QDateTime(QDate(2026, 11, 14), QTime(10, 30));
+    store.savePairedControllers({controller});
+
+    // A hand-edited file cannot inject a nameless or tokenless controller.
+    {
+        KConfigGroup peersGroup(config, QStringLiteral("Peers"));
+        KConfigGroup entry(&peersGroup, QStringLiteral("Controller1"));
+        entry.writeEntry("MachineId", QString());
+        entry.writeEntry("Token", QStringLiteral("orphan"));
+        KConfigGroup tokenless(&peersGroup, QStringLiteral("Controller2"));
+        tokenless.writeEntry("MachineId", QStringLiteral("no-token-machine"));
+        config->sync();
+    }
+
+    ConfigStore reload(config);
+    const QList<PairedController> loaded = reload.loadPairedControllers();
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.first().machineId, controller.machineId);
+    QCOMPARE(loaded.first().token, controller.token);
+    QCOMPARE(loaded.first().addedAt, controller.addedAt);
+}
+
+void ConfigStoreTest::peerTargetsRoundTripAndSkipIncompleteEntries()
+{
+    QTemporaryDir dir;
+    auto config = KSharedConfig::openConfig(
+        dir.path() + QStringLiteral("/store.rc"), KConfig::SimpleConfig);
+    ConfigStore store(config);
+
+    PeerTarget target;
+    target.machineId = QStringLiteral("eeeeffff000011112222333344445555");
+    target.displayName = QStringLiteral("machine-two");
+    target.address = QStringLiteral("127.0.0.1");
+    target.port = 49160;
+    target.token = QStringLiteral("peer-token");
+    store.savePeerTargets({target});
+
+    // Missing port or address or token: skipped, like nameless devices.
+    {
+        KConfigGroup targetsGroup(config, QStringLiteral("PeerTargets"));
+        KConfigGroup entry(&targetsGroup, QStringLiteral("Target1"));
+        entry.writeEntry("MachineId", QStringLiteral("broken-machine"));
+        entry.writeEntry("Address", QStringLiteral("127.0.0.1"));
+        entry.writeEntry("Token", QStringLiteral("t"));
+        config->sync();
+    }
+
+    ConfigStore reload(config);
+    const QList<PeerTarget> loaded = reload.loadPeerTargets();
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.first().machineId, target.machineId);
+    QCOMPARE(loaded.first().displayName, target.displayName);
+    QCOMPARE(loaded.first().address, target.address);
+    QCOMPARE(loaded.first().port, static_cast<quint16>(49160));
+    QCOMPARE(loaded.first().token, target.token);
 }
 
 QTEST_MAIN(ConfigStoreTest)

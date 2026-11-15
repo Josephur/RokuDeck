@@ -6,7 +6,18 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
-- (nothing yet)
+- Network peers (M9a of the network-peers design): the daemon can listen for
+  other RokuDeck machines on the LAN — explicitly enabled only, default port
+  49160 — mint one-time pairing codes, and remember paired controllers. A
+  machine pairs with a peer by address + code and holds the returned token;
+  paired controllers may pull this machine's This-PC state envelope (volume,
+  muted, playing) with it, and every other request is a typed JSON error.
+  Re-pairing rotates the token; revocation on either side takes effect
+  immediately. Manage everything with `rokudeckctl peers
+  {list,code,pair,remove,revoke,listener}` or the new Peers page in the
+  widget's config dialog. Connection tokens never appear on D-Bus, and rules
+  stay strictly per-machine local; snapshots flowing into the device
+  registry arrive in M9b.
 
 ## 0.2.0 - 2026-11-14
 

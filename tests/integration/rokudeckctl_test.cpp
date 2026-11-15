@@ -4,6 +4,7 @@
 #include "dbus_client.h"
 #include "support/fake_process_runner.h"
 
+#include <KConfigGroup>
 #include <KSharedConfig>
 
 #include <QElapsedTimer>
@@ -68,6 +69,8 @@ class RokuDeckCtlTest final : public QObject {
     void safetyRejectionHasDocumentedExitCode();
     void transportFailureHasDocumentedExitCode();
     void typedDbusErrorsHaveDocumentedExitCodes();
+    void peersUsageErrorsExitWithUsageCode();
+    void peersSubcommandsManageThePairingLifecycle();
 
   private:
     [[nodiscard]] static QString rokudeckctlPath();
@@ -333,6 +336,115 @@ void RokuDeckCtlTest::typedDbusErrorsHaveDocumentedExitCodes() {
     QCOMPARE(Cli::exitCodeForError(
                  QStringLiteral("io.github.josephur.RokuDeck1.Error.TransportFailure")),
              Cli::ExitCode::TransportFailure);
+    QCOMPARE(Cli::exitCodeForError(
+                 QStringLiteral("io.github.josephur.RokuDeck1.Error.PairingRejected")),
+             Cli::ExitCode::PairingRejected);
+}
+
+void RokuDeckCtlTest::peersUsageErrorsExitWithUsageCode() {
+    const CliResult bare = runCli({QStringLiteral("peers")});
+    QCOMPARE(bare.exitCode, 2);
+    QVERIFY(!bare.standardError.isEmpty());
+
+    const CliResult shortPair = runCli({QStringLiteral("peers"), QStringLiteral("pair"),
+                                        QStringLiteral("127.0.0.1")});
+    QCOMPARE(shortPair.exitCode, 2);
+
+    const CliResult badPort = runCli({QStringLiteral("peers"), QStringLiteral("pair"),
+                                      QStringLiteral("127.0.0.1"), QStringLiteral("99999"),
+                                      QStringLiteral("ABCD2345")});
+    QCOMPARE(badPort.exitCode, 2);
+
+    const CliResult badListener = runCli({QStringLiteral("peers"), QStringLiteral("listener"),
+                                          QStringLiteral("sideways")});
+    QCOMPARE(badListener.exitCode, 2);
+
+    const CliResult unknownSub = runCli({QStringLiteral("peers"), QStringLiteral("wat")});
+    QCOMPARE(unknownSub.exitCode, 2);
+}
+
+void RokuDeckCtlTest::peersSubcommandsManageThePairingLifecycle() {
+    // A second daemon instance plays the remote peer over loopback TCP; the
+    // real rokudeckctl binary drives the local daemon through D-Bus.
+    const QString peerConfigPath =
+        m_configDirectory.filePath(QStringLiteral("peers-cli-peer.rc"));
+    auto peerConfig = KSharedConfig::openConfig(peerConfigPath, KConfig::SimpleConfig);
+    auto peerDaemon = std::make_unique<DaemonService>(
+        QDBusConnection::sessionBus(), [] { return false; },
+        std::make_unique<FakeProcessRunner>(),
+        std::make_unique<ConfigStore>(std::move(peerConfig)), std::chrono::seconds(30),
+        DaemonService::DeadlineRemaining{}, DaemonService::WallClock{},
+        std::chrono::hours(1), QString(),
+        DaemonService::PeerIdentity{QStringLiteral("22222222222222222222222222222222"),
+                                    QStringLiteral("machine-two")});
+    peerDaemon->SetPeerListenerEnabled(true);
+    const int peerPort = QJsonDocument::fromJson(peerDaemon->ListPeers().toUtf8())
+                             .object()
+                             .value(QStringLiteral("listener"))
+                             .toObject()
+                             .value(QStringLiteral("boundPort"))
+                             .toInt();
+    QVERIFY(peerPort > 0);
+
+    // The listener is off by default, even while the daemon serves devices.
+    const CliResult listing = runCli({QStringLiteral("peers"), QStringLiteral("list")});
+    QCOMPARE(listing.exitCode, 0);
+    QVERIFY(listing.standardOutput.contains("Peer listener: off"));
+
+    // Port 0 keeps the local listener deterministic in tests.
+    const QString mainConfigPath = m_configDirectory.filePath(
+        QString::fromLatin1(QTest::currentTestFunction()) + QStringLiteral(".rc"));
+    KSharedConfig::openConfig(mainConfigPath, KConfig::SimpleConfig)
+        ->group(QStringLiteral("PeerListener"))
+        .writeEntry(QStringLiteral("Port"), 0);
+
+    const CliResult listenerOn =
+        runCli({QStringLiteral("peers"), QStringLiteral("listener"), QStringLiteral("on")});
+    QCOMPARE(listenerOn.exitCode, 0);
+    QVERIFY(listenerOn.standardOutput.contains("listening on port"));
+
+    // The local machine mints codes for OTHER machines to use; the CLI just
+    // surfaces the bare token.
+    const CliResult code = runCli({QStringLiteral("peers"), QStringLiteral("code")});
+    QCOMPARE(code.exitCode, 0);
+    QVERIFY(code.standardOutput.trimmed().size() >= 6);
+
+    // Pair the local machine with machine-two through the real handshake.
+    const QString pairingCode = peerDaemon->PeerPairingCode();
+    QVERIFY(!pairingCode.isEmpty());
+    const CliResult paired = runCli({QStringLiteral("peers"), QStringLiteral("pair"),
+                                     QStringLiteral("127.0.0.1"), QString::number(peerPort),
+                                     pairingCode});
+    QCOMPARE(paired.exitCode, 0);
+    QVERIFY(paired.standardOutput.contains("Paired with machine-two"));
+
+    // The pairing shows up as a target, and no connection token leaves the daemon.
+    const CliResult jsonList = runCli({QStringLiteral("--json"), QStringLiteral("peers"),
+                                       QStringLiteral("list")});
+    QCOMPARE(jsonList.exitCode, 0);
+    const QJsonObject targets = parseJson(jsonList.standardOutput)
+                                    .object()
+                                    .value(QStringLiteral("targets"))
+                                    .toArray()
+                                    .at(0)
+                                    .toObject();
+    QCOMPARE(targets.value(QStringLiteral("machineId")).toString(),
+             QStringLiteral("22222222222222222222222222222222"));
+    QVERIFY(!jsonList.standardOutput.contains("token"));
+
+    // Removal empties the list; removing again reports the unknown peer.
+    const CliResult removed = runCli({QStringLiteral("peers"), QStringLiteral("remove"),
+                                      QStringLiteral("22222222222222222222222222222222")});
+    QCOMPARE(removed.exitCode, 0);
+    const CliResult removedAgain =
+        runCli({QStringLiteral("peers"), QStringLiteral("remove"),
+                QStringLiteral("22222222222222222222222222222222")});
+    QVERIFY(removedAgain.exitCode != 0);
+    QVERIFY(!removedAgain.standardError.isEmpty());
+
+    const CliResult listenerOff =
+        runCli({QStringLiteral("peers"), QStringLiteral("listener"), QStringLiteral("off")});
+    QCOMPARE(listenerOff.exitCode, 0);
 }
 
 QTEST_GUILESS_MAIN(RokuDeckCtlTest)

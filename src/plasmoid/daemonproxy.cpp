@@ -877,6 +877,98 @@ void DaemonProxy::clearPendingCommands() {
     m_muteExpectations.clear();
 }
 
+void DaemonProxy::setPeerListenerEnabled(bool enabled) {
+    if (!m_active) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("setPeerListenerEnabled"),
+                    m_interface->SetPeerListenerEnabled(enabled));
+}
+
+void DaemonProxy::pairPeer(const QString& address, quint32 port, const QString& code) {
+    if (!m_active) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("pairPeer"), m_interface->PairPeer(address, port, code));
+}
+
+void DaemonProxy::removePeerTarget(const QString& machineId) {
+    if (!m_active) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("removePeerTarget"), m_interface->RemovePeerTarget(machineId));
+}
+
+void DaemonProxy::revokePairedController(const QString& machineId) {
+    if (!m_active) {
+        return;
+    }
+    watchDeviceCall(QStringLiteral("revokePairedController"),
+                    m_interface->RevokePairedController(machineId));
+}
+
+QString DaemonProxy::peerPairingCode() {
+    if (!m_active) {
+        return {};
+    }
+    // Same pump reasoning as listPeers().
+    QEventLoop pump;
+    QTimer backstop;
+    backstop.setSingleShot(true);
+    backstop.start(5000);
+    QString code;
+    auto* watcher = new QDBusPendingCallWatcher(m_interface->PeerPairingCode(), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, &pump,
+            [this, watcher, &pump, &code](QDBusPendingCallWatcher* finished) {
+                const QDBusPendingReply<QString> reply = *finished;
+                watcher->deleteLater();
+                if (reply.isError()) {
+                    Q_EMIT errorOccurred(reply.error().message());
+                } else {
+                    code = reply.value();
+                }
+                pump.quit();
+            });
+    connect(&backstop, &QTimer::timeout, &pump, &QEventLoop::quit);
+    pump.exec();
+    return code;
+}
+
+QVariantMap DaemonProxy::listPeers() {
+    if (!m_active) {
+        return {};
+    }
+    // Synchronous by QML contract (the page reads the listing immediately),
+    // but the wait is a nested event pump, not waitForFinished: an
+    // in-process daemon's dispatch only runs while the loop spins, and a
+    // bare block on the pending reply deadlocks into a NoReply. Same shape
+    // as the daemon's own delivery waits, bounded by a backstop.
+    QEventLoop pump;
+    QTimer backstop;
+    backstop.setSingleShot(true);
+    backstop.start(5000);
+    QVariantMap listing;
+    auto* watcher = new QDBusPendingCallWatcher(m_interface->ListPeers(), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, &pump,
+            [this, watcher, &pump, &listing](QDBusPendingCallWatcher* finished) {
+                const QDBusPendingReply<QString> reply = *finished;
+                watcher->deleteLater();
+                if (reply.isError()) {
+                    Q_EMIT errorOccurred(reply.error().message());
+                } else {
+                    const QJsonDocument document =
+                        QJsonDocument::fromJson(reply.value().toUtf8());
+                    if (document.isObject()) {
+                        listing = document.object().toVariantMap();
+                    }
+                }
+                pump.quit();
+            });
+    connect(&backstop, &QTimer::timeout, &pump, &QEventLoop::quit);
+    pump.exec();
+    return listing;
+}
+
 void DaemonProxy::handleCommandFinished(const QString& requestId, const QString& resultJson) {
     const auto request = m_requestSerials.constFind(requestId);
     if (request == m_requestSerials.cend()) {

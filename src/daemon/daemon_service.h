@@ -35,10 +35,19 @@
 
 namespace RokuDeck {
 
+class PeerServer;
+
 class DaemonService final : public QObject, protected QDBusContext {
-    Q_OBJECT
+  Q_OBJECT
 
   public:
+    // Injected identity for the peer subsystem (network-peers design §1).
+    // Empty fields mean "use the real local machine-id/hostname"; tests
+    // inject so two daemons in one process have distinct peer identities.
+    struct PeerIdentity {
+        QString machineId;
+        QString hostName;
+    };
     using DeadlineRemaining = std::function<qint64(const QDeadlineTimer&)>;
     using WallClock = std::function<QDateTime()>;
 
@@ -50,9 +59,10 @@ class DaemonService final : public QObject, protected QDBusContext {
         std::chrono::milliseconds idleGrace = std::chrono::seconds(30),
         DeadlineRemaining deadlineRemaining = {},
         WallClock wallClock = {},
-        std::chrono::milliseconds localPcPollInterval = std::chrono::seconds(2),
-        QString scriptsDir = {},
-        QObject* parent = nullptr);
+    std::chrono::milliseconds localPcPollInterval = std::chrono::seconds(2),
+    QString scriptsDir = {},
+    PeerIdentity peerIdentity = {},
+    QObject* parent = nullptr);
     ~DaemonService() override;
 
     [[nodiscard]] bool registerOnBus();
@@ -95,6 +105,16 @@ class DaemonService final : public QObject, protected QDBusContext {
     void DeleteRule(const QString& ruleId);
     void SetRuleEnabled(const QString& ruleId, bool enabled);
     [[nodiscard]] QString RunRule(const QString& ruleId);
+
+    // Network peers (M9a): listener + pairing. State moves as JSON envelopes;
+    // connection tokens never appear in any of it. See the network-peers
+    // design (docs/superpowers/plans/2026-11-14-network-peers-design.md).
+    void SetPeerListenerEnabled(bool enabled);
+    [[nodiscard]] QString PeerPairingCode();
+    [[nodiscard]] QString ListPeers() const;
+    [[nodiscard]] QString PairPeer(const QString& address, uint port, const QString& code);
+    void RemovePeerTarget(const QString& machineId);
+    void RevokePairedController(const QString& machineId);
 
   Q_SIGNALS:
     void DeviceSnapshotChanged(const QString& serial, const QString& snapshotJson);
@@ -276,6 +296,8 @@ class DaemonService final : public QObject, protected QDBusContext {
     QHash<QString, QString> m_mprisPlaybackStatuses;
     bool m_mprisPlaying = false;
     WallClock m_wallClock;
+    PeerIdentity m_peerIdentity;
+    std::unique_ptr<PeerServer> m_peerServer;
     QTimer m_idleTimer;
     QTimer m_pollTimer;
     QTimer m_pcPollTimer;
