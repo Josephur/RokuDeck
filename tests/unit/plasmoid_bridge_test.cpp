@@ -78,6 +78,12 @@ QString snapshotWith(const QString& serial, bool muted, const QString& capturedA
     return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
 
+// Captures "now"+offset in the same ISO format the daemon emits, so tests can
+// place a reading relative to an optimistic prediction made moments ago.
+QString capturedAroundNow(qint64 offsetMs) {
+    return QDateTime::currentDateTime().addMSecs(offsetMs).toString(Qt::ISODateWithMs);
+}
+
 template <typename Applet> std::unique_ptr<Applet> createApplet() {
     if constexpr (std::is_base_of_v<Plasma::Applet, Applet>) {
         return std::make_unique<Applet>(nullptr, KPluginMetaData(), QVariantList());
@@ -124,6 +130,10 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     bool delayNextDeviceCall = false;
     bool rejectNextCall = false;
     bool rejectNextRuleCall = false;
+    // Tests driving two overlapping commands (rapid mute taps) need distinct
+    // request ids; the default keeps the historical REQUEST-ONE contract.
+    bool useNumberedRequestIds = false;
+    int requestCounter = 0;
 
     // Minimal stand-in for the daemon's own contract behavior.
     void storeRule(QJsonObject object, const QString& id) {
@@ -288,6 +298,9 @@ class FakeDaemon final : public QObject, protected QDBusContext {
     QString SendCommand(const QString& serial, const QString& commandJson) {
         Q_UNUSED(serial)
         Q_UNUSED(commandJson)
+        if (useNumberedRequestIds) {
+            return QStringLiteral("REQUEST-%1").arg(++requestCounter);
+        }
         return QStringLiteral("REQUEST-ONE");
     }
 
@@ -376,6 +389,11 @@ class PlasmoidBridgeTest : public QObject {
     void successfulCommandReenablesInputWithoutWaitingForAPoll();
     void successfulCommandTriggersAFreshSnapshot();
     void aLateStaleSnapshotCannotUndoNewerState();
+    void muteKeypressFlipsTheIconOptimistically();
+    void failedMuteCommandRevertsTheIconImmediately();
+    void anInFlightCaptureCannotRegressAnArmedMuteIcon();
+    void aFreshCaptureOutranksAPinnedMuteExpectation();
+    void aSupersededMuteFailureKeepsTheNewerPrediction();
     void staleRegistrationReplyCannotUnregisterReplacementOwner();
     void deviceListExposesDaemonOwnedPreferences();
     void aMalformedVolumeCeilingKeepsTheStrictListRejection();
@@ -674,6 +692,218 @@ void PlasmoidBridgeTest::aLateStaleSnapshotCannotUndoNewerState() {
         snapshotWith(QStringLiteral("SERIAL-A"), false,
                      QStringLiteral("2026-08-20T16:06:00.000-04:00")));
     QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+}
+
+void PlasmoidBridgeTest::muteKeypressFlipsTheIconOptimistically() {
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-MUTE"));
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex index = firstIndex(model);
+
+    // Baseline reading: not muted.
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), false,
+                     QStringLiteral("2026-08-20T16:00:00.000-04:00")));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // A Home keypress predicts nothing: only the mute toggle is predictable.
+    proxy.sendCommand(QStringLiteral("SERIAL-A"), QStringLiteral("keypress"),
+                      QStringLiteral("Home"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), true);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+    Q_EMIT m_fake->CommandFinished(
+        QStringLiteral("REQUEST-ONE"),
+        QStringLiteral(
+            R"json({"schemaVersion":1,"requestId":"REQUEST-ONE","serial":"SERIAL-A","success":true})json"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), false);
+
+    // Tapping mute flips the icon the moment the daemon accepts the command,
+    // long before any post-command pull lands.
+    proxy.sendCommand(QStringLiteral("SERIAL-A"), QStringLiteral("keypress"),
+                      QStringLiteral("VolumeMute"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), true);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+
+    // The pull confirms the prediction...
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), true,
+                                                      capturedAroundNow(150)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+    // ...and disarms it: the next genuinely newer reading flows through
+    // instead of being pinned to the prediction.
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), false,
+                                                      capturedAroundNow(250)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+}
+
+void PlasmoidBridgeTest::failedMuteCommandRevertsTheIconImmediately() {
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-MUTE-FAIL"));
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex index = firstIndex(model);
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), false,
+                     QStringLiteral("2026-08-20T16:00:00.000-04:00")));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    proxy.sendCommand(QStringLiteral("SERIAL-A"), QStringLiteral("keypress"),
+                      QStringLiteral("VolumeMute"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), true);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+
+    // The command failed: the icon returns to the last reported state right
+    // away - no snapshot needs to arrive first.
+    const int pullsBefore = m_fake->snapshotRequests.count(QStringLiteral("SERIAL-A"));
+    Q_EMIT m_fake->CommandFinished(
+        QStringLiteral("REQUEST-ONE"),
+        QStringLiteral(
+            R"json({"schemaVersion":1,"requestId":"REQUEST-ONE","serial":"SERIAL-A","success":false})json"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), false);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // The reverted prediction was never confirmed, so a fresh reading is
+    // pulled to make sure the failed toggle cannot linger.
+    QTRY_COMPARE(m_fake->snapshotRequests.count(QStringLiteral("SERIAL-A")), pullsBefore + 1);
+
+    // The prediction is disarmed, so fresh reality flows unimpeded.
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), true,
+                                                      capturedAroundNow(150)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+}
+
+void PlasmoidBridgeTest::anInFlightCaptureCannotRegressAnArmedMuteIcon() {
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-MUTE-RACE"));
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex index = firstIndex(model);
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), false,
+                     QStringLiteral("2026-08-20T16:00:00.000-04:00")));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    proxy.sendCommand(QStringLiteral("SERIAL-A"), QStringLiteral("keypress"),
+                      QStringLiteral("VolumeMute"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), true);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+
+    // A periodic poll captured after the command was sent but before the
+    // television applied it still reports the old state. Its other fields
+    // are fresh, but regressing the mute icon is exactly the desync the
+    // prediction exists to prevent - so the state is kept.
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), false,
+                                                      capturedAroundNow(100)));
+    QTest::qWait(50);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+
+    // The television's real state confirms the prediction...
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), true,
+                                                      capturedAroundNow(200)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+    // ...and disarms it.
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), false,
+                                                      capturedAroundNow(300)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+}
+
+void PlasmoidBridgeTest::aFreshCaptureOutranksAPinnedMuteExpectation() {
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-MUTE-ESCAPE"));
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex index = firstIndex(model);
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), false,
+                     QStringLiteral("2026-08-20T16:00:00.000-04:00")));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    proxy.sendCommand(QStringLiteral("SERIAL-A"), QStringLiteral("keypress"),
+                      QStringLiteral("VolumeMute"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), true);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+
+    // The command silently did not take; a capture made well after the
+    // prediction cannot be an in-flight pre-command reading, so it must be
+    // believed instead of pinned away - an honest icon beats a stuck one.
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), false,
+                                                      capturedAroundNow(4000)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // Disarmed: later readings flow unchanged.
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), true,
+                                                      capturedAroundNow(5000)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+}
+
+void PlasmoidBridgeTest::aSupersededMuteFailureKeepsTheNewerPrediction() {
+    m_fake->useNumberedRequestIds = true;
+    DevicesModel model;
+    DaemonProxy proxy(&model, QStringLiteral("PROXY-MUTE-TWICE"));
+    proxy.start();
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex index = firstIndex(model);
+    Q_EMIT m_fake->DeviceSnapshotChanged(
+        QStringLiteral("SERIAL-A"),
+        snapshotWith(QStringLiteral("SERIAL-A"), false,
+                     QStringLiteral("2026-08-20T16:00:00.000-04:00")));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // Two rapid taps: the second prediction replaces the first, and the
+    // icon follows the last tap (false - muted then unmuted again).
+    proxy.sendCommand(QStringLiteral("SERIAL-A"), QStringLiteral("keypress"),
+                      QStringLiteral("VolumeMute"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), true);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
+    proxy.sendCommand(QStringLiteral("SERIAL-A"), QStringLiteral("keypress"),
+                      QStringLiteral("VolumeMute"));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // The first tap reaches the television and a pull reports its effect;
+    // the second is still in flight, so the icon must not regress to it.
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), true,
+                                                      capturedAroundNow(100)));
+    QTest::qWait(50);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // The first command then reports failure: superseded, it must not
+    // clobber the newer prediction or revert the icon on its behalf.
+    Q_EMIT m_fake->CommandFinished(
+        QStringLiteral("REQUEST-1"),
+        QStringLiteral(
+            R"json({"schemaVersion":1,"requestId":"REQUEST-1","serial":"SERIAL-A","success":false})json"));
+    QTest::qWait(50);
+    QCOMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // The second command succeeds and its pull confirms the prediction.
+    Q_EMIT m_fake->CommandFinished(
+        QStringLiteral("REQUEST-2"),
+        QStringLiteral(
+            R"json({"schemaVersion":1,"requestId":"REQUEST-2","serial":"SERIAL-A","success":true})json"));
+    QTRY_COMPARE(model.data(index, DevicesModel::PendingCommandRole).toBool(), false);
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), false,
+                                                      capturedAroundNow(200)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), false);
+
+    // Disarmed: reality flows.
+    Q_EMIT m_fake->DeviceSnapshotChanged(QStringLiteral("SERIAL-A"),
+                                         snapshotWith(QStringLiteral("SERIAL-A"), true,
+                                                      capturedAroundNow(300)));
+    QTRY_COMPARE(model.data(index, DevicesModel::MutedRole).toBool(), true);
 }
 
 void PlasmoidBridgeTest::staleRegistrationReplyCannotUnregisterReplacementOwner() {

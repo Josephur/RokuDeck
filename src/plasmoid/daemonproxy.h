@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <QDateTime>
 #include <QHash>
 #include <QObject>
 #include <QSet>
@@ -19,6 +20,7 @@ namespace RokuDeck {
 
 class AutomationsModel;
 class DevicesModel;
+struct DeviceStateSnapshot;
 
 class DaemonProxy final : public QObject {
     Q_OBJECT
@@ -64,6 +66,21 @@ class DaemonProxy final : public QObject {
     void busyChanged();
 
   private:
+    // An optimistic mute toggle waiting for a snapshot to confirm or refute
+    // it. A mute keypress toggles the television's state, so its effect is
+    // predictable: the opposite of the last reported value. armMuteExpectation()
+    // flips the model the moment the daemon accepts the command; every view
+    // mirrors it instantly instead of waiting out the post-command pull.
+    struct MuteExpectation {
+        QString requestId;
+        bool expected = false;
+        bool previous = false;
+        QDateTime setAt;
+    };
+    void armMuteExpectation(const QString& serial, const QString& requestId,
+                            const QString& action, const QVariant& value);
+    void reconcileMuteExpectation(const QString& serial, DeviceStateSnapshot& snapshot);
+    [[nodiscard]] bool revertMuteExpectation(const QString& serial, const QString& requestId);
     void handleServiceOwnerChanged(const QString& service, const QString& oldOwner,
                                    const QString& newOwner);
     void applyDeviceListJson(const QString& devicesJson);
@@ -89,6 +106,7 @@ class DaemonProxy final : public QObject {
     std::unique_ptr<IoGithubJosephurRokuDeck1Interface> m_interface;
     std::unique_ptr<QDBusServiceWatcher> m_ownerWatcher;
     QHash<QString, QString> m_requestSerials;
+    QHash<QString, MuteExpectation> m_muteExpectations;
     QHash<QString, QDateTime> m_lastSnapshotAt;
     QHash<QString, QJsonObject> m_ruleDocuments;
     QStringList m_registeredSerials;

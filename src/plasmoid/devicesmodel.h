@@ -79,6 +79,10 @@ class DevicesModel final : public QAbstractListModel {
 
     [[nodiscard]] QStringList serials() const;
     [[nodiscard]] bool containsSerial(const QString& serial) const;
+    // The last reported mute state, or nullopt when nothing has been reported
+    // yet (or the serial is unknown). Callers predicting a toggle's effect
+    // need this to know whether a prediction is possible at all.
+    [[nodiscard]] std::optional<bool> mutedForSerial(const QString& serial) const;
 
     // QML pickers need the roster as plain data: [{serial, name}, ...].
     Q_INVOKABLE QVariantList deviceEntries() const;

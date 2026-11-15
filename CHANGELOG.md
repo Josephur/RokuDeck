@@ -6,6 +6,18 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- The remote panel's mute button flips the moment the daemon accepts the tap
+  instead of waiting out the post-command snapshot pull: DaemonProxy predicts
+  a mute toggle (keypress `VolumeMute`) from the last reported state and
+  reconciles immediately. The confirming snapshot disarms the prediction; a
+  failed command reverts the icon at once (with a fresh pull to confirm, so
+  the failed toggle cannot linger); a
+  capture that raced the command keeps the predicted icon (its fresh volume,
+  power, and health still apply); and a capture made well after the
+  prediction is believed over it, so a silently rejected command cannot pin
+  a wrong state. Rapid taps follow the last tap - the newest prediction
+  replaces the armed one and superseded commands can neither revert nor
+  regress it.
 - Automation settings no longer misreport a rejected change: device toggles
   (automations consent, wake-on-LAN, refresh policy) and the per-rule enable
   switch keep mirroring the daemon's stored value instead of showing an

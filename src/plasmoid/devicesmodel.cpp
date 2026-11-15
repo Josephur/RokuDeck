@@ -268,6 +268,11 @@ bool DevicesModel::containsSerial(const QString& serial) const {
     return indexOfSerial(serial) >= 0;
 }
 
+std::optional<bool> DevicesModel::mutedForSerial(const QString& serial) const {
+    const qsizetype row = indexOfSerial(serial);
+    return row < 0 ? std::nullopt : m_devices.at(row).muted;
+}
+
 qsizetype DevicesModel::indexOfSerial(const QString& serial) const {
     for (qsizetype row = 0; row < m_devices.size(); ++row) {
         if (m_devices.at(row).serial == serial) {

@@ -243,6 +243,18 @@ QJsonObject commandObject(const QString& action, const QVariant& value) {
             {QStringLiteral("value"), QJsonValue::fromVariant(value)}};
 }
 
+// Readings captured before the television applied the mute keypress report
+// the old state for a short while; the pin window keeps such in-flight
+// captures from visually regressing the icon. It exceeds the post-command
+// pull latency (~0.1-0.3 s) by an order of magnitude while staying far below
+// anything a user would call a stuck icon.
+constexpr int mutePinWindowSeconds = 3;
+
+bool isMuteToggle(const QString& action, const QVariant& value) {
+    return action == QStringLiteral("keypress")
+           && value.toString() == QStringLiteral("VolumeMute");
+}
+
 } // namespace
 
 DaemonProxy::DaemonProxy(DevicesModel* devices, QString clientId, AutomationsModel* rules,
@@ -342,7 +354,7 @@ void DaemonProxy::sendCommand(const QString& serial, const QString& action, cons
     const quint64 generation = m_generation;
     auto* watcher = new QDBusPendingCallWatcher(m_interface->SendCommand(serial, json), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
-            [this, watcher, generation, serial]() {
+            [this, watcher, generation, serial, action, value]() {
                 const QDBusPendingReply<QString> reply = *watcher;
                 watcher->deleteLater();
                 if (!m_active || generation != m_generation) {
@@ -355,6 +367,7 @@ void DaemonProxy::sendCommand(const QString& serial, const QString& action, cons
                 const QString requestId = reply.value();
                 m_requestSerials.insert(requestId, serial);
                 m_devices->markCommandPending(serial, requestId);
+                armMuteExpectation(serial, requestId, action, value);
             });
 }
 
@@ -627,6 +640,12 @@ void DaemonProxy::applyDeviceListJson(const QString& devicesJson) {
         return;
     }
     m_devices->replaceDevices(*devices);
+    // A device that left the roster takes its armed prediction with it.
+    for (const QString& serial : m_muteExpectations.keys()) {
+        if (!m_devices->containsSerial(serial)) {
+            m_muteExpectations.remove(serial);
+        }
+    }
     updateRegistration();
     for (const DeviceDescription& device : *devices) {
         requestSnapshot(device.serial);
@@ -692,7 +711,7 @@ void DaemonProxy::applySnapshotJson(const QString& expectedSerial, const QString
     if (!m_active) {
         return;
     }
-    const std::optional<DeviceStateSnapshot> snapshot = parseSnapshot(snapshotJson);
+    std::optional<DeviceStateSnapshot> snapshot = parseSnapshot(snapshotJson);
     if (!snapshot || snapshot->serial != expectedSerial) {
         m_devices->markStale(expectedSerial);
         Q_EMIT errorOccurred(i18nc("@info", "The RokuDeck device snapshot is invalid"));
@@ -711,10 +730,80 @@ void DaemonProxy::applySnapshotJson(const QString& expectedSerial, const QString
             return;
         }
     }
+    reconcileMuteExpectation(expectedSerial, *snapshot);
     m_devices->applySnapshot(*snapshot);
     if (snapshot->capturedAt.isValid()) {
         m_lastSnapshotAt[expectedSerial] = snapshot->capturedAt;
     }
+}
+
+void DaemonProxy::armMuteExpectation(const QString& serial, const QString& requestId,
+                                     const QString& action, const QVariant& value) {
+    if (!isMuteToggle(action, value)) {
+        return;
+    }
+    const std::optional<bool> current = m_devices->mutedForSerial(serial);
+    if (!current.has_value()) {
+        // Without a reported state a toggle cannot be predicted; the icon
+        // stays honest until the post-command snapshot reports the truth.
+        return;
+    }
+    MuteExpectation expectation;
+    expectation.requestId = requestId;
+    expectation.previous = *current;
+    expectation.expected = !*current;
+    expectation.setAt = QDateTime::currentDateTime();
+    m_muteExpectations.insert(serial, expectation);
+
+    // The prediction is applied exactly like a real (partial) snapshot, so
+    // every view mirroring MutedRole flips without new plumbing.
+    DeviceStateSnapshot optimistic;
+    optimistic.serial = serial;
+    optimistic.stale = false;
+    optimistic.muted = expectation.expected;
+    m_devices->applySnapshot(optimistic);
+}
+
+void DaemonProxy::reconcileMuteExpectation(const QString& serial, DeviceStateSnapshot& snapshot) {
+    const auto expectation = m_muteExpectations.constFind(serial);
+    if (expectation == m_muteExpectations.cend() || !snapshot.muted.has_value()) {
+        return;
+    }
+    if (*snapshot.muted == expectation->expected) {
+        // The television confirms the prediction; from here reality speaks.
+        m_muteExpectations.remove(serial);
+        return;
+    }
+    if (snapshot.capturedAt.isValid()
+        && expectation->setAt.addSecs(mutePinWindowSeconds) <= snapshot.capturedAt) {
+        // A capture this much newer than the prediction cannot be an
+        // in-flight pre-command reading: the command did not take (or the
+        // television overrode it). Reality outranks a stale prediction.
+        m_muteExpectations.remove(serial);
+        return;
+    }
+    // A capture that raced the command still carries fresh volume, power and
+    // health, so apply it - but keep the predicted mute state: regressing the
+    // icon here is exactly the desync this machinery exists to prevent.
+    snapshot.muted = expectation->expected;
+}
+
+bool DaemonProxy::revertMuteExpectation(const QString& serial, const QString& requestId) {
+    const auto expectation = m_muteExpectations.constFind(serial);
+    if (expectation == m_muteExpectations.cend() || expectation->requestId != requestId) {
+        // Nothing armed, or a newer toggle superseded this command's
+        // prediction; the newer one's own outcome governs the icon.
+        return false;
+    }
+    // Capture the stored state before the remove: it invalidates iterators.
+    const bool previous = expectation->previous;
+    m_muteExpectations.remove(serial);
+    DeviceStateSnapshot revert;
+    revert.serial = serial;
+    revert.stale = false;
+    revert.muted = previous;
+    m_devices->applySnapshot(revert);
+    return true;
 }
 
 void DaemonProxy::requestSnapshot(const QString& serial) {
@@ -782,6 +871,10 @@ void DaemonProxy::clearPendingCommands() {
         m_devices->finishPendingCommand(it.value(), it.key());
     }
     m_requestSerials.clear();
+    // Expectations cannot be confirmed or refuted without a daemon; drop
+    // them so the next session's snapshots are never pinned. The optimistic
+    // value stays on screen until fresh readings reconcile it.
+    m_muteExpectations.clear();
 }
 
 void DaemonProxy::handleCommandFinished(const QString& requestId, const QString& resultJson) {
@@ -796,12 +889,21 @@ void DaemonProxy::handleCommandFinished(const QString& requestId, const QString&
         !result->value(QStringLiteral("success")).isBool()) {
         m_devices->finishPendingCommand(serial, requestId);
         m_requestSerials.remove(requestId);
+        if (revertMuteExpectation(serial, requestId)) {
+            // The revert restores the last reported state, but the toggle's
+            // true effect is unknown: verify against a fresh reading so a
+            // silently failed toggle cannot linger.
+            requestSnapshot(serial);
+        }
         Q_EMIT errorOccurred(i18nc("@info", "The Roku command result is invalid"));
         return;
     }
     if (!result->value(QStringLiteral("success")).toBool()) {
         m_devices->finishPendingCommand(serial, requestId);
         m_requestSerials.remove(requestId);
+        if (revertMuteExpectation(serial, requestId)) {
+            requestSnapshot(serial);
+        }
         Q_EMIT errorOccurred(i18nc("@info", "The Roku command failed"));
         return;
     }

@@ -207,7 +207,10 @@ ColumnLayout {
             visible: root.offers("mute")
             enabled: root.controlsEnabled
             // The glyph mirrors the television's current state, like the
-            // system volume applet: struck-through while muted.
+            // system volume applet: struck-through while muted. The optimism
+            // is not here: DaemonProxy flips the model the moment the daemon
+            // accepts the VolumeMute keypress and reconciles with the next
+            // snapshot, so this binding never waits out a pull.
             icon.name: root.muted ? "audio-volume-muted" : "audio-volume-high"
             text: root.muted ? KI18n.i18n("Unmute %1", root.deviceName)
                              : KI18n.i18n("Mute %1", root.deviceName)
