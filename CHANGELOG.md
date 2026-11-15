@@ -6,6 +6,10 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- (nothing yet)
+
+## 0.3.0 - 2026-11-15
+
 - Network peers (M9c of the network-peers design): explicit audio actions
   work against peer machines. `SendCommand` on a `PC-` serial accepts only
   absolute `setVolume` and explicit `setMute` (keypresses and launches are a
