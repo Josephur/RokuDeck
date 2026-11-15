@@ -442,6 +442,7 @@ class PlasmoidBridgeTest : public QObject {
     void appletInstancesOwnIndependentRegistrationAndSelection();
     void appletDestroyedLifecycleUnregistersAndReregisters();
     void appletExposesRuleChoicesAndForwardsRunOutcomes();
+    void fetchRuleDocumentReturnsTheLiveDaemonDocument();
     void destroyingOneAppletLeavesTheOtherRegistered();
     void partialSnapshotPreservesMissingFieldsAndExplicitlyClearsNullFields();
     void malformedPayloadMarksExistingStateStale();
@@ -523,6 +524,40 @@ void PlasmoidBridgeTest::appletDestroyedLifecycleUnregistersAndReregisters() {
     QVERIFY(QMetaObject::invokeMethod(applet.get(), "destroyedChanged", Qt::DirectConnection,
                                       Q_ARG(bool, false)));
     QTRY_VERIFY(m_fake->activeClients.contains(clientId));
+}
+
+void PlasmoidBridgeTest::fetchRuleDocumentReturnsTheLiveDaemonDocument() {
+    auto applet = createApplet<RokuDeckApplet>();
+    QTRY_COMPARE_WITH_TIMEOUT(applet->devices()->rowCount(), 2, 2000);
+
+    applet->addRule(QStringLiteral(
+        R"json({"name":"Fetch fixture","trigger":{"type":"manual"},)json"
+        R"json("actions":[{"type":"keypress","key":"Home"}]})json"));
+    QString ruleId;
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&]() {
+            const QVariantList entries = applet->ruleEntries();
+            for (const QVariant& entry : entries) {
+                const QVariantMap entryMap = entry.toMap();
+                if (entryMap.value(QStringLiteral("name")).toString()
+                    == QStringLiteral("Fetch fixture")) {
+                    ruleId = entryMap.value(QStringLiteral("id")).toString();
+                    return !ruleId.isEmpty();
+                }
+            }
+            return false;
+        }(),
+        2000);
+
+    // Editors open against this fetch: the daemon's CURRENT document, never
+    // the announcement cache.
+    const QVariantMap fetched = applet->fetchRuleDocument(ruleId);
+    QVERIFY(!fetched.isEmpty());
+    QCOMPARE(fetched.value(QStringLiteral("name")).toString(), QStringLiteral("Fetch fixture"));
+    QCOMPARE(fetched.value(QStringLiteral("trigger")).toMap()
+                 .value(QStringLiteral("type")).toString(), QStringLiteral("manual"));
+
+    QVERIFY(applet->fetchRuleDocument(QStringLiteral("rUNKNOWN")).isEmpty());
 }
 
 void PlasmoidBridgeTest::destroyingOneAppletLeavesTheOtherRegistered() {

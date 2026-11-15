@@ -65,6 +65,11 @@ class DaemonProxy final : public QObject {
     // The complete definition the daemon last announced for a rule, so
     // editors can round-trip documents without owning any rule state.
     [[nodiscard]] QVariantMap ruleDocument(const QString& ruleId) const;
+    // Synchronously re-fetches the rules from the daemon and returns the
+    // rule's CURRENT document. Editors open against this instead of the
+    // announcement cache, so a dialog can never present a fossil from before
+    // the last out-of-band change (rule edit, daemon restart, CLI edit).
+    [[nodiscard]] QVariantMap fetchRuleDocument(const QString& ruleId);
 
   Q_SIGNALS:
     void availableChanged(bool available);

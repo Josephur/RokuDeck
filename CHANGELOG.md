@@ -6,6 +6,18 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- The rule editor is legible again: field pickers are device-aware and
+  human-labeled — a This-PC or peer trigger/condition offers only the fields
+  that device actually reports (playing/muted/volume/reachability) and a Roku
+  offers only its own, so the "media is playing on This PC" trap cannot be
+  re-created; switching a trigger's device re-targets a field the new device
+  never reports; stateChange triggers carry a plain-language hint that they
+  fire on the *crossing* into a state, not while it continues; and opening a
+  rule for editing fetches the daemon's CURRENT document instead of a cached
+  announcement (a stale dialog can no longer present a fossil of pre-fix
+  edits). The Automations page also gains Copy-rule-as-JSON on every rule
+  card and an Add-from-JSON import dialog for hand-editing rules without
+  dropping to `busctl`.
 - Fixed: automation rules whose trigger watches This PC (or a network peer)
   while targeting other devices never fired. The synthetic-snapshot edge
   path filtered candidate rules by the rule's target list, hiding

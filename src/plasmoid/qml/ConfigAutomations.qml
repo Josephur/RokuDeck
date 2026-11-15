@@ -42,6 +42,9 @@ KCM.SimpleKCM {
                 && ruleEditor.opened) {
                 ruleEditor.errorText = message;
             }
+            if (operation === "addRule" && importRuleDialog.visible) {
+                root.importError = message;
+            }
         }
 
         function onDeviceOperationSucceeded(operation) {
@@ -51,6 +54,10 @@ KCM.SimpleKCM {
             // never loses the user's edits; success closes it.
             if (operation === "addRule" || operation === "updateRule") {
                 ruleEditor.close();
+            }
+            if (operation === "addRule") {
+                importJsonArea.text = "";
+                importRuleDialog.close();
             }
         }
 
@@ -62,11 +69,16 @@ KCM.SimpleKCM {
     }
 
     function openRuleEditor(ruleId) {
-        ruleEditor.openForEdit(root.bridge !== null ? root.bridge.ruleDocument(ruleId) : {});
+        // Editors open against the daemon's CURRENT document, never the
+        // announcement cache: a dialog must not present a fossil from before
+        // an out-of-band edit or a daemon restart.
+        ruleEditor.openForEdit(root.bridge !== null
+            ? root.bridge.fetchRuleDocument(ruleId) : {});
     }
 
     property string operationError: ""
     property string runFeedback: ""
+    property string importError: ""
 
     ConfigRuleEditor {
         id: ruleEditor
@@ -88,12 +100,79 @@ KCM.SimpleKCM {
             }
 
             PlasmaComponents.ToolButton {
+                objectName: "addRuleFromJsonButton"
+
+                enabled: root.daemonReachable && !(root.bridge?.busy ?? false)
+                icon.name: "document-import"
+                text: KI18n.i18nc("@action:button", "Add from JSON")
+                onClicked: importRuleDialog.open()
+            }
+
+            PlasmaComponents.ToolButton {
                 objectName: "addRuleButton"
 
                 enabled: root.daemonReachable && !(root.bridge?.busy ?? false)
                 icon.name: "list-add"
                 text: KI18n.i18nc("@action:button", "Add rule")
                 onClicked: ruleEditor.openForAdd()
+            }
+        }
+
+        Kirigami.Dialog {
+            id: importRuleDialog
+
+            objectName: "importRuleDialog"
+            title: KI18n.i18nc("@title", "Add rule from JSON")
+            width: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 560,
+                            Kirigami.Units.gridUnit * 38)
+
+            ColumnLayout {
+                spacing: Kirigami.Units.smallSpacing
+
+                PlasmaComponents.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: KI18n.i18nc("@info",
+                        "Paste a rule document exactly as Copy rule JSON produces it. The daemon validates it; id and enabled are owned by the daemon and are assigned on import.")
+                }
+                PlasmaComponents.Label {
+                    objectName: "importErrorLabel"
+                    Layout.fillWidth: true
+                    visible: root.importError.length > 0
+                    wrapMode: Text.WordWrap
+                    color: Kirigami.Theme.negativeTextColor
+                    text: root.importError
+                }
+                QQC2.ScrollView {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Kirigami.Units.gridUnit * 8
+
+                    QQC2.TextArea {
+                        id: importJsonArea
+
+                        objectName: "importJsonArea"
+                        Layout.fillWidth: true
+                        wrapMode: TextEdit.Wrap
+                        placeholderText: KI18n.i18nc("@placeholder",
+                            "{\"name\":\"Movie time\",\"trigger\":{...},\"actions\":[...]}")
+                    }
+                }
+            }
+
+            footer: QQC2.DialogButtonBox {
+                QQC2.Button {
+                    objectName: "importRuleButton"
+                    text: KI18n.i18nc("@action:button", "Import")
+                    enabled: importJsonArea.text.trim().length > 0
+                    onClicked: {
+                        root.importError = "";
+                        root.bridge.addRule(importJsonArea.text.trim());
+                    }
+                }
+                QQC2.Button {
+                    text: KI18n.i18nc("@action:button", "Cancel")
+                    onClicked: importRuleDialog.close()
+                }
             }
         }
 
@@ -209,6 +288,15 @@ KCM.SimpleKCM {
                 // Deleting is irreversible, so the button asks twice: first
                 // press arms it, second press within a few seconds confirms.
                 property bool deleteArmed: false
+                // Copy feedback: the icon flips briefly so the clipboard write
+                // is visible without a notification.
+                property bool copied: false
+
+                Timer {
+                    interval: 1500
+                    running: ruleCard.copied
+                    onTriggered: ruleCard.copied = false
+                }
 
                 Timer {
                     interval: 4000
@@ -305,6 +393,20 @@ KCM.SimpleKCM {
                             color: Kirigami.Theme.disabledTextColor
                             text: KI18n.i18nc("@info", "Last ran %1", ruleCard.lastFired)
                         }
+                    }
+
+                    QQC2.ToolButton {
+                        objectName: "ruleCopyJsonButton"
+
+                        icon.name: ruleCard.copied ? "dialog-ok-apply" : "edit-copy"
+                        display: QQC2.AbstractButton.IconOnly
+                        onClicked: {
+                            const document = root.bridge.fetchRuleDocument(ruleCard.ruleId);
+                            root.bridge.copyToClipboard(JSON.stringify(document, null, 2));
+                            ruleCard.copied = true;
+                        }
+                        QQC2.ToolTip.text: KI18n.i18nc("@info:tooltip", "Copy this rule as JSON")
+                        QQC2.ToolTip.visible: hovered
                     }
 
                     QQC2.ToolButton {

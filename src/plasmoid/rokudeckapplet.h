@@ -54,6 +54,10 @@ class RokuDeckApplet final : public Plasma::Applet {
     Q_INVOKABLE void addRule(const QString& ruleJson);
     Q_INVOKABLE void updateRule(const QString& ruleJson);
     Q_INVOKABLE QVariantMap ruleDocument(const QString& ruleId) const;
+    // Re-fetches the rule from the daemon synchronously (editors open against
+    // the live document, never a stale announcement cache).
+    Q_INVOKABLE [[nodiscard]] QVariantMap fetchRuleDocument(const QString& ruleId);
+    Q_INVOKABLE void copyToClipboard(const QString& text);
     // Choices for the editor's runRule step; the rule being edited is
     // excluded so a macro cannot call itself.
     Q_INVOKABLE [[nodiscard]] QVariantList ruleEntries(const QString& excludingId = {}) const;

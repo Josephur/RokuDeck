@@ -2,6 +2,8 @@
 
 #include "rokudeckapplet.h"
 
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QAbstractItemModel>
 #include <QUuid>
 
@@ -152,6 +154,14 @@ void RokuDeckApplet::updateRule(const QString& ruleJson) {
 
 QVariantMap RokuDeckApplet::ruleDocument(const QString& ruleId) const {
     return m_daemon.ruleDocument(ruleId);
+}
+
+QVariantMap RokuDeckApplet::fetchRuleDocument(const QString& ruleId) {
+    return m_daemon.fetchRuleDocument(ruleId);
+}
+
+void RokuDeckApplet::copyToClipboard(const QString& text) {
+    QGuiApplication::clipboard()->setText(text);
 }
 
 QVariantList RokuDeckApplet::ruleEntries(const QString& excludingId) const {

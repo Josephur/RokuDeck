@@ -10,6 +10,51 @@ var modes = ["single", "restart", "queued"];
 var timeKinds = ["daily", "weekdays", "once"];
 var fields = ["power", "screensaver", "app", "muted", "volume", "health", "playing", "media"];
 var ops = ["is", "isNot", "gt", "lt", "between"];
+
+// Human-readable field names. The raw names are a trap in pairs: "media" is
+// the Roku *app* playback field and is always Unknown on This PC, while
+// "playing" is This-PC/peer playback from MPRIS and is always Unknown on a
+// Roku. The labels say which machine kind each field belongs to.
+var fieldLabels = {
+    power: "Power (Roku)",
+    screensaver: "Screensaver (Roku)",
+    app: "Active app (Roku)",
+    media: "Media app playback (Roku only)",
+    muted: "Muted",
+    volume: "Volume",
+    health: "Reachability",
+    playing: "Media playing (This PC / peers)"
+};
+
+function fieldLabel(field) {
+    return fieldLabels[field] !== undefined ? fieldLabels[field] : String(field);
+}
+
+// This PC and network peers share one field set (PipeWire volume/mute + MPRIS
+// playing); Roku devices have their own — and neither kind has a meaningful
+// value for the other's fields, so the pickers only ever offer fields the
+// selected device actually reports.
+function isPcSerial(serial) {
+    return serial === "LOCAL-PC" || String(serial).indexOf("PC-") === 0;
+}
+
+// Roku order mirrors the legacy `fields` list (minus `playing`) so index
+// based tests and stored forms keep their meaning.
+var pcFields = ["playing", "muted", "volume", "health"];
+var rokuFields = ["power", "screensaver", "app", "muted", "volume", "health", "media"];
+
+// Fields a stateChange TRIGGER may watch. A wildcard trigger never sees
+// This-PC or peer edges (pc-state opt-in contract), so the wildcard list is
+// the Roku set.
+function fieldsForTriggerDevice(serial) {
+    return isPcSerial(serial) ? pcFields : rokuFields;
+}
+
+// Fields a CONDITION may test. A wildcard condition evaluates against the
+// rule's targets, so it keeps the full labeled list.
+function fieldsForConditionDevice(serial) {
+    return isPcSerial(serial) ? pcFields : fields;
+}
 var powerValues = ["on", "standby", "unknown"];
 var screensaverValues = ["active", "inactive", "unknown"];
 var healthValues = ["online", "standby", "degraded", "offline"];

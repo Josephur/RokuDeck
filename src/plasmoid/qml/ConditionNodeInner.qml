@@ -139,6 +139,21 @@ ColumnLayout {
         }
     }
 
+    function retargetConditionFields() {
+        const allowed = RulePayload.fieldsForConditionDevice(nodeRoot.node.device);
+        fieldCombo.model = allowed;
+        if (allowed.indexOf(nodeRoot.node.field) < 0) {
+            const field = allowed[0];
+            nodeRoot.node.field = field;
+            nodeRoot.node.op = "is";
+            nodeRoot.node.value = RulePayload.defaultValue(field);
+            leafValue.field = field;
+            leafValue.op = "is";
+            leafValue.value = nodeRoot.node.value;
+        }
+        syncFromNode();
+    }
+
     function syncFromNode() {
         if (!nodeRoot.showLeaf) {
             return;
@@ -149,8 +164,9 @@ ColumnLayout {
                 deviceCombo.currentIndex = choice;
             }
         }
-        for (let field = 0; field < RulePayload.fields.length; ++field) {
-            if (RulePayload.fields[field] === nodeRoot.node.field) {
+        fieldCombo.model = RulePayload.fieldsForConditionDevice(nodeRoot.node.device);
+        for (let field = 0; field < fieldCombo.model.length; ++field) {
+            if (fieldCombo.model[field] === nodeRoot.node.field) {
                 fieldCombo.currentIndex = field;
             }
         }
@@ -210,6 +226,7 @@ ColumnLayout {
             model: leafBody.deviceChoices()
             onActivated: index => {
                 nodeRoot.node.device = model[index].value;
+                nodeRoot.retargetConditionFields();
                 nodeRoot.bubble();
             }
         }
@@ -220,7 +237,21 @@ ColumnLayout {
             objectName: "conditionFieldCombo"
 
             Kirigami.FormData.label: KI18n.i18nc("@label", "Field:")
+            // The field list follows the condition's device — a This-PC or
+            // peer condition never offers the Roku media field, and a Roku
+            // condition never offers MPRIS playing (shipped confusion,
+            // 2026-11-15). Assigned imperatively in syncFromNode(): the node
+            // object is plain JS, so a binding on the nested device would go
+            // stale (AGENTS.md form-state lesson).
             model: RulePayload.fields
+            displayText: RulePayload.fieldLabel(currentText)
+            delegate: PlasmaComponents.ItemDelegate {
+                required property string modelData
+
+                width: parent ? parent.width : 0
+                text: RulePayload.fieldLabel(modelData)
+                highlighted: fieldCombo.highlightedIndex === index
+            }
             onActivated: index => {
                 nodeRoot.node.field = model[index];
                 // RuleValueInput canonicalizes for the new field and reports

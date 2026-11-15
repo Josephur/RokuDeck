@@ -63,6 +63,7 @@ Kirigami.Dialog {
         root.formState = RulePayload.blankRule();
         root.saveAttempted = false;
         root.errorText = "";
+        root.retargetStateChangeFields();
         root.syncFromForm();
         root.open();
     }
@@ -73,8 +74,33 @@ Kirigami.Dialog {
             ? RulePayload.toFormState(root.editingRule) : RulePayload.blankRule();
         root.saveAttempted = false;
         root.errorText = "";
+        // A stored field the trigger's device never reports (media on This PC)
+        // is re-targeted here, so opening the editor also repairs the rule.
+        root.retargetStateChangeFields();
         root.syncFromForm();
         root.open();
+    }
+
+    // The Watch list follows the trigger's device: when the device changes,
+    // a field the new device never reports is re-targeted to that device's
+    // first field with its canonical default, so the stored form can never
+    // carry a dead field (media on This PC, playing on a Roku).
+    function retargetStateChangeFields() {
+        if (root.formState === null || root.formState.trigger.type !== "stateChange") {
+            return;
+        }
+        const allowed = RulePayload.fieldsForTriggerDevice(root.formState.trigger.device);
+        stateChangeFieldCombo.model = allowed;
+        if (allowed.indexOf(root.formState.trigger.field) < 0) {
+            const field = allowed[0];
+            root.formState.trigger.field = field;
+            root.formState.trigger.op = "is";
+            root.formState.trigger.value = RulePayload.defaultValue(field);
+            stateChangeValue.field = field;
+            stateChangeValue.op = "is";
+        }
+        stateChangeFieldCombo.currentIndex =
+            allowed.indexOf(root.formState.trigger.field);
     }
 
     function problemText(code) {
@@ -241,6 +267,9 @@ Kirigami.Dialog {
                 trigger.date = "";
             }
         }
+        // Switching into a stateChange trigger must populate its field list
+        // for the current device (blank rules start as time triggers).
+        root.retargetStateChangeFields();
         root.syncFromForm();
         root.touchForm();
     }
@@ -498,6 +527,7 @@ Kirigami.Dialog {
                     }
                     onActivated: index => {
                         root.formState.trigger.device = model[index].value;
+                        root.retargetStateChangeFields();
                         root.touchForm();
                     }
                 }
@@ -510,7 +540,22 @@ Kirigami.Dialog {
                     visible: root.formState !== null
                              && root.formState.trigger.type === "stateChange"
                     Kirigami.FormData.label: KI18n.i18nc("@label", "Watch:")
-                    model: RulePayload.fields
+                    // The field list follows the trigger's device: This PC and
+                    // peers offer their audio/playback fields, Rokus theirs.
+                    // Offering both everywhere put "media is playing" on This
+                    // PC twice (shipped confusion, 2026-11-15). The model is
+                    // assigned imperatively by retargetStateChangeFields():
+                    // plain-JS form state is not observable, so a binding on
+                    // the nested device would go stale.
+                    model: RulePayload.rokuFields
+                    displayText: RulePayload.fieldLabel(currentText)
+                    delegate: PlasmaComponents.ItemDelegate {
+                        required property string modelData
+
+                        width: parent ? parent.width : 0
+                        text: RulePayload.fieldLabel(modelData)
+                        highlighted: stateChangeFieldCombo.highlightedIndex === index
+                    }
                     onActivated: index => {
                         root.formState.trigger.field = model[index];
                         // RuleValueInput canonicalizes for the new field and
@@ -548,6 +593,19 @@ Kirigami.Dialog {
                         root.formState.trigger.value = value;
                         root.touchForm();
                     }
+                }
+
+                PlasmaComponents.Label {
+                    objectName: "stateChangeEdgeHint"
+
+                    visible: root.formState !== null
+                             && root.formState.trigger.type === "stateChange"
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    font.pointSize: Kirigami.Theme.smallFont.pointSize
+                    opacity: 0.75
+                    text: KI18n.i18nc("@label",
+                        "Fires when the value crosses into this state — e.g. when playback starts, not while it continues.")
                 }
             }
 

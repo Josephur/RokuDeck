@@ -30,7 +30,8 @@ TestCase {
         property bool available: true
 
         function deviceEntries() {
-            return [{ serial: "SERIAL-B", name: "Bedroom TV" }];
+            return [{ serial: "SERIAL-B", name: "Bedroom TV" },
+                    { serial: "LOCAL-PC", name: "This PC" }];
         }
     }
 
@@ -95,6 +96,59 @@ TestCase {
         editor.destroy();
     }
 
+    function test_triggerFieldsFollowTheDevice() {
+        const editor = editorComponent.createObject(testCase);
+        verify(editor !== null);
+        editor.openForAdd();
+        const combo = findItem(editor, "stateChangeFieldCombo");
+        verify(combo !== null, "the trigger field combo must exist");
+        const deviceCombo = findItem(editor, "stateChangeDeviceCombo");
+        verify(deviceCombo !== null);
+
+        // The form starts on the wildcard trigger: Roku fields only. This-PC
+        // edges never reach a wildcard trigger (pc-state opt-in contract), so
+        // MPRIS playing must not even be offered.
+        const wildcardFields = RulePayload.fieldsForTriggerDevice("*");
+        compare(combo.count, wildcardFields.length);
+        verify(wildcardFields.indexOf("playing") < 0,
+               "a wildcard trigger never sees This-PC edges: no MPRIS playing");
+
+        // A real user switches Fires: to device-state changes first — blank
+        // rules are time triggers, and only then does the field list exist.
+        const typeCombo = findItem(editor, "triggerTypeCombo");
+        verify(typeCombo !== null);
+        const stateChangeIndex = typeCombo.model.findIndex(
+            choice => choice.value === "stateChange");
+        verify(stateChangeIndex >= 0);
+        typeCombo.activated(stateChangeIndex);
+        compare(combo.count, RulePayload.fieldsForTriggerDevice("*").length,
+                "the stateChange field list must populate for the wildcard device");
+
+        // Pointing the trigger at This PC swaps the list: the Roku media
+        // field must vanish (it is always Unknown on a PC) and playing must
+        // appear, with the human label on display.
+        const pcIndex = deviceCombo.model.findIndex(
+            choice => choice.value === "LOCAL-PC");
+        verify(pcIndex >= 0, "This PC must be among the trigger device choices");
+        deviceCombo.activated(pcIndex);
+        compare(combo.count, RulePayload.fieldsForTriggerDevice("LOCAL-PC").length);
+        verify(combo.model.indexOf("playing") >= 0);
+        verify(combo.model.indexOf("media") < 0,
+               "the Roku media field must not be offered on This PC");
+        compare(combo.displayText,
+                RulePayload.fieldLabel(RulePayload.fieldsForTriggerDevice("LOCAL-PC")[0]),
+                "the display must show the human field label");
+
+        // And back to a Roku device: playing vanishes, media returns.
+        const rokuIndex = deviceCombo.model.findIndex(
+            choice => choice.value === "SERIAL-B");
+        verify(rokuIndex >= 0);
+        deviceCombo.activated(rokuIndex);
+        verify(combo.model.indexOf("media") >= 0);
+        verify(combo.model.indexOf("playing") < 0);
+        editor.destroy();
+    }
+
     function test_muteComboOffersBothDirections() {
         const combo = findItem(step, "muteChoiceCombo");
         verify(combo !== null, "mute combo must exist");
@@ -121,9 +175,9 @@ TestCase {
             trigger: {
                 type: "stateChange",
                 device: "SERIAL-B",
-                field: "playing",
+                field: "power",
                 op: "is",
-                value: true,
+                value: "on",
                 activeWindow: { start: "22:00", end: "08:00" }
             },
             actions: [{ type: "runScript", script: "movie-night" }]
@@ -131,9 +185,10 @@ TestCase {
 
         const deviceCombo = findItem(editor, "stateChangeDeviceCombo");
         verify(deviceCombo !== null, "the scoped-device picker must exist");
-        compare(deviceCombo.model.length, 2, "Any plus the known device");
+        compare(deviceCombo.model.length, 3, "Any plus the two known devices");
         compare(deviceCombo.model[0].value, "*");
         compare(deviceCombo.model[1].value, "SERIAL-B");
+        compare(deviceCombo.model[2].value, "LOCAL-PC");
         compare(deviceCombo.currentIndex, 1,
                 "a scoped rule must select its device, not fall back to Any");
 

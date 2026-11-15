@@ -606,6 +606,33 @@ QVariantMap DaemonProxy::ruleDocument(const QString& ruleId) const {
     return document == m_ruleDocuments.cend() ? QVariantMap{} : document->toVariantMap();
 }
 
+QVariantMap DaemonProxy::fetchRuleDocument(const QString& ruleId) {
+    if (!m_active) {
+        return {};
+    }
+    // Bounded nested pump (same reasoning as listPeers): the announcement
+    // cache is not trusted here, because dialogs outlive announcements.
+    QEventLoop pump;
+    QTimer backstop;
+    backstop.setSingleShot(true);
+    backstop.start(5000);
+    QVariantMap document;
+    auto* watcher = new QDBusPendingCallWatcher(m_interface->ListRules(), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, &pump,
+            [this, watcher, &pump, &document, ruleId](QDBusPendingCallWatcher* finished) {
+                const QDBusPendingReply<QString> reply = *finished;
+                watcher->deleteLater();
+                if (!reply.isError()) {
+                    applyRulesJson(reply.value());
+                    document = ruleDocument(ruleId);
+                }
+                pump.quit();
+            });
+    connect(&backstop, &QTimer::timeout, &pump, &QEventLoop::quit);
+    pump.exec();
+    return document;
+}
+
 void DaemonProxy::handleServiceOwnerChanged(const QString& service, const QString& oldOwner,
                                             const QString& newOwner) {
     Q_UNUSED(service)
