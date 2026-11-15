@@ -4,7 +4,7 @@
 
 All notable changes to RokuDeck are documented in this file.
 
-## Unreleased
+## 0.2.0 - 2026-11-14
 
 - The remote panel's mute button flips the moment the daemon accepts the tap
   instead of waiting out the post-command snapshot pull: DaemonProxy predicts
