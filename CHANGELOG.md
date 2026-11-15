@@ -6,7 +6,15 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
-- (nothing yet)
+- Fixed: automation rules whose trigger watches This PC (or a network peer)
+  while targeting other devices never fired. The synthetic-snapshot edge
+  path filtered candidate rules by the rule's target list, hiding
+  trigger-scoped rules from every edge they watched — "mute the TV when
+  This PC starts playing" was silently inert. Edge eligibility is now
+  "the rule's device list names the serial OR the rule's trigger is scoped
+  to it"; wildcard triggers still never see This-PC or peer edges, and
+  idle-exit parity now honors trigger-scoped rules as well.
+- Network peers (M9c of the network-peers design): explicit audio actions
 
 ## 0.3.0 - 2026-11-15
 

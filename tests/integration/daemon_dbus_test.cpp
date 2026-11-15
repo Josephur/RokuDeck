@@ -174,6 +174,7 @@ class DaemonDbusTest final : public QObject {
     void peersPairAcrossRealTcpWithTypedFailures();
     void peerSnapshotsFlowIntoTheRegistry();
     void peerActionsReachThePeerAndHonorTheCeiling();
+    void aSyntheticEdgeFiresARuleTargetingAnotherDevice();
     void addRuleAssignsIdPersistsAndAnnounces();
     void addRuleRejectsClientOwnedAndMalformedPayloads();
     void updateRuleReplacesDefinitionInPlaceAndPersists();
@@ -2352,6 +2353,64 @@ void DaemonDbusTest::peerActionsReachThePeerAndHonorTheCeiling() {
     QCOMPARE(keypress.type(), QDBusMessage::ErrorMessage);
     QCOMPARE(keypress.errorName(),
              QStringLiteral("io.github.josephur.RokuDeck1.Error.SafetyRejected"));
+}
+
+void DaemonDbusTest::aSyntheticEdgeFiresARuleTargetingAnotherDevice() {
+    // The shipped regression: a rule whose TRIGGER watches This PC while its
+    // targets are Roku devices was invisible to every This PC edge, because
+    // the synthetic path filtered candidate rules by the target list. The
+    // opt-in contract is "devices list OR scoped trigger", not devices-only.
+    recreateDaemon(30s, {}, {}, 30ms);
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture TV"),
+                            QStringLiteral("192.0.2.40")});
+    const QString ruleId = addRuleReturningId(QStringLiteral(
+        R"json({"name":"Mute TV on PC play","devices":["SERIAL-A"],)json"
+        R"json("trigger":{"type":"stateChange","device":"LOCAL-PC","field":"playing","op":"is","value":true},)json"
+        R"json("actions":[{"type":"mute","muted":true}]})json"));
+
+    // Baseline: nobody playing; the rule must stay silent.
+    completePcVolumePoll(QByteArrayLiteral("Volume: 0.50\n"));
+    QTest::qWait(50);
+    QVERIFY2(!rulesListing()
+                  .value(QStringLiteral("rules"))
+                  .toArray()
+                  .at(0)
+                  .toObject()
+                  .contains(QStringLiteral("lastRun")),
+             "nothing may fire before playback starts");
+
+    FakeMprisPlayer player;
+    QVERIFY(player.registerOnBus(QStringLiteral("org.mpris.MediaPlayer2.FakeTest")));
+    player.setStatus(QStringLiteral("Playing"));
+
+    bool fired = false;
+    for (int attempts = 0; attempts < 100 && !fired; ++attempts) {
+        completePcVolumePoll(QByteArrayLiteral("Volume: 0.50\n"));
+        fired = rulesListing()
+                    .value(QStringLiteral("rules"))
+                    .toArray()
+                    .at(0)
+                    .toObject()
+                    .contains(QStringLiteral("lastRun"));
+    }
+    QVERIFY2(fired,
+             "a This-PC playing edge must reach a rule that targets another device");
+    QCOMPARE(rulesListing()
+                 .value(QStringLiteral("rules"))
+                 .toArray()
+                 .at(0)
+                 .toObject()
+                 .value(QStringLiteral("id"))
+                 .toString(),
+             ruleId);
+    QVERIFY(rulesListing()
+                .value(QStringLiteral("rules"))
+                .toArray()
+                .at(0)
+                .toObject()
+                .value(QStringLiteral("lastRun"))
+                .toObject()
+                .contains(QStringLiteral("outcome")));
 }
 
 void DaemonDbusTest::addRuleAssignsIdPersistsAndAnnounces() {

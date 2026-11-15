@@ -2864,17 +2864,25 @@ void DaemonService::applySyntheticSnapshot(DeviceSnapshot snapshot) {
     m_snapshots.insert(snapshot.serial, snapshot);
     Q_EMIT DeviceSnapshotChanged(snapshot.serial, snapshotJson(snapshot));
     if (hadPrevious) {
-        // Opt-in targeting (spec §1 / design §6): only enabled rules that
-        // explicitly list this serial may fire from its edges — This PC and
-        // peers alike; Roku edges keep the full list.
-        QList<RuleDocument> syntheticRules;
+        // Opt-in for synthetic edges (pc-state §1 / design §6), with the
+        // trigger scope as the second door (M9c fix): a rule fires from a
+        // This-PC or peer edge when it names the serial in its device list
+        // OR scopes its trigger to it. Unscoped wildcard triggers keep never
+        // seeing synthetic edges — the pc-state opt-in contract. The
+        // devices-only filter previously hid trigger-scoped rules from every
+        // edge they watched (the mute-the-TV-when-This-PC-plays shape).
+        QList<RuleDocument> syntheticCandidates;
         for (const RuleDocument& rule : std::as_const(m_rules)) {
-            if (rule.enabled && rule.devices.contains(snapshot.serial)) {
-                syntheticRules.append(rule);
+            if (!rule.enabled) {
+                continue;
+            }
+            if (rule.devices.contains(snapshot.serial)
+                || rule.trigger.stateChange.device == snapshot.serial) {
+                syntheticCandidates.append(rule);
             }
         }
-        runStateChangeFirings(
-            dueStateChangeRuleIds(syntheticRules, snapshot.serial, previous, snapshot));
+        runStateChangeFirings(dueStateChangeRuleIds(syntheticCandidates, snapshot.serial,
+                                                    previous, snapshot));
     }
 }
 
@@ -2911,13 +2919,17 @@ bool DaemonService::hasAcceptedWork() const {
            hasEnabledPeerRules();
 }
 
-// Opt-in idle parity: an enabled rule that explicitly names This PC keeps the
-// daemon alive exactly like a scheduled rule does, because PC state changes
-// may fire it at any moment. Wildcards never reach This PC.
+// Opt-in idle parity: an enabled rule that explicitly names This PC — as a
+// target or as a scoped trigger — keeps the daemon alive exactly like a
+// scheduled rule does, because PC state changes may fire it at any moment.
+// Wildcard triggers never reach This PC.
 bool DaemonService::hasEnabledLocalPcRules() const {
     for (const RuleDocument& rule : m_rules) {
-        // Explicit listing only: wildcards never reach This PC.
-        if (rule.enabled && rule.devices.contains(QLatin1String(localPcSerial))) {
+        if (!rule.enabled) {
+            continue;
+        }
+        if (rule.devices.contains(QLatin1String(localPcSerial))
+            || rule.trigger.stateChange.device == QLatin1String(localPcSerial)) {
             return true;
         }
     }
@@ -2925,7 +2937,8 @@ bool DaemonService::hasEnabledLocalPcRules() const {
 }
 
 // Same parity for peers (network-peers design §6): an enabled rule that
-// explicitly names a peer keeps the controller polling it.
+// explicitly names a peer — target or scoped trigger — keeps the controller
+// polling it.
 bool DaemonService::hasEnabledPeerRules() const {
     const QList<PeerTarget> targets = m_configStore->loadPeerTargets();
     if (targets.isEmpty()) {
@@ -2936,7 +2949,9 @@ bool DaemonService::hasEnabledPeerRules() const {
             continue;
         }
         for (const PeerTarget& target : targets) {
-            if (rule.devices.contains(peerSerialForMachineId(target.machineId))) {
+            const QString serial = peerSerialForMachineId(target.machineId);
+            if (rule.devices.contains(serial)
+                || rule.trigger.stateChange.device == serial) {
                 return true;
             }
         }
