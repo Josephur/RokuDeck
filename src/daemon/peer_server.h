@@ -54,15 +54,26 @@ class PeerServer final : public QObject {
     // The LOCAL-PC snapshot this listener exposes (design §4). Consulted per
     // request, so the envelope always reflects the machine's current state.
     using SnapshotProvider = std::function<DeviceSnapshot()>;
+    // This machine's own audio ceiling (design §5: the peer is the source of
+    // truth and clamps incoming actions itself). Consulted per request.
+    using CeilingProvider = std::function<int()>;
+    // Executes one local audio action on this machine (M9c): setVolume
+    // (absolute, clamped by the ceiling) or setMute (explicit). The executor
+    // is asynchronous — done() fires exactly once with the verdict.
+    using ActionExecutor =
+        std::function<void(const QString& operation, const QJsonValue& value,
+                           std::function<void(bool ok, const QString& errorCode)> done)>;
     using WallClock = std::function<QDateTime()>;
 
     static constexpr quint16 kDefaultPort = 49160;
 
     // `machineId`/`hostName` are injectable for tests; empty means "use the
-    // real local identity" (read once, at construction).
+    // real local identity" (read once, at construction). The action executor
+    // may be empty in tests that only exercise pairing/snapshots.
     explicit PeerServer(ConfigStore* config, SnapshotProvider snapshotProvider,
                         WallClock wallClock = {}, QString machineId = {},
-                        QString hostName = {}, QObject* parent = nullptr);
+                        QString hostName = {}, ActionExecutor actionExecutor = {},
+                        CeilingProvider ceilingProvider = {}, QObject* parent = nullptr);
     ~PeerServer() override;
 
     // Binds the listener. A port change while running restarts the socket;
@@ -94,6 +105,8 @@ class PeerServer final : public QObject {
                     const QJsonObject& request);
     void handleSnapshot(QTcpSocket* socket, const QString& requestId,
                         const QJsonObject& request);
+    void handleAction(QTcpSocket* socket, const QString& requestId,
+                      const QString& operation, const QJsonObject& request);
     void sendResponse(QTcpSocket* socket, const QString& requestId,
                       const QJsonObject& payload);
     void sendError(QTcpSocket* socket, const QString& requestId,
@@ -102,6 +115,8 @@ class PeerServer final : public QObject {
 
     ConfigStore* m_config;
     SnapshotProvider m_snapshotProvider;
+    ActionExecutor m_actionExecutor;
+    CeilingProvider m_ceilingProvider;
     WallClock m_wallClock;
     QString m_machineId;
     QString m_hostName;

@@ -173,6 +173,7 @@ class DaemonDbusTest final : public QObject {
     void peerListenerKeepsTheDaemonAliveAndReportsHonestState();
     void peersPairAcrossRealTcpWithTypedFailures();
     void peerSnapshotsFlowIntoTheRegistry();
+    void peerActionsReachThePeerAndHonorTheCeiling();
     void addRuleAssignsIdPersistsAndAnnounces();
     void addRuleRejectsClientOwnedAndMalformedPayloads();
     void updateRuleReplacesDefinitionInPlaceAndPersists();
@@ -2208,6 +2209,149 @@ void DaemonDbusTest::peerSnapshotsFlowIntoTheRegistry() {
                  .toArray()
                  .size(),
              1);
+}
+
+void DaemonDbusTest::peerActionsReachThePeerAndHonorTheCeiling() {
+    // M9c: explicit setVolume/setMute commands against a peer serial ride the
+    // per-device command queue over TCP, execute on the peer's own machine
+    // through its own wpctl path, and honor the registry ceiling (controller
+    // clamp; the peer clamps again as source of truth — design §5).
+    recreateDaemon(30s, {}, [] { return QDateTime::currentDateTimeUtc(); }, 1h, QString(),
+                   DaemonService::PeerIdentity{
+                       QStringLiteral("11111111111111111111111111111111"),
+                       QStringLiteral("machine-one")});
+
+    const QString peerConfigPath =
+        m_configDirectory.filePath(QStringLiteral("peers-actions-peer.rc"));
+    auto peerRunner = std::make_unique<FakeProcessRunner>();
+    FakeProcessRunner* peerRunnerPtr = peerRunner.get();
+    auto peerConfig = KSharedConfig::openConfig(peerConfigPath, KConfig::SimpleConfig);
+    auto peerDaemon = std::make_unique<DaemonService>(
+        QDBusConnection::sessionBus(), [] { return false; }, std::move(peerRunner),
+        std::make_unique<ConfigStore>(std::move(peerConfig)), 30s,
+        DaemonService::DeadlineRemaining{}, DaemonService::WallClock{},
+        std::chrono::milliseconds(150), QString(),
+        DaemonService::PeerIdentity{
+            QStringLiteral("22222222222222222222222222222222"),
+            QStringLiteral("machine-two")});
+    peerDaemon->SetPeerListenerEnabled(true);
+    const int peerPort =
+        QJsonDocument::fromJson(peerDaemon->ListPeers().toUtf8()).object()
+            .value(QStringLiteral("listener"))
+            .toObject()
+            .value(QStringLiteral("boundPort"))
+            .toInt();
+    QVERIFY(peerPort > 0);
+
+    const QString pairingCode = peerDaemon->PeerPairingCode();
+    const QDBusMessage paired =
+        waitForReply(m_proxy->PairPeer(QStringLiteral("127.0.0.1"), peerPort, pairingCode));
+    QVERIFY2(paired.type() != QDBusMessage::ErrorMessage, qPrintable(paired.errorMessage()));
+
+    const auto drainPeerWpctl = [peerRunnerPtr]() {
+        while (!peerRunnerPtr->callbacks.isEmpty()) {
+            peerRunnerPtr->complete({0, QByteArrayLiteral("Volume: 0.65\n"), {}, false});
+        }
+    };
+    const auto lastPeerWpctlArguments = [peerRunnerPtr]() {
+        for (int i = peerRunnerPtr->requests.size() - 1; i >= 0; --i) {
+            if (peerRunnerPtr->requests.at(i).program == QLatin1String("wpctl")
+                && peerRunnerPtr->requests.at(i).arguments.first()
+                    == QLatin1String("set-volume")) {
+                return peerRunnerPtr->requests.at(i).arguments;
+            }
+        }
+        return QStringList{};
+    };
+
+    QSignalSpy completions(m_daemon.get(), &DaemonService::CommandFinished);
+
+    // A plain absolute setVolume executes on the peer's own machine.
+    const QString requestId = waitForReply(m_proxy->SendCommand(
+        QStringLiteral("PC-22222222"),
+        QStringLiteral(R"json({"operation":"setVolume","value":65})json")))
+                                   .arguments()
+                                   .front()
+                                   .toString();
+    QVERIFY(!requestId.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            drainPeerWpctl();
+            const QStringList arguments = lastPeerWpctlArguments();
+            return arguments.size() == 3
+                   && arguments.at(2) == QStringLiteral("0.65");
+        }(),
+        8000);
+    QTRY_COMPARE_WITH_TIMEOUT(completions.size(), 1, 8000);
+    // The signal carries (requestId, resultJson): the payload is argument two.
+    const QJsonObject completion =
+        QJsonDocument::fromJson(completions.front().at(1).toString().toUtf8()).object();
+    QCOMPARE(completion.value(QStringLiteral("requestId")).toString(), requestId);
+    QCOMPARE(completion.value(QStringLiteral("success")).toBool(), true);
+
+    // Let the peer's own poller establish its reading before acting on it:
+    // an explicit mute against an unknown state is a typed rejection by
+    // design (matching-state no-ops and stale-state rejections, §5).
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            drainPeerWpctl();
+            const QJsonObject snapshot = QJsonDocument::fromJson(
+                waitForReply(m_proxy->GetSnapshot(QStringLiteral("PC-22222222")))
+                    .arguments()
+                    .front()
+                    .toString()
+                    .toUtf8())
+                .object();
+            return snapshot.value(QStringLiteral("health")).toString()
+                       == QStringLiteral("online")
+                   && snapshot.value(QStringLiteral("volume")).toInt() == 65;
+        }(),
+        8000);
+    drainPeerWpctl();
+    QCOMPARE(completion.value(QStringLiteral("serial")).toString(),
+             QStringLiteral("PC-22222222"));
+    QCOMPARE(completion.value(QStringLiteral("success")).toBool(), true);
+
+    // The registry ceiling clamps on the controller side before anything is
+    // sent; the peer clamps again against its own policy.
+    static_cast<void>(waitForReply(m_proxy->UpdateDevice(
+        QStringLiteral("PC-22222222"),
+        QStringLiteral(R"json({"volumeCeiling":50})json"))));
+    drainPeerWpctl();
+    static_cast<void>(m_proxy->SendCommand(
+        QStringLiteral("PC-22222222"),
+        QStringLiteral(R"json({"operation":"setVolume","value":80})json")));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            drainPeerWpctl();
+            const QStringList arguments = lastPeerWpctlArguments();
+            return arguments.size() == 3 && arguments.at(2) == QStringLiteral("0.50");
+        }(),
+        8000);
+
+    // Explicit mute rides the same path.
+    static_cast<void>(m_proxy->SendCommand(
+        QStringLiteral("PC-22222222"), QStringLiteral(R"json({"operation":"setMute","value":true})json")));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            drainPeerWpctl();
+            for (int i = peerRunnerPtr->requests.size() - 1; i >= 0; --i) {
+                const auto& request = peerRunnerPtr->requests.at(i);
+                if (request.program == QLatin1String("wpctl")
+                    && request.arguments.first() == QLatin1String("set-mute")) {
+                    return request.arguments.last() == QLatin1String("1");
+                }
+            }
+            return false;
+        }(),
+        8000);
+
+    // Remote-control keypresses against a PC are a typed safety rejection.
+    const QDBusMessage keypress = waitForReply(m_proxy->SendCommand(
+        QStringLiteral("PC-22222222"), QStringLiteral(R"json({"operation":"keypress","key":"Home"})json")));
+    QCOMPARE(keypress.type(), QDBusMessage::ErrorMessage);
+    QCOMPARE(keypress.errorName(),
+             QStringLiteral("io.github.josephur.RokuDeck1.Error.SafetyRejected"));
 }
 
 void DaemonDbusTest::addRuleAssignsIdPersistsAndAnnounces() {

@@ -280,6 +280,15 @@ class DaemonService final : public QObject, protected QDBusContext {
     // edge firings for enabled rules that explicitly name the serial.
     void applySyntheticSnapshot(DeviceSnapshot snapshot);
     void applyPeerSnapshot(DeviceSnapshot snapshot);
+    // M9c: peer actions. Peer-serial commands carry only explicit audio
+    // operations, dispatch through the per-device queue over TCP, and the
+    // listener executes them on its own machine with its own ceiling.
+    [[nodiscard]] ValidatedCommand validatePeerCommand(const QString& serial,
+                                                       const QString& commandJson) const;
+    [[nodiscard]] std::optional<PeerTarget> peerTargetForSerial(const QString& serial) const;
+    void finishPeerCommand(const QueuedCommand& command, bool ok, const QString& errorCode);
+    void executeLocalAudioAction(const QString& operation, const QJsonValue& value,
+                                 std::function<void(bool ok, const QString& errorCode)> done);
     [[nodiscard]] bool hasEnabledPeerRules() const;
     [[nodiscard]] std::chrono::milliseconds peerPollIntervalFor(const QString& refreshPolicy) const;
     // Runs one rule to completion and records its outcome. callStack carries
@@ -333,6 +342,9 @@ class DaemonService final : public QObject, protected QDBusContext {
     QHash<QString, QDateTime> m_peerPollDueAt;
     QHash<QString, int> m_peerPollFailures;
     QSet<QString> m_peerPollsInFlight;
+    // In-flight peer ACTIONS (M9c) keyed by requestId, so the shared reply
+    // signal routes to the command queue rather than the poll sweep.
+    QHash<QString, QueuedCommand> m_peerActionCommands;
     QTimer m_idleTimer;
     QTimer m_pollTimer;
     QTimer m_pcPollTimer;

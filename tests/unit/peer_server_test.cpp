@@ -47,6 +47,7 @@ class PeerServerTest final : public QObject {
     void rePairingRotatesTheToken();
     void oversizedLinesDropTheConnection();
     void unknownSnapshotStateIsHonestInEnvelope();
+    void actionsExecuteThroughTheInjectedExecutor();
     void pairClientReceivesIdentityAndToken();
 
   private:
@@ -342,6 +343,81 @@ void PeerServerTest::unknownSnapshotStateIsHonestInEnvelope() {
     QCOMPARE(envelope.value(QStringLiteral("muted")), QJsonValue());
     QCOMPARE(envelope.value(QStringLiteral("playing")), QJsonValue());
     QVERIFY(!envelope.contains(QStringLiteral("capturedAt")));
+}
+
+void PeerServerTest::actionsExecuteThroughTheInjectedExecutor() {
+    // M9c: with an executor wired, paired controllers drive this machine's
+    // audio. The listener validates shape and authorization; the executor is
+    // the machine's own audio path (the daemon injects wpctl execution).
+    m_server->stop();
+    m_socket.reset();
+    auto config = KSharedConfig::openConfig(
+        m_directory.path() + QStringLiteral("/peer.rc"), KConfig::SimpleConfig);
+    m_store = std::make_unique<ConfigStore>(std::move(config));
+    QList<QJsonObject> executed;
+    m_server = std::make_unique<PeerServer>(
+        m_store.get(), [] { return DeviceSnapshot{}; },
+        [this] { return m_now; }, QLatin1String(kMachineId), QLatin1String(kHostName),
+        [&executed](const QString& operation, const QJsonValue& value,
+                    std::function<void(bool, const QString&)> done) {
+            executed.append(QJsonObject{{QStringLiteral("operation"), operation},
+                                        {QStringLiteral("value"), value}});
+            done(true, {});
+        },
+        [] { return 50; });
+    QVERIFY(m_server->start(0));
+
+    const QJsonObject paired = pairAndStoreController();
+    const QString token = paired.value(QStringLiteral("token")).toString();
+
+    const QJsonObject volume =
+        exchange(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                             {QStringLiteral("id"), QStringLiteral("vol")},
+                             {QStringLiteral("op"), QStringLiteral("setVolume")},
+                             {QStringLiteral("token"), token},
+                             {QStringLiteral("value"), 65}});
+    QCOMPARE(volume.value(QStringLiteral("ok")).toBool(), true);
+    QCOMPARE(executed.size(), 1);
+    QCOMPARE(executed.at(0).value(QStringLiteral("operation")).toString(),
+             QStringLiteral("setVolume"));
+    QCOMPARE(executed.at(0).value(QStringLiteral("value")).toInt(), 65);
+
+    const QJsonObject mute =
+        exchange(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                             {QStringLiteral("id"), QStringLiteral("mute")},
+                             {QStringLiteral("op"), QStringLiteral("setMute")},
+                             {QStringLiteral("token"), token},
+                             {QStringLiteral("value"), true}});
+    QCOMPARE(mute.value(QStringLiteral("ok")).toBool(), true);
+    QCOMPARE(executed.size(), 2);
+    QCOMPARE(executed.at(1).value(QStringLiteral("value")).toBool(), true);
+
+    // Shape and authorization are the listener's contract: non-numeric and
+    // out-of-range volumes are typed rejections, and so is a foreign token.
+    const QJsonObject invalid =
+        exchange(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                             {QStringLiteral("id"), QStringLiteral("bad")},
+                             {QStringLiteral("op"), QStringLiteral("setVolume")},
+                             {QStringLiteral("token"), token},
+                             {QStringLiteral("value"), QStringLiteral("loud")}});
+    QCOMPARE(invalid.value(QStringLiteral("error")).toString(), QStringLiteral("invalidValue"));
+
+    const QJsonObject outOfRange =
+        exchange(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                             {QStringLiteral("id"), QStringLiteral("high")},
+                             {QStringLiteral("op"), QStringLiteral("setVolume")},
+                             {QStringLiteral("token"), token},
+                             {QStringLiteral("value"), 150}});
+    QCOMPARE(outOfRange.value(QStringLiteral("error")).toString(), QStringLiteral("invalidValue"));
+
+    const QJsonObject foreign =
+        exchange(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                             {QStringLiteral("id"), QStringLiteral("foreign")},
+                             {QStringLiteral("op"), QStringLiteral("setVolume")},
+                             {QStringLiteral("token"), QStringLiteral("not-a-token")},
+                             {QStringLiteral("value"), 30}});
+    QCOMPARE(foreign.value(QStringLiteral("error")).toString(), QStringLiteral("unauthorized"));
+    QVERIFY2(executed.size() == 2, "a rejected request must never reach the executor");
 }
 
 void PeerServerTest::pairClientReceivesIdentityAndToken() {

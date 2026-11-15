@@ -95,9 +95,12 @@ QString peerSerialForMachineId(const QString& machineId) {
 
 PeerServer::PeerServer(ConfigStore* config, SnapshotProvider snapshotProvider,
                        WallClock wallClock, QString machineId, QString hostName,
+                       ActionExecutor actionExecutor, CeilingProvider ceilingProvider,
                        QObject* parent)
     : QObject(parent), m_config(config),
       m_snapshotProvider(std::move(snapshotProvider)),
+      m_actionExecutor(std::move(actionExecutor)),
+      m_ceilingProvider(std::move(ceilingProvider)),
       m_wallClock(wallClock ? std::move(wallClock)
                             : [] { return QDateTime::currentDateTime(); }),
       m_machineId(machineId.isEmpty() ? cachedMachineId() : std::move(machineId)),
@@ -226,9 +229,11 @@ void PeerServer::handleLine(QTcpSocket* socket, const QByteArray& line) {
         handlePair(socket, requestId, request);
     } else if (operation == QLatin1String("snapshot")) {
         handleSnapshot(socket, requestId, request);
+    } else if (operation == QLatin1String("setVolume") || operation == QLatin1String("setMute")) {
+        handleAction(socket, requestId, operation, request);
     } else {
         sendError(socket, requestId, QStringLiteral("unknownOperation"),
-                  QStringLiteral("supported operations: pair, snapshot"));
+                  QStringLiteral("supported operations: pair, snapshot, setVolume, setMute"));
     }
 }
 
@@ -324,6 +329,58 @@ void PeerServer::handleSnapshot(QTcpSocket* socket, const QString& requestId,
     sendResponse(socket, requestId, payload);
 }
 
+void PeerServer::handleAction(QTcpSocket* socket, const QString& requestId,
+                              const QString& operation, const QJsonObject& request) {
+    if (!m_actionExecutor) {
+        sendError(socket, requestId, QStringLiteral("unsupportedOperation"),
+                  QStringLiteral("this listener does not execute actions"));
+        return;
+    }
+    const QString token = request.value(QStringLiteral("token")).toString();
+    const QList<PairedController> controllers = m_config->loadPairedControllers();
+    const bool authorized = std::any_of(
+        controllers.cbegin(), controllers.cend(),
+        [&token](const PairedController& controller) { return controller.token == token; });
+    if (token.isEmpty() || !authorized) {
+        sendError(socket, requestId, QStringLiteral("unauthorized"),
+                  QStringLiteral("pair with this machine to receive a token"));
+        return;
+    }
+
+    const QJsonValue value = request.value(QStringLiteral("value"));
+    if (operation == QLatin1String("setVolume")) {
+        if (!value.isDouble() || value.toDouble() < 0 || value.toDouble() > 100) {
+            sendError(socket, requestId, QStringLiteral("invalidValue"),
+                      QStringLiteral("setVolume takes an absolute 0-100 integer"));
+            return;
+        }
+    } else if (operation == QLatin1String("setMute") && !value.isBool()) {
+        // setMute is explicit (design §5): a toggle over a latency-bearing
+        // path is ambiguous, so a non-bool is a typed rejection.
+        sendError(socket, requestId, QStringLiteral("invalidValue"),
+                  QStringLiteral("setMute takes an explicit boolean"));
+        return;
+    }
+
+    m_actionExecutor(operation, value, [this, socket, requestId](bool ok, const QString& errorCode) {
+        if (!m_sockets.contains(socket)) {
+            // The peer went away mid-action (pointer comparison only — never
+            // dereferenced): the verdict is dropped, the controller's own
+            // timeout governs.
+            return;
+        }
+        if (ok) {
+            sendResponse(socket, requestId,
+                         QJsonObject{{QStringLiteral("ok"), true},
+                                     {QStringLiteral("result"), QStringLiteral("accepted")}});
+        } else {
+            sendError(socket, requestId,
+                      errorCode.isEmpty() ? QStringLiteral("rejected") : errorCode,
+                      QStringLiteral("the action could not be executed locally"));
+        }
+    });
+}
+
 QJsonObject PeerServer::snapshotEnvelope() const {
     // The provider may return an all-Unknown snapshot (LOCAL-PC before its
     // first poll); the envelope stays honest about that rather than hiding
@@ -354,6 +411,11 @@ QJsonObject PeerServer::snapshotEnvelope() const {
         capabilityArray.append(capability);
     }
     envelope.insert(QStringLiteral("capabilities"), capabilityArray);
+    // The ceiling travels with the state (design §5): the peer is the source
+    // of truth for the policy, and the controller echoes it for its UI.
+    if (m_ceilingProvider) {
+        envelope.insert(QStringLiteral("volumeCeiling"), m_ceilingProvider());
+    }
     if (snapshot.capturedAt.isValid()) {
         envelope.insert(QStringLiteral("capturedAt"),
                         snapshot.capturedAt.toString(Qt::ISODateWithMs));

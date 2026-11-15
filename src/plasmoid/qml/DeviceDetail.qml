@@ -42,6 +42,11 @@ Item {
     // This PC has no remote: there is nothing on the daemon's own machine to
     // press, so the controls section collapses entirely (rename + ceiling stay).
     readonly property bool isLocalPc: root.serial === "LOCAL-PC"
+    // Network peers (M9c): their audio is controlled through explicit
+    // setVolume/setMute commands, never through remote-control keypresses.
+    readonly property bool isPeer: !root.isLocalPc && root.serial.startsWith("PC-")
+    readonly property bool deviceOnline: bridge !== null && bridge.available && !root.stale
+        && root.health.toLowerCase() !== "offline" && root.serial.length > 0
     // The daemon reports "unknown" whenever it could not determine the screen
     // saver state, so never collapse that into a definite "Inactive" claim.
     readonly property string screensaverText: {
@@ -167,7 +172,7 @@ Item {
             objectName: "remoteControls"
 
             Layout.fillWidth: true
-            visible: !root.isLocalPc
+            visible: !root.isLocalPc && !root.isPeer
             bridge: root.bridge
             visibleControls: root.visibleControls
             serial: root.serial
@@ -178,6 +183,20 @@ Item {
             capabilities: root.capabilities
             stale: root.stale
             pendingCommand: root.pendingCommand
+        }
+
+        PeerAudioControls {
+            objectName: "peerAudioControls"
+
+            Layout.fillWidth: true
+            visible: root.isPeer
+            bridge: root.bridge
+            serial: root.serial
+            deviceName: root.friendlyName
+            volume: root.volume
+            muted: root.muted
+            deviceOnline: root.deviceOnline
+            ceiling: root.volumeCeiling
         }
 
         RowLayout {

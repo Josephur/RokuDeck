@@ -6,6 +6,18 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- Network peers (M9c of the network-peers design): explicit audio actions
+  work against peer machines. `SendCommand` on a `PC-` serial accepts only
+  absolute `setVolume` and explicit `setMute` (keypresses and launches are a
+  typed safety rejection — PCs take no remote-control presses), clamps into
+  the registry ceiling on the controller, dispatches through the per-device
+  command queue over TCP, and the peer executes with its own wpctl path and
+  its own ceiling as the source of truth (the snapshot envelope now carries
+  `volumeCeiling`). A matching mute is a successful no-op and a stale-state
+  mute is a typed rejection, mirroring local automations. The widget's peer
+  detail page gains live audio controls (volume down/up/mute, bounded by the
+  ceiling and gated on an observed reading), and the optimistic mute flip
+  now covers explicit `setMute` too.
 - Network peers (M9b of the network-peers design): a paired target is now a
   first-class registry device (`PC-<machine-id>`, name renameable, address
   host:port) the moment the pairing lands, and the daemon polls each peer on

@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QJsonValue>
 #include <QTcpSocket>
 #include <QTimer>
 #include <QUuid>
@@ -129,60 +130,82 @@ PeerPairOutcome PeerClient::pair(const QString& address, quint16 port,
 
 void PeerClient::requestSnapshot(const QString& key, const QString& address, quint16 port,
                                  const QString& token, std::chrono::milliseconds timeout) {
+    startExchange(key, address, port,
+                  QJsonObject{{QStringLiteral("op"), QStringLiteral("snapshot")},
+                              {QStringLiteral("token"), token}},
+                  timeout);
+}
+
+void PeerClient::requestAction(const QString& key, const QString& address, quint16 port,
+                               const QString& token, const QString& operation,
+                               const QJsonValue& value, std::chrono::milliseconds timeout) {
+    startExchange(key, address, port,
+                  QJsonObject{{QStringLiteral("op"), operation},
+                              {QStringLiteral("token"), token},
+                              {QStringLiteral("value"), value}},
+                  timeout);
+}
+
+// Shared exchange plumbing: one request line, one response line, one peerReply
+// emission. finish() detaches every handler first so exactly one reply fires
+// even when it runs from inside one of the socket's own handlers.
+void PeerClient::startExchange(const QString& key, const QString& address, quint16 port,
+                               QJsonObject request, std::chrono::milliseconds timeout) {
+    request.insert(QStringLiteral("schemaVersion"), 1);
+    request.insert(QStringLiteral("id"), QUuid::createUuid().toString(QUuid::WithoutBraces));
+
     auto* socket = new QTcpSocket(this);
     auto* backstop = new QTimer(socket);
     backstop->setSingleShot(true);
     backstop->start(static_cast<int>(timeout.count()));
 
     const auto finish = [socket, backstop, key, this](bool ok, const QString& errorCode,
-                                                      const QString& envelopeJson) {
+                                                      const QJsonObject& response) {
         // Fire exactly once per request: detaching every handler (including
         // the backstop) makes late signals after the first impossible even
         // when finish runs from inside one of them.
         socket->disconnect();
         backstop->disconnect();
-        Q_EMIT snapshotResult(key, ok, errorCode, envelopeJson);
+        Q_EMIT peerReply(key, ok, errorCode,
+                         ok ? QString::fromUtf8(QJsonDocument(response).toJson(
+                                  QJsonDocument::Compact))
+                            : QString());
         socket->disconnectFromHost();
         socket->deleteLater();
     };
 
-    QObject::connect(socket, &QTcpSocket::connected, socket, [socket, key, token]() {
-        const QJsonObject request{{QStringLiteral("schemaVersion"), 1},
-                                  {QStringLiteral("id"),
-                                   QUuid::createUuid().toString(QUuid::WithoutBraces)},
-                                  {QStringLiteral("op"), QStringLiteral("snapshot")},
-                                  {QStringLiteral("token"), token}};
+    QObject::connect(socket, &QTcpSocket::connected, socket, [socket, request]() {
         socket->write(compactJson(request).toUtf8() + QByteArrayLiteral("\n"));
     });
-    QObject::connect(socket, &QTcpSocket::readyRead, socket, [this, socket, key, finish]() {
-        while (socket->canReadLine()) {
-            const QByteArray line = socket->readLine();
-            const QJsonDocument document = QJsonDocument::fromJson(line);
-            if (!document.isObject()) {
-                finish(false, QStringLiteral("malformed"), QString());
-                return;
-            }
-            const QJsonObject response = document.object();
-            if (response.value(QStringLiteral("ok")).toBool(false)) {
-                finish(true, QString(),
-                       QString::fromUtf8(QJsonDocument(
-                                             response.value(QStringLiteral("snapshot")).toObject())
-                                             .toJson(QJsonDocument::Compact)));
-            } else {
-                finish(false, response.value(QStringLiteral("error")).toString(), QString());
-            }
-            return;
-        }
-    });
+    QObject::connect(socket, &QTcpSocket::readyRead, socket,
+                     [socket, finish]() {
+                         while (socket->canReadLine()) {
+                             const QByteArray line = socket->readLine();
+                             const QJsonDocument document = QJsonDocument::fromJson(line);
+                             if (!document.isObject()) {
+                                 finish(false, QStringLiteral("malformed"), {});
+                                 return;
+                             }
+                             const QJsonObject response = document.object();
+                             if (response.value(QStringLiteral("ok")).toBool(false)) {
+                                 finish(true, QString(), response);
+                             } else {
+                                 finish(false,
+                                        response.value(QStringLiteral("error")).toString(),
+                                        {});
+                             }
+                             return;
+                         }
+                     });
     QObject::connect(socket, &QTcpSocket::errorOccurred, socket,
-                     [this, socket, key, finish](QAbstractSocket::SocketError) {
+                     [finish](QAbstractSocket::SocketError) {
                          // A refusal before any response is transport; after a
                          // response the finish() already ran and the socket is
                          // disconnected from these handlers.
-                         finish(false, QStringLiteral("connectFailed"), QString());
+                         finish(false, QStringLiteral("connectFailed"), {});
                      });
-    QObject::connect(backstop, &QTimer::timeout, socket, [finish, key]() {
-        finish(false, QStringLiteral("timeout"), QString());
+    QObject::connect(backstop, &QTimer::timeout, socket, [finish]() {
+        finish(false, QStringLiteral("timeout"), {});
     });
 
     socket->connectToHost(address, port);

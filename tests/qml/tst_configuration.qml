@@ -55,6 +55,12 @@ TestCase {
         RokuDeckConfig.ConfigPeers {}
     }
 
+    Component {
+        id: peerControlsComponent
+
+        RokuDeckConfig.PeerAudioControls {}
+    }
+
     function createPage(component, properties) {
         const window = createTemporaryObject(windowComponent, testCase);
         verify(window);
@@ -454,5 +460,55 @@ TestCase {
         tryVerify(() => message.visible);
         verify(message.text.includes("CODE1234"),
                "the minted code must be shown to the user");
+    }
+
+    function test_peerAudioControlsSendExplicitCommands() {
+        const window = createTemporaryObject(windowComponent, testCase);
+        verify(window);
+        window.requestActivate();
+        tryVerify(() => window.active);
+        const bridge = createTemporaryObject(bridgeComponent, testCase);
+        verify(bridge);
+        const controls = createTemporaryObject(peerControlsComponent, window.contentItem, {
+            bridge: bridge,
+            serial: "PC-22222222",
+            deviceName: "office-vm",
+            volume: 40,
+            muted: false,
+            deviceOnline: true,
+            ceiling: 50,
+            visible: true
+        });
+        verify(controls, "the peer audio controls must instantiate cleanly");
+
+        // Peer audio is explicit absolute setVolume/setMute — never keypresses.
+        mouseClick(findChild(controls, "peerVolumeUpButton"));
+        compare(bridge.sentCommands[0].action, "setVolume");
+        compare(bridge.sentCommands[0].value, 45);
+        mouseClick(findChild(controls, "peerVolumeDownButton"));
+        compare(bridge.sentCommands[1].value, 35);
+        mouseClick(findChild(controls, "peerMuteButton"));
+        compare(bridge.sentCommands[2].action, "setMute");
+        compare(bridge.sentCommands[2].value, true);
+
+        // The ceiling bounds the up button: the control computes from its
+        // observed reading, so the model delivers 45 and the next step lands
+        // exactly on the ceiling.
+        controls.volume = 45;
+        mouseClick(findChild(controls, "peerVolumeUpButton"));
+        compare(bridge.sentCommands[3].value, 50);
+        controls.volume = 50;
+        verify(!findChild(controls, "peerVolumeUpButton").enabled,
+               "the ceiling stops the up button");
+
+        // An offline peer disables everything; without a reading the volume
+        // buttons cannot compute a step, but mute still states its target.
+        controls.deviceOnline = false;
+        verify(!findChild(controls, "peerMuteButton").enabled);
+        controls.deviceOnline = true;
+        controls.volume = null;
+        verify(!findChild(controls, "peerVolumeUpButton").enabled,
+               "no reading, no volume action");
+        verify(findChild(controls, "peerMuteButton").enabled);
     }
 }

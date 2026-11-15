@@ -251,8 +251,9 @@ QJsonObject commandObject(const QString& action, const QVariant& value) {
 constexpr int mutePinWindowSeconds = 3;
 
 bool isMuteToggle(const QString& action, const QVariant& value) {
-    return action == QStringLiteral("keypress")
-           && value.toString() == QStringLiteral("VolumeMute");
+    return (action == QStringLiteral("keypress")
+            && value.toString() == QStringLiteral("VolumeMute"))
+           || (action == QStringLiteral("setMute") && value.isValid());
 }
 
 } // namespace
@@ -751,7 +752,9 @@ void DaemonProxy::armMuteExpectation(const QString& serial, const QString& reque
     MuteExpectation expectation;
     expectation.requestId = requestId;
     expectation.previous = *current;
-    expectation.expected = !*current;
+    // A keypress toggles; an explicit setMute (peers, M9c) states the target
+    // value outright — the prediction follows the command's shape.
+    expectation.expected = (action == QStringLiteral("setMute")) ? value.toBool() : !*current;
     expectation.setAt = QDateTime::currentDateTime();
     m_muteExpectations.insert(serial, expectation);
 

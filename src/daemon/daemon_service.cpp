@@ -325,7 +325,18 @@ DaemonService::DaemonService(QDBusConnection connection,
           // The listener serves the machine it runs on: always the live
           // LOCAL-PC reading, whatever it currently says (design §4).
           [this]() { return m_snapshots.value(QLatin1String(localPcSerial)); },
-          m_wallClock, m_peerIdentity.machineId, m_peerIdentity.hostName)),
+          m_wallClock, m_peerIdentity.machineId, m_peerIdentity.hostName,
+          // M9c: paired controllers drive this machine's audio through the
+          // same wpctl path local automations use, with this machine's own
+          // ceiling as the source of truth (design §5).
+          [this](const QString& operation, const QJsonValue& value,
+                 std::function<void(bool, const QString&)> done) {
+              executeLocalAudioAction(operation, value, std::move(done));
+          },
+          [this]() {
+              const auto device = findDevice(QLatin1String(localPcSerial));
+              return device ? device->volumeCeiling : 100;
+          })),
       m_peerClient(std::make_unique<PeerClient>(this)),
       m_peerPollIntervals(std::move(peerPollIntervals)),
       // Ruling 3: the scripts directory resolves once — an injected path for
@@ -404,9 +415,17 @@ DaemonService::DaemonService(QDBusConnection connection,
     }
 
     // Network peers (M9b): every stored target rejoins the registry as a
-    // PC- device and joins the poll sweep immediately.
-    connect(m_peerClient.get(), &PeerClient::snapshotResult, this,
-            &DaemonService::finishPeerPoll);
+    // PC- device and joins the poll sweep immediately. Replies are routed by
+    // key: request ids belong to queued actions, machine ids to the sweep.
+    connect(m_peerClient.get(), &PeerClient::peerReply, this,
+            [this](const QString& key, bool ok, const QString& errorCode,
+                   const QString& replyJson) {
+                if (m_peerActionCommands.contains(key)) {
+                    finishPeerCommand(m_peerActionCommands.take(key), ok, errorCode);
+                } else {
+                    finishPeerPoll(key, ok, errorCode, replyJson);
+                }
+            });
     m_peerPollTimer.setInterval(std::chrono::seconds(1));
     connect(&m_peerPollTimer, &QTimer::timeout, this, &DaemonService::pollDuePeers);
     const QDateTime peerBoot = m_wallClock();
@@ -1602,7 +1621,7 @@ void DaemonService::pollDuePeers() {
 }
 
 void DaemonService::finishPeerPoll(const QString& machineId, bool ok, const QString& errorCode,
-                                   const QString& envelopeJson) {
+                                   const QString& replyJson) {
     m_peerPollsInFlight.remove(machineId);
     if (m_shuttingDown) {
         return;
@@ -1626,14 +1645,20 @@ void DaemonService::finishPeerPoll(const QString& machineId, bool ok, const QStr
         return;
     }
     QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(envelopeJson.toUtf8(), &parseError);
+    const QJsonDocument document = QJsonDocument::fromJson(replyJson.toUtf8(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
         // Counted as a failure: an envelope we cannot parse is a peer that
         // effectively did not answer (rejection path handles the offline flip).
         finishPeerPoll(machineId, false, errorCode, QString());
         return;
     }
-    const QJsonObject envelope = document.object();
+    // The reply carries the snapshot under its own key; the response wrapper
+    // is transport bookkeeping (schema version, id).
+    const QJsonObject envelope = document.object().value(QStringLiteral("snapshot")).toObject();
+    if (envelope.isEmpty()) {
+        finishPeerPoll(machineId, false, QStringLiteral("malformed"), QString());
+        return;
+    }
     if (envelope.value(QStringLiteral("schemaVersion")).toInt(0) != 1
         || envelope.value(QStringLiteral("serial")).toString() != serial) {
         finishPeerPoll(machineId, false, QStringLiteral("malformed"), QString());
@@ -2182,6 +2207,144 @@ bool DaemonService::dispatchActionList(const QList<ActionNode>& actions,
     return true;
 }
 
+DaemonService::ValidatedCommand DaemonService::validatePeerCommand(const QString& serial,
+                                                                   const QString& commandJson) const {
+    constexpr qsizetype maximumCommandBytes = 2048;
+    if (commandJson.toUtf8().size() > maximumCommandBytes) {
+        return {{}, QStringLiteral("commandTooLarge")};
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(commandJson.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return {{}, QStringLiteral("invalidCommand")};
+    }
+    const QJsonObject object = document.object();
+    const QStringList objectKeys = object.keys();
+    const QString operation = object.value(QStringLiteral("operation")).toString();
+
+    // PCs take no remote-control presses: audio only, and only explicitly
+    // (design §5) — keypresses and launches are a typed safety rejection.
+    if (operation == QLatin1String("setVolume")) {
+        if (QSet<QString>(objectKeys.cbegin(), objectKeys.cend()) !=
+            QSet<QString>{QStringLiteral("operation"), QStringLiteral("value")}) {
+            return {{}, QStringLiteral("invalidCommand")};
+        }
+        const QJsonValue supplied = object.value(QStringLiteral("value"));
+        if (!supplied.isDouble()) {
+            return {{}, QStringLiteral("invalidCommand")};
+        }
+        // The controller clamps into the registry record's ceiling; the peer
+        // clamps again against its own (design §5, defense in depth).
+        const auto device = findDevice(serial);
+        const int ceiling = device ? device->volumeCeiling : 100;
+        const int clamped =
+            std::clamp(static_cast<int>(supplied.toDouble()), 0, ceiling);
+        const QJsonObject normalized{{QStringLiteral("operation"), operation},
+                                     {QStringLiteral("value"), clamped}};
+        return {{compactJson(normalized)}, {}};
+    }
+    if (operation == QLatin1String("setMute")) {
+        if (QSet<QString>(objectKeys.cbegin(), objectKeys.cend()) !=
+            QSet<QString>{QStringLiteral("operation"), QStringLiteral("value")}) {
+            return {{}, QStringLiteral("invalidCommand")};
+        }
+        const QJsonValue supplied = object.value(QStringLiteral("value"));
+        if (!supplied.isBool()) {
+            return {{}, QStringLiteral("invalidCommand")};
+        }
+        const QJsonObject normalized{{QStringLiteral("operation"), operation},
+                                     {QStringLiteral("value"), supplied.toBool()}};
+        return {{compactJson(normalized)}, {}};
+    }
+    return {{}, QStringLiteral("safetyRejected")};
+}
+
+std::optional<PeerTarget> DaemonService::peerTargetForSerial(const QString& serial) const {
+    for (const PeerTarget& target : m_configStore->loadPeerTargets()) {
+        if (peerSerialForMachineId(target.machineId) == serial) {
+            return target;
+        }
+    }
+    return std::nullopt;
+}
+
+void DaemonService::finishPeerCommand(const QueuedCommand& command, bool ok,
+                                      const QString& errorCode) {
+    auto queueIt = m_commandQueues.find(command.serial);
+    if (queueIt != m_commandQueues.end() && !queueIt->isEmpty()
+        && queueIt->head().requestId == command.requestId) {
+        queueIt->dequeue();
+        if (queueIt->isEmpty()) {
+            m_commandQueues.erase(queueIt);
+        }
+    }
+    m_activeCommandSerials.remove(command.serial);
+    QJsonObject payload{{QStringLiteral("schemaVersion"), 1},
+                        {QStringLiteral("requestId"), command.requestId},
+                        {QStringLiteral("serial"), command.serial},
+                        {QStringLiteral("success"), ok}};
+    if (!ok) {
+        payload.insert(QStringLiteral("error"),
+                       errorCode.isEmpty() ? QStringLiteral("transportFailure") : errorCode);
+    }
+    Q_EMIT CommandFinished(command.requestId, compactJson(payload));
+    processNextCommand(command.serial);
+    updateIdleTimer();
+}
+
+void DaemonService::executeLocalAudioAction(const QString& operation, const QJsonValue& value,
+                                            std::function<void(bool ok, const QString& errorCode)> done) {
+    const auto device = findDevice(QLatin1String(localPcSerial));
+    if (!device) {
+        done(false, QStringLiteral("unknownDevice"));
+        return;
+    }
+    ProcessRequest request;
+    request.program = QStringLiteral("wpctl");
+    request.timeout = std::chrono::milliseconds(CommandContract::executionTimeoutMs);
+    if (operation == QLatin1String("setVolume")) {
+        if (!value.isDouble()) {
+            done(false, QStringLiteral("invalidValue"));
+            return;
+        }
+        // The peer's own ceiling is the policy source of truth (design §5);
+        // wpctl takes an absolute fraction.
+        const int clamped = std::clamp(value.toInt(), 0, device->volumeCeiling);
+        request.arguments = {QStringLiteral("set-volume"),
+                             QStringLiteral("@DEFAULT_AUDIO_SINK@"),
+                             QString::number(clamped / 100.0, 'f', 2)};
+    } else if (operation == QLatin1String("setMute")) {
+        if (!value.isBool()) {
+            done(false, QStringLiteral("invalidValue"));
+            return;
+        }
+        const bool wantMuted = value.toBool();
+        const DeviceSnapshot snapshot = m_snapshots.value(QLatin1String(localPcSerial));
+        if (!snapshot.muted.has_value()) {
+            done(false, QStringLiteral("staleState"));
+            return;
+        }
+        if (*snapshot.muted == wantMuted) {
+            // Matching state is a successful no-op, exactly like local
+            // automations: nothing to send.
+            done(true, {});
+            return;
+        }
+        request.arguments = {QStringLiteral("set-mute"), QStringLiteral("@DEFAULT_AUDIO_SINK@"),
+                             wantMuted ? QStringLiteral("1") : QStringLiteral("0")};
+    } else {
+        done(false, QStringLiteral("unsupportedOperation"));
+        return;
+    }
+    QPointer<DaemonService> service(this);
+    m_processRunner->start(request, [service, done = std::move(done)](ProcessResult result) {
+        if (!service) {
+            return;
+        }
+        done(!result.timedOut && result.exitCode == 0, {});
+    });
+}
+
 DaemonService::ValidatedCommand DaemonService::validateCommand(const QString& serial,
                                                                const QString& commandJson) const {
     constexpr qsizetype maximumCommandBytes = 2048;
@@ -2263,7 +2426,12 @@ QString DaemonService::SendCommand(const QString& serial, const QString& command
         return {};
     }
 
-    const ValidatedCommand validated = validateCommand(serial, commandJson);
+    // Peer devices take only explicit audio operations (design §5): no rds
+    // schema applies, so they validate on their own branch.
+    const bool peerCommand = peerTargetForSerial(serial).has_value();
+    const ValidatedCommand validated =
+        peerCommand ? validatePeerCommand(serial, commandJson)
+                    : validateCommand(serial, commandJson);
     if (!validated.errorCode.isEmpty()) {
         if (calledFromDBus()) {
             sendErrorReply(commandErrorName(validated.errorCode), validated.errorCode);
@@ -2281,8 +2449,12 @@ QString DaemonService::SendCommand(const QString& serial, const QString& command
     }
 
     const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    // Peer commands travel as JSON over TCP (program "peer"): their single
+    // argument IS the normalized envelope. Roku commands keep the validated
+    // rds argument list.
     queue.enqueue({requestId, serial, validated.arguments,
-                   QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs, Qt::PreciseTimer)});
+                   QDeadlineTimer(CommandContract::daemonCompletionDeadlineMs, Qt::PreciseTimer),
+                   false, peerCommand ? QStringLiteral("peer") : QStringLiteral("rds")});
     updateIdleTimer();
     processNextCommand(serial);
     return requestId;
@@ -2318,6 +2490,38 @@ void DaemonService::processNextCommand(const QString& serial) {
     }
 
     const QueuedCommand command = queueIt->head();
+    // Peer commands ride TCP instead of a process: same queue, deadlines and
+    // active-serial guard, one in-flight request at a time (M9c).
+    if (command.program == QLatin1String("peer")) {
+        const auto target = peerTargetForSerial(serial);
+        if (!target) {
+            queueIt->dequeue();
+            if (queueIt->isEmpty()) {
+                m_commandQueues.erase(queueIt);
+            }
+            finishPeerCommand(command, false, QStringLiteral("unknownDevice"));
+            return;
+        }
+        const QJsonObject peerRequest =
+            QJsonDocument::fromJson(command.arguments.value(0).toUtf8()).object();
+        if (peerRequest.isEmpty()) {
+            queueIt->dequeue();
+            if (queueIt->isEmpty()) {
+                m_commandQueues.erase(queueIt);
+            }
+            finishPeerCommand(command, false, QStringLiteral("invalidCommand"));
+            return;
+        }
+        m_activeCommandSerials.insert(serial);
+        m_peerActionCommands.insert(command.requestId, command);
+        m_peerClient->requestAction(
+            command.requestId, target->address, target->port, target->token,
+            peerRequest.value(QStringLiteral("operation")).toString(),
+            peerRequest.value(QStringLiteral("value")),
+            std::chrono::milliseconds(std::min<qint64>(
+                4000, std::max<qint64>(500, m_deadlineRemaining(command.deadline)))));
+        return;
+    }
     ProcessRequest request;
     const bool rdsRouted = command.program == QLatin1String("rds");
     if (!rdsRouted) {
