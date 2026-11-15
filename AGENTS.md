@@ -68,6 +68,12 @@ NO `PlaceHolder`. Same rule for themed properties: `Kirigami.Theme` has
 - **`daemon-dbus-test` needs its private session bus and isolated XDG dirs** —
   run it via `ctest` (or duplicate the `dbus-run-session` + `XDG_DATA_DIRS`
   wrapper from `tests/CMakeLists.txt`), or `registerOnBus()` fails instantly.
+- **`daemon-dbus-test` has a known flake**: `powerAndAudioKeypressesHonourObservedDeviceState`
+  asserts on the fake runner's LAST request, and a concurrent device poll can
+  interleave after the dispatched keypress — failing with "Compared lists
+  differ at index 0" (actual `device`, expected `keypress`). Re-run the test
+  in isolation before debugging daemon code; passing on repeat is the norm
+  (seen 2026-11-14: fail, fail, pass, pass on unchanged sources).
 - **clangd/LSP diagnostics are pre-existing include-path noise** across this
   repo ("QHash file not found" etc.). The `-Werror` ninja build is the only
   real compile gate. Never chase LSP errors.
