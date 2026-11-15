@@ -245,6 +245,12 @@ class DaemonDbusTest final : public QObject {
                                                        const QVariantList& arguments = {});
     [[nodiscard]] static QDBusMessage waitForReply(const QDBusPendingCall& pending);
     [[nodiscard]] static QJsonObject jsonResult(const QDBusMessage& reply);
+    // The daemon's poller runs concurrently with command dispatch, so a poll
+    // can land on the fake runner after a keypress and before an assertion
+    // that reads lastRequest. The keypress contract concerns the keypress
+    // dispatch itself: wait for it, then assert on the LATEST keypress
+    // request rather than the runner's absolute last request.
+    void waitForKeypressRequest(const QString& key);
     [[nodiscard]] static bool waitForHelperRegistration(QProcess& client);
     void recreateDaemon(std::chrono::milliseconds idleGrace = 30s,
                         DaemonService::DeadlineRemaining deadlineRemaining = {},
@@ -631,6 +637,20 @@ QJsonObject DaemonDbusTest::jsonResult(const QDBusMessage& reply) {
         return {};
     }
     return QJsonDocument::fromJson(reply.arguments().front().toString().toUtf8()).object();
+}
+
+void DaemonDbusTest::waitForKeypressRequest(const QString& key) {
+    const auto isKeypressFor = [&key](const ProcessRequest& request) {
+        return request.arguments.size() >= 2
+               && request.arguments.at(request.arguments.size() - 2)
+                      == QStringLiteral("keypress")
+               && request.arguments.last() == key;
+    };
+    QTRY_VERIFY(std::any_of(m_runner->requests.cbegin(), m_runner->requests.cend(),
+                            isKeypressFor));
+    const auto latest =
+        std::find_if(m_runner->requests.crbegin(), m_runner->requests.crend(), isKeypressFor);
+    QCOMPARE(latest->arguments.last(2), QStringList({QStringLiteral("keypress"), key}));
 }
 
 void DaemonDbusTest::twoClientsShareOneDeviceInterest() {
@@ -1862,8 +1882,7 @@ void DaemonDbusTest::powerAndAudioKeypressesHonourObservedDeviceState() {
             waitForReply(m_proxy->SendCommand(QStringLiteral("SERIAL-A"), command));
         QVERIFY2(reply.type() != QDBusMessage::ErrorMessage,
                  qPrintable(QStringLiteral("%1 was rejected: %2").arg(key, reply.errorMessage())));
-        QCOMPARE(m_runner->lastRequest.arguments.last(2),
-                 QStringList({QStringLiteral("keypress"), key}));
+        waitForKeypressRequest(key);
         m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
     }
 
@@ -1882,8 +1901,7 @@ void DaemonDbusTest::powerAndAudioKeypressesHonourObservedDeviceState() {
     const QDBusMessage power = waitForReply(m_proxy->SendCommand(
         QStringLiteral("SERIAL-A"), QStringLiteral(R"json({"operation":"keypress","key":"Power"})json")));
     QVERIFY2(power.type() != QDBusMessage::ErrorMessage, qPrintable(power.errorMessage()));
-    QCOMPARE(m_runner->lastRequest.arguments.last(2),
-             QStringList({QStringLiteral("keypress"), QStringLiteral("Power")}));
+    waitForKeypressRequest(QStringLiteral("Power"));
     m_runner->complete({0, QByteArrayLiteral(R"json({"ok":true})json"), {}, false});
 }
 
