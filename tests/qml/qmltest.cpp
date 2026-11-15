@@ -244,6 +244,12 @@ class BridgeFixture : public QObject {
     Q_PROPERTY(QStringList testedAddresses READ testedAddresses NOTIFY testedAddressesChanged)
     Q_PROPERTY(QStringList orderedSerials READ orderedSerials NOTIFY orderedSerialsChanged)
     Q_PROPERTY(int discoveryCount READ discoveryCount CONSTANT)
+    Q_PROPERTY(QVariantList pairedPeers READ pairedPeers NOTIFY pairedPeersChanged)
+    Q_PROPERTY(QStringList removedTargets READ removedTargets NOTIFY removedTargetsChanged)
+    Q_PROPERTY(QStringList revokedControllers READ revokedControllers NOTIFY
+                   revokedControllersChanged)
+    Q_PROPERTY(QStringList peerListenerToggles READ peerListenerToggles NOTIFY
+                   peerListenerTogglesChanged)
 
   public:
     using QObject::QObject;
@@ -268,6 +274,10 @@ class BridgeFixture : public QObject {
     [[nodiscard]] QStringList testedAddresses() const { return testedAddressesList; }
     [[nodiscard]] QStringList orderedSerials() const { return orderedSerialsList; }
     [[nodiscard]] int discoveryCount() const { return m_discoveryCount; }
+    [[nodiscard]] QVariantList pairedPeers() const { return m_pairedPeers; }
+    [[nodiscard]] QStringList removedTargets() const { return m_removedTargetsList; }
+    [[nodiscard]] QStringList revokedControllers() const { return m_revokedControllersList; }
+    [[nodiscard]] QStringList peerListenerToggles() const { return m_peerListenerToggles; }
 
     Q_INVOKABLE void refresh() {
         ++m_refreshCount;
@@ -353,6 +363,43 @@ class BridgeFixture : public QObject {
         return m_devices.deviceEntries();
     }
 
+    // Peer management (M9a/M9b) fixtures: the listing is whatever the test
+    // set, mutations are recorded, and every mutation reports success so the
+    // page's reload path runs exactly as it does against the daemon.
+    Q_INVOKABLE void setFixturePeers(const QVariantMap& peers) {
+        m_fixturePeers = peers;
+    }
+
+    Q_INVOKABLE QVariantMap listPeers() const {
+        return m_fixturePeers;
+    }
+
+    Q_INVOKABLE QString peerPairingCode() const {
+        return QStringLiteral("CODE1234");
+    }
+
+    Q_INVOKABLE void setPeerListenerEnabled(bool enabled) {
+        m_peerListenerToggles.append(enabled ? QStringLiteral("on") : QStringLiteral("off"));
+        Q_EMIT deviceOperationSucceeded(QStringLiteral("setPeerListenerEnabled"));
+    }
+
+    Q_INVOKABLE void pairPeer(const QString& address, uint port, const QString& code) {
+        m_pairedPeers.append(QVariantMap{{QStringLiteral("address"), address},
+                                         {QStringLiteral("port"), port},
+                                         {QStringLiteral("code"), code}});
+        Q_EMIT deviceOperationSucceeded(QStringLiteral("pairPeer"));
+    }
+
+    Q_INVOKABLE void removePeerTarget(const QString& machineId) {
+        m_removedTargetsList.append(machineId);
+        Q_EMIT deviceOperationSucceeded(QStringLiteral("removePeerTarget"));
+    }
+
+    Q_INVOKABLE void revokePairedController(const QString& machineId) {
+        m_revokedControllersList.append(machineId);
+        Q_EMIT deviceOperationSucceeded(QStringLiteral("revokePairedController"));
+    }
+
   Q_SIGNALS:
     void selectedSerialChanged();
     void refreshCountChanged();
@@ -364,6 +411,10 @@ class BridgeFixture : public QObject {
     void removedDevicesChanged();
     void testedAddressesChanged();
     void orderedSerialsChanged();
+    void pairedPeersChanged();
+    void removedTargetsChanged();
+    void revokedControllersChanged();
+    void peerListenerTogglesChanged();
     void deviceOperationFailed(const QString& operation, const QString& message);
     void deviceOperationSucceeded(const QString& operation);
     void deviceTestFinished(const QString& address, const QVariantMap& snapshot,
@@ -380,6 +431,11 @@ class BridgeFixture : public QObject {
     QString m_selectedSerial;
     int m_refreshCount = 0;
     int m_discoveryCount = 0;
+    QVariantMap m_fixturePeers;
+    QVariantList m_pairedPeers;
+    QStringList m_removedTargetsList;
+    QStringList m_revokedControllersList;
+    QStringList m_peerListenerToggles;
     bool m_available = true;
     bool m_busy = false;
     QVariantList m_sentCommands;

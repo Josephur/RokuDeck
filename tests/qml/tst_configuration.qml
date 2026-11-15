@@ -49,6 +49,12 @@ TestCase {
         RokuDeckConfig.ConfigControls {}
     }
 
+    Component {
+        id: peersComponent
+
+        RokuDeckConfig.ConfigPeers {}
+    }
+
     function createPage(component, properties) {
         const window = createTemporaryObject(windowComponent, testCase);
         verify(window);
@@ -352,5 +358,101 @@ TestCase {
 
         mouseClick(findChild(page, "powerControlBox"));
         compare(page.cfg_visibleControls.indexOf("power"), -1);
+    }
+
+    function createPeers(properties) {
+        const window = createTemporaryObject(windowComponent, testCase);
+        verify(window);
+        window.requestActivate();
+        tryVerify(() => window.active);
+        const bridge = createTemporaryObject(bridgeComponent, testCase);
+        verify(bridge);
+        bridge.setFixturePeers({
+            listener: { enabled: true, listening: true, port: 49160, boundPort: 49160 },
+            controllers: [{
+                machineId: "11111111111111111111111111111111",
+                addedAt: "2026-11-15T00:14:58.763"
+            }],
+            targets: [{
+                machineId: "22222222222222222222222222222222",
+                displayName: "office-vm",
+                address: "192.0.2.112",
+                port: 49160
+            }]
+        });
+        const page = createTemporaryObject(peersComponent, window.contentItem, Object.assign({
+            bridge: bridge,
+            width: 700,
+            height: 620,
+            visible: true
+        }, properties ?? {}));
+        verify(page, "the Peers page must instantiate cleanly");
+        return { bridge: bridge, page: page };
+    }
+
+    function test_thePeersPageMirrorsTheDaemonListing() {
+        const fixture = createPeers();
+
+        verify(findChild(fixture.page, "listenerSwitch").checked);
+        verify(!findChild(fixture.page, "noTargetsMessage").visible);
+        verify(!findChild(fixture.page, "noControllersMessage").visible);
+
+        const target = findChild(fixture.page, "peerTarget-22222222222222222222222222222222");
+        verify(target !== null, "the paired peer must render");
+        mouseClick(findChild(target, "removePeerButton"));
+        compare(fixture.bridge.removedTargets,
+                ["22222222222222222222222222222222"]);
+
+        const controller = findChild(fixture.page, "controllerEntry-11111111111111111111111111111111");
+        verify(controller !== null);
+        mouseClick(findChild(controller, "revokeControllerButton"));
+        compare(fixture.bridge.revokedControllers,
+                ["11111111111111111111111111111111"]);
+    }
+
+    function test_theListenerSwitchWritesAndKeepsFollowingTheListing() {
+        const fixture = createPeers();
+        const listenerSwitch = findChild(fixture.page, "listenerSwitch");
+        verify(listenerSwitch.checked);
+
+        mouseClick(listenerSwitch);
+        compare(fixture.bridge.peerListenerToggles, ["off"]);
+        // The click asked the daemon; the switch keeps following the stored
+        // listing until the reload confirms the change (same honesty rule
+        // as every device control).
+        compare(listenerSwitch.checked, true,
+                "the switch must not drift from the listing on an unconfirmed change");
+    }
+
+    function test_pairGathersTheFormAndReachesTheDaemon() {
+        const fixture = createPeers();
+        const addressField = findChild(fixture.page, "addressField");
+        const portField = findChild(fixture.page, "portField");
+        const codeField = findChild(fixture.page, "codeField");
+        const pairButton = findChild(fixture.page, "pairButton");
+        verify(!pairButton.enabled, "pairing needs all three fields");
+
+        addressField.text = "192.0.2.112";
+        portField.text = "49160";
+        verify(!pairButton.enabled, "a missing code must not pair");
+        codeField.text = "ABCD2345";
+        verify(pairButton.enabled);
+
+        mouseClick(pairButton);
+        compare(fixture.bridge.pairedPeers.length, 1);
+        compare(fixture.bridge.pairedPeers[0].address, "192.0.2.112");
+        compare(fixture.bridge.pairedPeers[0].port, 49160);
+        compare(fixture.bridge.pairedPeers[0].code, "ABCD2345");
+    }
+
+    function test_thePairingCodeIsShownWhenMinted() {
+        const fixture = createPeers();
+        const message = findChild(fixture.page, "pairingCodeMessage");
+        verify(!message.visible);
+
+        mouseClick(findChild(fixture.page, "showCodeButton"));
+        tryVerify(() => message.visible);
+        verify(message.text.includes("CODE1234"),
+               "the minted code must be shown to the user");
     }
 }

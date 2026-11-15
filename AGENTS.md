@@ -38,7 +38,10 @@ Valid names seen in this repo: extras → `Heading`, `PlaceholderMessage`;
 components → `Label`, `ComboBox`, `ToolButton`; extras has NO `ToolButton`,
 NO `PlaceHolder`. Same rule for themed properties: `Kirigami.Theme` has
 `defaultFont`/`smallFont`/`fixedWidthFont` — `smallestFont` does not exist
-(it silently renders a TypeError at runtime).
+(it silently renders a TypeError at runtime). There is **no `FormLayout` in
+QtQuick.Controls or QtQuick.Layouts** on this setup — forms use
+`Kirigami.FormLayout` (shipped bug `ConfigPeers.qml: QQC2.FormLayout is not a
+type`, 2026-11-15).
 
 **New QML files MUST be added to QML_SOURCES in src/plasmoid/CMakeLists.txt.**
 The widget's QML is compiled into the plugin's qrc resource: an unlisted file

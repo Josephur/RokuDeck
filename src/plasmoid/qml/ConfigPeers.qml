@@ -76,6 +76,8 @@ KCM.SimpleKCM {
         spacing: Kirigami.Units.largeSpacing
 
         Kirigami.InlineMessage {
+            objectName: "pairingCodeMessage"
+
             Layout.fillWidth: true
             visible: root.pairingCode.length > 0
             type: Kirigami.MessageType.Information
@@ -93,6 +95,8 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             QQC2.Switch {
                 id: listenerSwitch
+
+                objectName: "listenerSwitch"
 
                 checked: root.listenerEnabled
                 onToggled: {
@@ -115,6 +119,8 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             visible: root.listenerEnabled
             QQC2.Button {
+                objectName: "showCodeButton"
+
                 icon.name: "view-refresh"
                 text: KI18n.i18nc("@button", "Show pairing code")
                 onClicked: {
@@ -142,6 +148,8 @@ KCM.SimpleKCM {
             text: KI18n.i18nc("@title", "Paired peers")
         }
         PlasmaExtras.PlaceholderMessage {
+            objectName: "noTargetsMessage"
+
             Layout.fillWidth: true
             visible: root.targets.length === 0
             text: KI18n.i18nc("@info", "No paired peers yet")
@@ -152,6 +160,8 @@ KCM.SimpleKCM {
             delegate: RowLayout {
                 required property var modelData
 
+                objectName: "peerTarget-" + modelData.machineId
+
                 Layout.fillWidth: true
                 PlasmaComponents.Label {
                     Layout.fillWidth: true
@@ -160,6 +170,8 @@ KCM.SimpleKCM {
                     elide: Text.ElideMiddle
                 }
                 QQC2.Button {
+                    objectName: "removePeerButton"
+
                     icon.name: "list-remove"
                     text: KI18n.i18nc("@button", "Remove")
                     onClicked: root.bridge.removePeerTarget(modelData.machineId)
@@ -176,17 +188,21 @@ KCM.SimpleKCM {
             level: 3
             text: KI18n.i18nc("@title", "Add a peer")
         }
-        QQC2.FormLayout {
+        Kirigami.FormLayout {
             Layout.fillWidth: true
 
             QQC2.TextField {
                 id: addressField
+
+                objectName: "addressField"
 
                 Layout.fillWidth: true
                 placeholderText: KI18n.i18nc("@placeholder", "IP address of the other machine")
             }
             QQC2.TextField {
                 id: portField
+
+                objectName: "portField"
 
                 Layout.fillWidth: true
                 inputMethodHints: Qt.ImhDigitsOnly
@@ -196,11 +212,15 @@ KCM.SimpleKCM {
             QQC2.TextField {
                 id: codeField
 
+                objectName: "codeField"
+
                 Layout.fillWidth: true
                 placeholderText: KI18n.i18nc("@placeholder", "One-time pairing code from that machine")
             }
         }
         QQC2.Button {
+            objectName: "pairButton"
+
             icon.name: "network-connect"
             text: KI18n.i18nc("@button", "Pair")
             enabled: addressField.text.length > 0 && portField.text.length > 0
@@ -226,6 +246,8 @@ KCM.SimpleKCM {
             text: KI18n.i18nc("@title", "Machines allowed here")
         }
         PlasmaExtras.PlaceholderMessage {
+            objectName: "noControllersMessage"
+
             Layout.fillWidth: true
             visible: root.controllers.length === 0
             text: KI18n.i18nc("@info", "No machines have paired with this one")
@@ -236,6 +258,8 @@ KCM.SimpleKCM {
             delegate: RowLayout {
                 required property var modelData
 
+                objectName: "controllerEntry-" + modelData.machineId
+
                 Layout.fillWidth: true
                 PlasmaComponents.Label {
                     Layout.fillWidth: true
@@ -243,6 +267,8 @@ KCM.SimpleKCM {
                     elide: Text.ElideMiddle
                 }
                 QQC2.Button {
+                    objectName: "revokeControllerButton"
+
                     icon.name: "list-remove"
                     text: KI18n.i18nc("@button", "Revoke")
                     onClicked: root.bridge.revokePairedController(modelData.machineId)
