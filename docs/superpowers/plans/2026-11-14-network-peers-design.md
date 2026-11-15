@@ -49,6 +49,10 @@ executed by other machines.
 - **Protocol**: newline-delimited UTF-8 JSON envelopes — the codebase's
   existing snapshot/rule envelope style, trivially testable, debuggable
   with `nc`. Every envelope carries `schemaVersion`.
+- **Firewall, learned live (2026-11-15)**: a default-deny host firewall
+  (e.g. ufw) silently DROPS the peer port — the controller sees a connect
+  that hangs into "timeout" rather than a clean refusal. Peers must open
+  49160/tcp inbound (`ufw allow 49160/tcp`); worth a line in the pairing UX.
 - **Pull, not push, in v1**: the controller's *existing* poll scheduler
   polls each peer's snapshot endpoint on its normal `refreshPolicy`
   cadence. Stale marking, health flip, and offline outcomes then reuse the
