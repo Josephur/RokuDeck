@@ -65,6 +65,14 @@ NO `PlaceHolder`. Same rule for themed properties: `Kirigami.Theme` has
 - **GCC 16 (this machine) rejects declaration + in-class inline definition**
   ("cannot be overloaded with"). Define QtTest slot bodies OUTSIDE the class
   with `ClassName::slot()` qualification. Every existing test file does this.
+- **A ctor default argument cannot use a nested struct's NSDMIs** (CWG 1397;
+  GCC 16 reports it as "default member initializer required before the end
+  of its enclosing class" or, misleadingly, "could not convert brace-enclosed
+  initializer list"). `PeerIdentity = {}` inside DaemonService compiles
+  because it has no member initializers; `PeerPollIntervals = {}` did not
+  until the struct moved to namespace scope. Same family as the slot-body
+  rule above: keep such structs at namespace scope (`PeerListenerSettings`
+  in config_store.h is the established pattern).
 - **`daemon-dbus-test` needs its private session bus and isolated XDG dirs** —
   run it via `ctest` (or duplicate the `dbus-run-session` + `XDG_DATA_DIRS`
   wrapper from `tests/CMakeLists.txt`), or `registerOnBus()` fails instantly.

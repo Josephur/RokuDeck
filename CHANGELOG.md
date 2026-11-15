@@ -6,6 +6,17 @@ All notable changes to RokuDeck are documented in this file.
 
 ## Unreleased
 
+- Network peers (M9b of the network-peers design): a paired target is now a
+  first-class registry device (`PC-<machine-id>`, name renameable, address
+  host:port) the moment the pairing lands, and the daemon polls each peer on
+  its registry refresh policy, pulling volume/muted/playing through the same
+  snapshot pipeline as This PC — announcements, baseline-safe stateChange
+  edges (opt-in targeting: rules must list the peer explicitly), and three
+  consecutive failed polls flipping the peer to offline. Removing the device
+  removes the stored target and token; removing the target removes the
+  device. Rules that name a peer keep the daemon alive, and pairing now
+  refuses yourself and identity-prefix collisions. The widget's device list
+  shows peers; volume actions against them arrive in M9c.
 - Network peers (M9a of the network-peers design): the daemon can listen for
   other RokuDeck machines on the LAN — explicitly enabled only, default port
   49160 — mint one-time pairing codes, and remember paired controllers. A

@@ -94,6 +94,22 @@ constexpr auto objectPath = "/io/github/josephur/RokuDeck1";
     return QStringLiteral("unknown");
 }
 
+[[nodiscard]] DeviceHealth peerHealthValue(const QString& name) {
+    if (name == QLatin1String("online")) {
+        return DeviceHealth::Online;
+    }
+    if (name == QLatin1String("standby")) {
+        return DeviceHealth::Standby;
+    }
+    if (name == QLatin1String("degraded")) {
+        return DeviceHealth::Degraded;
+    }
+    if (name == QLatin1String("offline")) {
+        return DeviceHealth::Offline;
+    }
+    return DeviceHealth::Unknown;
+}
+
 constexpr qsizetype maximumDeviceJsonBytes = 4096;
 constexpr qsizetype maximumDisplayNameLength = 128;
 constexpr qsizetype maximumSerialLength = 64;
@@ -283,7 +299,7 @@ DaemonService::DaemonService(QDBusConnection connection,
                              DeadlineRemaining deadlineRemaining, WallClock wallClock,
                              std::chrono::milliseconds localPcPollInterval,
                              QString scriptsDir, PeerIdentity peerIdentity,
-                             QObject* parent)
+                             PeerPollIntervals peerPollIntervals, QObject* parent)
     : QObject(parent), m_connection(std::move(connection)),
       m_hasEnabledAutomations(hasEnabledAutomations ? std::move(hasEnabledAutomations)
                                                     : [] { return false; }),
@@ -310,6 +326,8 @@ DaemonService::DaemonService(QDBusConnection connection,
           // LOCAL-PC reading, whatever it currently says (design §4).
           [this]() { return m_snapshots.value(QLatin1String(localPcSerial)); },
           m_wallClock, m_peerIdentity.machineId, m_peerIdentity.hostName)),
+      m_peerClient(std::make_unique<PeerClient>(this)),
+      m_peerPollIntervals(std::move(peerPollIntervals)),
       // Ruling 3: the scripts directory resolves once — an injected path for
       // tests, else the standard app-data location.
       m_scriptsDirectory(scriptsDir.isEmpty()
@@ -384,6 +402,19 @@ DaemonService::DaemonService(QDBusConnection connection,
         listener.enabled) {
         static_cast<void>(m_peerServer->start(listener.port));
     }
+
+    // Network peers (M9b): every stored target rejoins the registry as a
+    // PC- device and joins the poll sweep immediately.
+    connect(m_peerClient.get(), &PeerClient::snapshotResult, this,
+            &DaemonService::finishPeerPoll);
+    m_peerPollTimer.setInterval(std::chrono::seconds(1));
+    connect(&m_peerPollTimer, &QTimer::timeout, this, &DaemonService::pollDuePeers);
+    const QDateTime peerBoot = m_wallClock();
+    for (const PeerTarget& target : m_configStore->loadPeerTargets()) {
+        registerPeerDevice(target);
+        m_peerPollDueAt.insert(target.machineId, peerBoot);
+    }
+    m_peerPollTimer.start();
 
     m_idleTimer.setSingleShot(true);
     m_idleTimer.setInterval(static_cast<int>(std::min<std::chrono::milliseconds::rep>(
@@ -914,6 +945,22 @@ void DaemonService::RemoveDevice(const QString& serial) {
         }
         return;
     }
+    // A peer device's serial maps back to a stored target: removing the
+    // device removes the stored peer and our token for it (design §1).
+    const QList<PeerTarget> targets = m_configStore->loadPeerTargets();
+    for (const PeerTarget& target : targets) {
+        if (peerSerialForMachineId(target.machineId) == serial) {
+            QList<PeerTarget> remaining = targets;
+            remaining.erase(std::remove_if(remaining.begin(), remaining.end(),
+                                           [&target](const PeerTarget& known) {
+                                               return known.machineId == target.machineId;
+                                           }),
+                            remaining.end());
+            m_configStore->savePeerTargets(remaining);
+            removePeerDevice(target.machineId);
+            return;
+        }
+    }
     if (!m_deviceRegistry.remove(serial)) {
         if (calledFromDBus()) {
             sendErrorReply(QString::fromLatin1(DbusError::unknownDevice),
@@ -1430,11 +1477,31 @@ QString DaemonService::PairPeer(const QString& address, uint port, const QString
         targets.append(std::move(target));
         existing = std::prev(targets.end());
     }
+    // A peer must be a different machine, and no two peers may share an
+    // identity prefix: both would fight over the same registry serial.
+    if (outcome.machineId == m_peerIdentity.machineId) {
+        sendErrorReply(QString::fromLatin1(DbusError::pairingRejected),
+                       QStringLiteral("that machine is this one"));
+        return {};
+    }
+    const QString newSerial = peerSerialForMachineId(outcome.machineId);
+    for (const PeerTarget& known : m_configStore->loadPeerTargets()) {
+        if (known.machineId != outcome.machineId
+            && peerSerialForMachineId(known.machineId) == newSerial) {
+            sendErrorReply(QString::fromLatin1(DbusError::pairingRejected),
+                           QStringLiteral("another peer already uses that identity"));
+            return {};
+        }
+    }
+
     existing->displayName = outcome.displayName;
     existing->address = address;
     existing->port = static_cast<quint16>(port);
     existing->token = outcome.token;
     m_configStore->savePeerTargets(targets);
+    // M9b: the stored target becomes a registry device immediately, so the
+    // widget sees the peer without waiting for the next daemon start.
+    registerPeerDevice(*existing);
 
     const QJsonObject peerJson{{QStringLiteral("schemaVersion"), 1},
                                {QStringLiteral("peer"),
@@ -1457,6 +1524,8 @@ void DaemonService::RemovePeerTarget(const QString& machineId) {
     }
     targets.erase(existing);
     m_configStore->savePeerTargets(targets);
+    // The registry record and its snapshot go with the target (M9b).
+    removePeerDevice(machineId);
 }
 
 void DaemonService::RevokePairedController(const QString& machineId) {
@@ -1471,6 +1540,141 @@ void DaemonService::RevokePairedController(const QString& machineId) {
     }
     controllers.erase(existing);
     m_configStore->savePairedControllers(controllers);
+}
+
+void DaemonService::registerPeerDevice(const PeerTarget& target) {
+    const QString serial = peerSerialForMachineId(target.machineId);
+    const QString address = target.address + QChar(u':') + QString::number(target.port);
+    // PreserveSettings: the target's identity (name until renamed, address)
+    // merges in, while the user's daemon-owned preferences survive (design
+    // §6 — peers behave exactly like every other registry device).
+    const bool changed = mergeDevice({serial, target.displayName, address});
+    if (changed) {
+        persistAndAnnounceDevices();
+    }
+}
+
+void DaemonService::removePeerDevice(const QString& machineId) {
+    const QString serial = peerSerialForMachineId(machineId);
+    static_cast<void>(m_deviceRegistry.remove(serial));
+    m_snapshots.remove(serial);
+    m_addressGenerations.remove(serial);
+    m_peerPollDueAt.remove(machineId);
+    m_peerPollFailures.remove(machineId);
+    m_peerPollsInFlight.remove(machineId);
+    persistAndAnnounceDevices();
+}
+
+std::chrono::milliseconds DaemonService::peerPollIntervalFor(const QString& refreshPolicy) const {
+    if (refreshPolicy == QLatin1String("responsive")) {
+        return m_peerPollIntervals.responsive;
+    }
+    if (refreshPolicy == QLatin1String("battery")) {
+        return m_peerPollIntervals.battery;
+    }
+    return m_peerPollIntervals.balanced;
+}
+
+void DaemonService::pollDuePeers() {
+    if (m_shuttingDown) {
+        return;
+    }
+    const QDateTime now = m_wallClock();
+    const QList<PeerTarget> targets = m_configStore->loadPeerTargets();
+    for (const PeerTarget& target : targets) {
+        if (m_peerPollsInFlight.contains(target.machineId)) {
+            continue;
+        }
+        const auto device = findDevice(peerSerialForMachineId(target.machineId));
+        if (!device) {
+            continue;
+        }
+        const QDateTime due = m_peerPollDueAt.value(target.machineId);
+        if (due.isValid() && due > now) {
+            continue;
+        }
+        m_peerPollsInFlight.insert(target.machineId);
+        m_peerPollDueAt.insert(target.machineId,
+                               now + peerPollIntervalFor(device->refreshPolicy));
+        m_peerClient->requestSnapshot(target.machineId, target.address, target.port,
+                                      target.token);
+    }
+}
+
+void DaemonService::finishPeerPoll(const QString& machineId, bool ok, const QString& errorCode,
+                                   const QString& envelopeJson) {
+    m_peerPollsInFlight.remove(machineId);
+    if (m_shuttingDown) {
+        return;
+    }
+    const QString serial = peerSerialForMachineId(machineId);
+    if (!ok) {
+        const int failures = m_peerPollFailures.value(machineId) + 1;
+        m_peerPollFailures.insert(machineId, failures);
+        // Network-peers design §2: the third consecutive failure flips health
+        // to Offline; interim failures leave the last good reading on display.
+        if (failures == 3) {
+            DeviceSnapshot offline;
+            offline.serial = serial;
+            if (const auto device = findDevice(serial)) {
+                offline.displayName = device->displayName;
+                offline.address = device->address;
+            }
+            offline.health = DeviceHealth::Offline;
+            applyPeerSnapshot(std::move(offline));
+        }
+        return;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(envelopeJson.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        // Counted as a failure: an envelope we cannot parse is a peer that
+        // effectively did not answer (rejection path handles the offline flip).
+        finishPeerPoll(machineId, false, errorCode, QString());
+        return;
+    }
+    const QJsonObject envelope = document.object();
+    if (envelope.value(QStringLiteral("schemaVersion")).toInt(0) != 1
+        || envelope.value(QStringLiteral("serial")).toString() != serial) {
+        finishPeerPoll(machineId, false, QStringLiteral("malformed"), QString());
+        return;
+    }
+    const auto device = findDevice(serial);
+    if (!device) {
+        // The peer was removed while its poll was in flight.
+        return;
+    }
+
+    DeviceSnapshot snapshot;
+    snapshot.serial = serial;
+    // The registry is authoritative for identity, exactly like Roku polls:
+    // serving the peer's advertised hostname would undo a rename everywhere.
+    snapshot.displayName = device->displayName;
+    snapshot.address = device->address;
+    snapshot.health = peerHealthValue(envelope.value(QStringLiteral("health")).toString());
+    const QJsonValue volumeValue = envelope.value(QStringLiteral("volume"));
+    if (volumeValue.isDouble()) {
+        snapshot.volume = volumeValue.toInt();
+    }
+    const QJsonValue mutedValue = envelope.value(QStringLiteral("muted"));
+    if (mutedValue.isBool()) {
+        snapshot.muted = mutedValue.toBool();
+    }
+    const QJsonValue playingValue = envelope.value(QStringLiteral("playing"));
+    if (playingValue.isBool()) {
+        snapshot.playing = playingValue.toBool();
+    }
+    const QJsonArray capabilities = envelope.value(QStringLiteral("capabilities")).toArray();
+    for (const QJsonValue& capability : capabilities) {
+        snapshot.capabilities.insert(capability.toString());
+    }
+    const QDateTime capturedAt = QDateTime::fromString(
+        envelope.value(QStringLiteral("capturedAt")).toString(), Qt::ISODateWithMs);
+    if (capturedAt.isValid()) {
+        snapshot.capturedAt = capturedAt;
+    }
+    m_peerPollFailures.insert(machineId, 0);
+    applyPeerSnapshot(std::move(snapshot));
 }
 
 void DaemonService::recordSuppressedFiring(const QString& ruleId, const QString& outcome) {
@@ -2431,11 +2635,24 @@ void DaemonService::finishLocalPcPoll(const ProcessResult& result) {
 }
 
 void DaemonService::applyLocalPcSnapshot(DeviceSnapshot snapshot) {
-    // The synthetic playing flag rides every This PC snapshot (spec §2.2).
+    applySyntheticSnapshot(std::move(snapshot));
+}
+
+void DaemonService::applyPeerSnapshot(DeviceSnapshot snapshot) {
+    applySyntheticSnapshot(std::move(snapshot));
+}
+
+void DaemonService::applySyntheticSnapshot(DeviceSnapshot snapshot) {
+    // The synthetic playing flag rides every This PC snapshot (spec §2.2);
+    // peers carry their own playing flag from their envelope (design §4).
     if (snapshot.serial == QLatin1String(localPcSerial)) {
         snapshot.playing = m_mprisPlaying;
+        snapshot.capturedAt = QDateTime::currentDateTimeUtc();
+    } else if (!snapshot.capturedAt.isValid()) {
+        // A peer envelope stamps its own capture time; only a missing one
+        // falls back to now.
+        snapshot.capturedAt = QDateTime::currentDateTimeUtc();
     }
-    snapshot.capturedAt = QDateTime::currentDateTimeUtc();
     // The pre-insert snapshot is the diff baseline; a serial never seen before
     // only establishes it and must not fire (§4.1) — identical to rds polls.
     const bool hadPrevious = m_snapshots.contains(snapshot.serial);
@@ -2443,15 +2660,17 @@ void DaemonService::applyLocalPcSnapshot(DeviceSnapshot snapshot) {
     m_snapshots.insert(snapshot.serial, snapshot);
     Q_EMIT DeviceSnapshotChanged(snapshot.serial, snapshotJson(snapshot));
     if (hadPrevious) {
-        // Opt-in targeting (spec §1): only enabled rules that explicitly list
-        // This PC may fire from its edges; Roku edges keep the full list.
-        QList<RuleDocument> pcRules;
+        // Opt-in targeting (spec §1 / design §6): only enabled rules that
+        // explicitly list this serial may fire from its edges — This PC and
+        // peers alike; Roku edges keep the full list.
+        QList<RuleDocument> syntheticRules;
         for (const RuleDocument& rule : std::as_const(m_rules)) {
-            if (rule.enabled && rule.devices.contains(QLatin1String(localPcSerial))) {
-                pcRules.append(rule);
+            if (rule.enabled && rule.devices.contains(snapshot.serial)) {
+                syntheticRules.append(rule);
             }
         }
-        runStateChangeFirings(dueStateChangeRuleIds(pcRules, snapshot.serial, previous, snapshot));
+        runStateChangeFirings(
+            dueStateChangeRuleIds(syntheticRules, snapshot.serial, previous, snapshot));
     }
 }
 
@@ -2482,8 +2701,10 @@ bool DaemonService::hasAcceptedWork() const {
            m_scheduleTimer.isActive() || hasEnabledLocalPcRules() ||
            // Idle parity (network-peers design §3): an explicitly enabled
            // listener is accepted work — paired peers must stay answerable
-           // even with no widget client running.
-           (m_peerServer != nullptr && m_peerServer->isListening());
+           // even with no widget client running. Rules naming a peer keep
+           // the daemon alive for the same reason on the controller side.
+           (m_peerServer != nullptr && m_peerServer->isListening()) ||
+           hasEnabledPeerRules();
 }
 
 // Opt-in idle parity: an enabled rule that explicitly names This PC keeps the
@@ -2494,6 +2715,26 @@ bool DaemonService::hasEnabledLocalPcRules() const {
         // Explicit listing only: wildcards never reach This PC.
         if (rule.enabled && rule.devices.contains(QLatin1String(localPcSerial))) {
             return true;
+        }
+    }
+    return false;
+}
+
+// Same parity for peers (network-peers design §6): an enabled rule that
+// explicitly names a peer keeps the controller polling it.
+bool DaemonService::hasEnabledPeerRules() const {
+    const QList<PeerTarget> targets = m_configStore->loadPeerTargets();
+    if (targets.isEmpty()) {
+        return false;
+    }
+    for (const RuleDocument& rule : m_rules) {
+        if (!rule.enabled) {
+            continue;
+        }
+        for (const PeerTarget& target : targets) {
+            if (rule.devices.contains(peerSerialForMachineId(target.machineId))) {
+                return true;
+            }
         }
     }
     return false;

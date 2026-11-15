@@ -89,6 +89,10 @@ QString localHostName() {
     return name.isEmpty() ? QStringLiteral("unnamed-host") : name;
 }
 
+QString peerSerialForMachineId(const QString& machineId) {
+    return QStringLiteral("PC-") + machineId.left(8);
+}
+
 PeerServer::PeerServer(ConfigStore* config, SnapshotProvider snapshotProvider,
                        WallClock wallClock, QString machineId, QString hostName,
                        QObject* parent)
@@ -325,7 +329,7 @@ QJsonObject PeerServer::snapshotEnvelope() const {
     // first poll); the envelope stays honest about that rather than hiding
     // the request behind an error.
     const DeviceSnapshot snapshot = m_snapshotProvider();
-    const QString serial = QStringLiteral("PC-") + m_machineId.left(8);
+    const QString serial = peerSerialForMachineId(m_machineId);
     QJsonObject envelope{
         {QStringLiteral("schemaVersion"), 1},
         {QStringLiteral("serial"), serial},
@@ -339,6 +343,11 @@ QJsonObject PeerServer::snapshotEnvelope() const {
     envelope.insert(QStringLiteral("playing"),
                     snapshot.playing ? QJsonValue(*snapshot.playing) : QJsonValue::Null);
     QStringList capabilities(snapshot.capabilities.cbegin(), snapshot.capabilities.cend());
+    if (capabilities.isEmpty()) {
+        // A PC's own contract (design §4/§5): volume and mute are always
+        // offered, even before the first local poll populates the snapshot.
+        capabilities = {QStringLiteral("volume"), QStringLiteral("mute")};
+    }
     capabilities.sort();
     QJsonArray capabilityArray;
     for (const QString& capability : capabilities) {

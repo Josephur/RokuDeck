@@ -172,6 +172,7 @@ class DaemonDbusTest final : public QObject {
     void peerListenerRequiresExplicitEnable();
     void peerListenerKeepsTheDaemonAliveAndReportsHonestState();
     void peersPairAcrossRealTcpWithTypedFailures();
+    void peerSnapshotsFlowIntoTheRegistry();
     void addRuleAssignsIdPersistsAndAnnounces();
     void addRuleRejectsClientOwnedAndMalformedPayloads();
     void updateRuleReplacesDefinitionInPlaceAndPersists();
@@ -261,7 +262,8 @@ class DaemonDbusTest final : public QObject {
                         DaemonService::WallClock wallClock = {},
                         std::chrono::milliseconds localPcPollInterval = 1h,
                         const QString& scriptsDir = {},
-                        const DaemonService::PeerIdentity& peerIdentity = {});
+                        const DaemonService::PeerIdentity& peerIdentity = {},
+                        const PeerPollIntervals& peerPollIntervals = {});
     QString addManualRule(const QString& name);
     QString addRuleReturningId(const QString& payload);
     QJsonObject rulesListing() const;
@@ -328,7 +330,8 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
                                     DaemonService::WallClock wallClock,
                                     std::chrono::milliseconds localPcPollInterval,
                                     const QString& scriptsDir,
-                                    const DaemonService::PeerIdentity& peerIdentity) {
+                                    const DaemonService::PeerIdentity& peerIdentity,
+                                    const PeerPollIntervals& peerPollIntervals) {
     m_proxy.reset();
     m_daemon.reset();
     auto runner = std::make_unique<FakeProcessRunner>();
@@ -338,7 +341,7 @@ void DaemonDbusTest::recreateDaemon(std::chrono::milliseconds idleGrace,
     m_daemon = std::make_unique<DaemonService>(
         QDBusConnection::sessionBus(), [this] { return m_automationEnabled; }, std::move(runner),
         std::move(configStore), idleGrace, std::move(deadlineRemaining), std::move(wallClock),
-        localPcPollInterval, scriptsDir, peerIdentity);
+        localPcPollInterval, scriptsDir, peerIdentity, peerPollIntervals);
     QVERIFY2(m_daemon->registerOnBus(),
              "the test daemon could not own its private session-bus name");
     if (!m_clientConnection) {
@@ -2087,6 +2090,124 @@ void DaemonDbusTest::peersPairAcrossRealTcpWithTypedFailures() {
             QStringLiteral("11111111111111111111111111111111")));
     QCOMPARE(unknownRevocation.type(), QDBusMessage::ErrorMessage);
     QCOMPARE(unknownRevocation.errorName(), QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"));
+}
+
+void DaemonDbusTest::peerSnapshotsFlowIntoTheRegistry() {
+    // M9b: a paired target becomes a PC- registry device whose snapshot is
+    // the peer's live state, flowing through the same pipeline as This PC.
+    // Real clocks here: the peer poll sweep needs marching time.
+    recreateDaemon(30s, {}, [] { return QDateTime::currentDateTimeUtc(); }, 1h, QString(),
+                   DaemonService::PeerIdentity{
+                       QStringLiteral("11111111111111111111111111111111"),
+                       QStringLiteral("machine-one")},
+                   PeerPollIntervals{std::chrono::milliseconds(400),
+                                     std::chrono::milliseconds(400),
+                                     std::chrono::milliseconds(400)});
+
+    // The peer daemon runs its real local-PC poller against its own fake
+    // runner, so its listener serves a genuinely produced snapshot.
+    const QString peerConfigPath =
+        m_configDirectory.filePath(QStringLiteral("peers-registry-peer.rc"));
+    auto peerRunner = std::make_unique<FakeProcessRunner>();
+    FakeProcessRunner* peerRunnerPtr = peerRunner.get();
+    auto peerConfig = KSharedConfig::openConfig(peerConfigPath, KConfig::SimpleConfig);
+    auto peerDaemon = std::make_unique<DaemonService>(
+        QDBusConnection::sessionBus(), [] { return false; }, std::move(peerRunner),
+        std::make_unique<ConfigStore>(std::move(peerConfig)), 30s,
+        DaemonService::DeadlineRemaining{}, DaemonService::WallClock{},
+        std::chrono::milliseconds(150), QString(),
+        DaemonService::PeerIdentity{
+            QStringLiteral("22222222222222222222222222222222"),
+            QStringLiteral("machine-two")},
+        PeerPollIntervals{std::chrono::milliseconds(400), std::chrono::milliseconds(400),
+                          std::chrono::milliseconds(400)});
+    peerDaemon->SetPeerListenerEnabled(true);
+    const int peerPort =
+        QJsonDocument::fromJson(peerDaemon->ListPeers().toUtf8()).object()
+            .value(QStringLiteral("listener"))
+            .toObject()
+            .value(QStringLiteral("boundPort"))
+            .toInt();
+    QVERIFY(peerPort > 0);
+
+    // Pair; the registry record appears the moment the pairing lands.
+    const QString pairingCode = peerDaemon->PeerPairingCode();
+    const QDBusMessage paired =
+        waitForReply(m_proxy->PairPeer(QStringLiteral("127.0.0.1"), peerPort, pairingCode));
+    QVERIFY2(paired.type() != QDBusMessage::ErrorMessage, qPrintable(paired.errorMessage()));
+
+    const auto deviceIn = [this](const QString& serial) {
+        const QJsonArray devices =
+            jsonResult(waitForReply(m_proxy->ListDevices()))
+                .value(QStringLiteral("devices"))
+                .toArray();
+        for (const QJsonValue& value : devices) {
+            if (value.toObject().value(QStringLiteral("serial")).toString() == serial) {
+                return value.toObject();
+            }
+        }
+        return QJsonObject{};
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(!deviceIn(QStringLiteral("PC-22222222")).isEmpty(), 2000);
+    const QJsonObject peerDevice = deviceIn(QStringLiteral("PC-22222222"));
+    QCOMPARE(peerDevice.value(QStringLiteral("displayName")).toString(),
+             QStringLiteral("machine-two"));
+    QCOMPARE(peerDevice.value(QStringLiteral("address")).toString(),
+             QStringLiteral("127.0.0.1:%1").arg(peerPort));
+    QCOMPARE(peerDevice.value(QStringLiteral("allowAutomations")).toBool(), true);
+
+    // The peer polls its own audio (wpctl) continuously; every pending read
+    // reports the same healthy state, which the controller then pulls.
+    const auto drainPeerWpctl = [peerRunnerPtr]() {
+        while (!peerRunnerPtr->callbacks.isEmpty()) {
+            peerRunnerPtr->complete({0, QByteArrayLiteral("Volume: 0.65\n"), {}, false});
+        }
+    };
+    QSignalSpy snapshots(m_daemon.get(), &DaemonService::DeviceSnapshotChanged);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            drainPeerWpctl();
+            const QJsonObject snapshot =
+                jsonResult(waitForReply(m_proxy->GetSnapshot(QStringLiteral("PC-22222222"))));
+            return snapshot.value(QStringLiteral("health")).toString() == QStringLiteral("online")
+                   && snapshot.value(QStringLiteral("volume")).toInt() == 65
+                   && snapshot.value(QStringLiteral("muted")).toBool() == false;
+        }(),
+        8000);
+
+    // The peer's own playing flag rides its envelope (MPRIS: none here).
+    const QJsonObject snapshot =
+        jsonResult(waitForReply(m_proxy->GetSnapshot(QStringLiteral("PC-22222222"))));
+    QCOMPARE(snapshot.value(QStringLiteral("playing")).toBool(), false);
+    QVERIFY(snapshots.count() >= 1);
+
+    // When the peer stops answering, the third consecutive failure flips the
+    // registry device to offline (design §2) with honest last-run outcomes.
+    peerDaemon->SetPeerListenerEnabled(false);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            drainPeerWpctl();
+            const QJsonObject after =
+                jsonResult(waitForReply(m_proxy->GetSnapshot(QStringLiteral("PC-22222222"))));
+            return after.value(QStringLiteral("health")).toString() == QStringLiteral("offline");
+        }(),
+        8000);
+
+    // Removing the peer device removes OUR stored target and its registry
+    // record; the peer's consent record for us is independent (design §3's
+    // symmetric consent — it must be revoked on that machine, not here).
+    static_cast<void>(waitForReply(m_proxy->RemoveDevice(QStringLiteral("PC-22222222"))));
+    QVERIFY(deviceIn(QStringLiteral("PC-22222222")).isEmpty());
+    QCOMPARE(jsonResult(waitForReply(m_proxy->ListPeers()))
+                 .value(QStringLiteral("targets"))
+                 .toArray()
+                 .size(),
+             0);
+    QCOMPARE(QJsonDocument::fromJson(peerDaemon->ListPeers().toUtf8()).object()
+                 .value(QStringLiteral("controllers"))
+                 .toArray()
+                 .size(),
+             1);
 }
 
 void DaemonDbusTest::addRuleAssignsIdPersistsAndAnnounces() {

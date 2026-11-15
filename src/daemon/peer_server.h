@@ -27,6 +27,10 @@ namespace RokuDeck {
 // The hostname advertised to paired controllers and used as the default
 // display name of this machine on their side (design §1).
 [[nodiscard]] QString localHostName();
+// The registry serial of a peer machine (design §1): "PC-" plus the first
+// eight hex characters of its machine id. Shared by the listener's envelope
+// and the controller-side registry so both sides spell it identically.
+[[nodiscard]] QString peerSerialForMachineId(const QString& machineId);
 
 // M9a peer listener: newline-delimited JSON request/response over LAN-local
 // TCP (network-peers design §2).

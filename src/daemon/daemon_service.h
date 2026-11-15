@@ -35,7 +35,18 @@
 
 namespace RokuDeck {
 
+class PeerClient;
 class PeerServer;
+
+// Per-policy peer poll intervals (network-peers design §2: the pull model
+// rides each peer's registry refresh policy). Namespace scope on purpose: a
+// default member initializer is not parsed until its enclosing class
+// completes, so a ctor default argument inside DaemonService cannot form one.
+struct PeerPollIntervals {
+    std::chrono::milliseconds responsive{5000};
+    std::chrono::milliseconds balanced{15000};
+    std::chrono::milliseconds battery{60000};
+};
 
 class DaemonService final : public QObject, protected QDBusContext {
   Q_OBJECT
@@ -62,6 +73,7 @@ class DaemonService final : public QObject, protected QDBusContext {
     std::chrono::milliseconds localPcPollInterval = std::chrono::seconds(2),
     QString scriptsDir = {},
     PeerIdentity peerIdentity = {},
+    PeerPollIntervals peerPollIntervals = {},
     QObject* parent = nullptr);
     ~DaemonService() override;
 
@@ -256,6 +268,20 @@ class DaemonService final : public QObject, protected QDBusContext {
     // Shared insert path with the rds poll tail: baseline bookkeeping,
     // DeviceSnapshotChanged announcement, then edge firings (§4.1).
     void applyLocalPcSnapshot(DeviceSnapshot snapshot);
+    // Peer registry integration (M9b): a paired target becomes a PC- device
+    // the rest of the engine treats like any other; removals go both ways.
+    void registerPeerDevice(const PeerTarget& target);
+    void removePeerDevice(const QString& machineId);
+    void pollDuePeers();
+    void finishPeerPoll(const QString& machineId, bool ok, const QString& errorCode,
+                        const QString& envelopeJson);
+    // The shared insert path for synthetic (non-Roku) snapshots — This PC
+    // and network peers. Baseline bookkeeping, announcement, then opt-in
+    // edge firings for enabled rules that explicitly name the serial.
+    void applySyntheticSnapshot(DeviceSnapshot snapshot);
+    void applyPeerSnapshot(DeviceSnapshot snapshot);
+    [[nodiscard]] bool hasEnabledPeerRules() const;
+    [[nodiscard]] std::chrono::milliseconds peerPollIntervalFor(const QString& refreshPolicy) const;
     // Runs one rule to completion and records its outcome. callStack carries
     // the ids of the enclosing macro runs; runRule steps recurse synchronously
     // with the ancestry extended by this rule's own id. A set cancelToken (a
@@ -298,6 +324,15 @@ class DaemonService final : public QObject, protected QDBusContext {
     WallClock m_wallClock;
     PeerIdentity m_peerIdentity;
     std::unique_ptr<PeerServer> m_peerServer;
+    std::unique_ptr<PeerClient> m_peerClient;
+    PeerPollIntervals m_peerPollIntervals;
+    QTimer m_peerPollTimer;
+    // Peer poll bookkeeping keyed by machine id: next-due instants,
+    // consecutive failure counts (three flip the peer offline, §2), and the
+    // in-flight guard so a stalled peer never stacks duplicate requests.
+    QHash<QString, QDateTime> m_peerPollDueAt;
+    QHash<QString, int> m_peerPollFailures;
+    QSet<QString> m_peerPollsInFlight;
     QTimer m_idleTimer;
     QTimer m_pollTimer;
     QTimer m_pcPollTimer;
