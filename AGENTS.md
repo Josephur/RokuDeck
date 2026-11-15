@@ -40,6 +40,14 @@ NO `PlaceHolder`. Same rule for themed properties: `Kirigami.Theme` has
 `defaultFont`/`smallFont`/`fixedWidthFont` — `smallestFont` does not exist
 (it silently renders a TypeError at runtime).
 
+**New QML files MUST be added to QML_SOURCES in src/plasmoid/CMakeLists.txt.**
+The widget's QML is compiled into the plugin's qrc resource: an unlisted file
+builds fine, deploys fine, and then 404s at runtime — the config page shows
+nothing and the journal says "ConfigPeers.qml: No such file or directory"
+under `qrc:/qt/qml/...` (shipped bug, 2026-11-15). The config dialog loads
+pages from the qrc, not from disk, so restarting plasmashell after deploy is
+not enough — the file has to be in the build.
+
 ## QML form state (plain-JS objects)
 
 - **Plain JS objects are not observable.** Validation that reads

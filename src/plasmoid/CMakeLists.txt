@@ -19,6 +19,7 @@ plasma_add_applet(io.github.josephur.rokudeck
     qml/ConfigDisplay.qml
     qml/ConfigControls.qml
     qml/ConfigAutomations.qml
+    qml/ConfigPeers.qml
     qml/ConfigRuleEditor.qml
     qml/ConditionNodeEditor.qml
     qml/ConditionNodeInner.qml
