@@ -19,10 +19,16 @@ find_package(KF6 6.0 REQUIRED COMPONENTS Config CoreAddons)
 
 option(ROKUDECK_BUILD_TESTS "Build RokuDeck tests" ON)
 option(ROKUDECK_ENABLE_DEVELOPER_MODE "Enable strict developer warnings" ON)
+# Daemon-only hosts (headless VMs, servers) have no Plasma and still want
+# rokudeckd + rokudeckctl; the tests exercise the plasmoid bridge and need it.
+option(ROKUDECK_BUILD_PLASMOID "Build the Plasma widget" ON)
 
 include(cmake/ProjectOptions.cmake)
 add_subdirectory(src)
 if(ROKUDECK_BUILD_TESTS)
+  if(NOT ROKUDECK_BUILD_PLASMOID)
+    message(FATAL_ERROR "ROKUDECK_BUILD_TESTS requires ROKUDECK_BUILD_PLASMOID (the bridge tests link the widget)")
+  endif()
   enable_testing()
   add_subdirectory(tests)
 endif()
