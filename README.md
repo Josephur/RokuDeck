@@ -1,61 +1,84 @@
-> [!WARNING]
-> **RokuDeck is alpha software and is not considered working at this time.** Expect missing
-> features, breaking changes, and defects. Do not rely on it for everyday TV control or automation.
+> [!NOTE]
+> **RokuDeck is early software.** The core feature set works and is validated on real TVs and
+> real peer machines, but expect rough edges, and treat the D-Bus and on-disk formats as
+> unstable until a 1.0 release.
 
 # RokuDeck
 
-[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSES/GPL-3.0-or-later.txt)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or-later-blue.svg)](LICENSES/GPL-3.0-or-later.txt)
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
 ## Overview
 
-RokuDeck is a local-first, multi-device Roku controller for KDE Plasma 6. Its shared daemon is
-designed to serve the desktop widget, scripts, and future automation without duplicating Roku
-network logic in each client.
-
-## Status
-
-The implemented foundation includes the Qt 6/KF6 core, an `rds` transport adapter, device-state
-parsers, multi-device registration and polling, the D-Bus-activated `rokudeckd` service, and the
-script-friendly `rokudeckctl` client. The version 1 D-Bus interface is
-`io.github.josephur.RokuDeck1`, and its JSON payloads use `schemaVersion: 1`.
-
-The Plasma widget and automation engine are planned work. They are not present in this foundation
-and no documentation below should be read as claiming that those features work today.
-
-## Screenshots
-
-Screenshots are planned for a future release.
+RokuDeck is a local-first controller for KDE Plasma 6 that treats Roku TVs and the Linux
+machines around them as one controllable, automatable device set. A shared, D-Bus-activated
+daemon owns all devices, state, and automation; the desktop widget and the `rokudeckctl` CLI
+are thin clients of that one service.
 
 ## Features
 
-Implemented foundation capabilities:
+- **The panel widget**: a device list with live state (power, active app, volume, mute),
+  a full remote for Roku devices (power, volume, navigation, playback, app launches), device
+  detail pages, and per-widget customization of the visible device set, information, and
+  controls.
+- **Automations**: daemon-owned rules that fire on time, interval, or device state changes,
+  gated by condition trees (`all`/`any`/`not`), with per-rule execution modes
+  (`single`/`restart`/`queued`), optional time-of-day windows, and honest run outcomes for
+  everything (including suppressed firings). Actions cover keypresses, app launches, absolute
+  volume and mute, nested conditionals, macros, and local scripts approved by name.
+- **This PC**: the machine the daemon runs on is a first-class device — PipeWire volume and
+  mute, MPRIS playing state, exact absolute volume control, and a per-device volume ceiling
+  that every automation path honors.
+- **Network peers** (experimental): other Linux machines running RokuDeck appear as devices —
+  their audio state streams into your registry and your rules, and you can drive their volume
+  and mute explicitly. Rules stay strictly per-machine local: a rule is stored, evaluated, and
+  executed only by the daemon that owns it, and peers can revoke access at any time.
+- **A script-friendly CLI**: `rokudeckctl` speaks the same D-Bus contract with typed exit
+  codes and `--json` output.
 
-- serial-keyed management of multiple Roku devices;
-- daemon-owned discovery, snapshots, and serialized per-device commands;
-- scriptable device listing, status, discovery, and supported commands through D-Bus; and
-- parser, transport, scheduler, daemon-contract, and CLI integration tests.
+## Network peers
 
-Planned product capabilities include the Plasma widget, device controls in the panel, and safe
-audio/TV automation across multiple devices. Users will choose which applications count as audio
-triggers, which audio outputs and headphones are relevant, and which TVs each rule controls.
+Two Linux machines, each running the daemon, can appear in each other's device lists. Consent
+is explicit and symmetric: the listening machine mints a one-time pairing code, the
+controlling machine submits it along with the peer's address, and both sides store the
+relationship (a rotating connection token on the controller, a paired-controller record on the
+peer). Either side can revoke at any time; a revoked peer goes honestly offline.
 
-### Planned widget customization
+On the machine you want to control **from elsewhere** (the peer):
 
-Each Plasma widget instance will let users choose its device set, default selected device,
-displayed status information, visible controls, and compact-representation behavior. Multiple
-widgets may use overlapping or separate device sets while the shared daemon continues to deduplicate
-backend polling. Device settings will support friendly naming and ordering alongside discovery,
-manual setup, capability inspection, connection testing, polling preferences, and per-device
-automation permission. This customization model is approved direction, not functionality included
-in the current foundation.
+```sh
+rokudeckctl peers listener on     # explicit enable; binds port 49160
+rokudeckctl peers code            # mint a one-time pairing code (10 minutes, single use)
+```
+
+On the machine that wants to **observe and act** (the controller):
+
+```sh
+rokudeckctl peers pair PEER_ADDRESS 49160 THE-CODE
+rokudeckctl peers list            # see paired peers and paired controllers
+rokudeckctl peers remove MACHINE_ID
+```
+
+The same surface lives in the widget's config dialog under **Peers**.
+
+- **Firewall**: the peer must accept inbound TCP on the listener port. A default-deny host
+  firewall (e.g. `ufw`) silently *drops* the connection — a pairing that times out rather than
+  being refused almost always means this. `sudo ufw allow 49160/tcp` on the peer fixes it.
+- **State and actions**: peers report volume, mute, and playing state; controllers may set
+  volume (absolute, clamped by the peer's own volume ceiling) and set mute explicitly. There
+  are no remote-control keypresses against a PC.
+- **Rules never leave the machine that owns them** — a peer is observed data and an action
+  target, never a rule host. See
+  [`docs/superpowers/plans/2026-11-14-network-peers-design.md`](docs/superpowers/plans/2026-11-14-network-peers-design.md)
+  for the full design, the threat model (LAN-local plaintext, ECP-equivalent), and the
+  deliberately cut v2 candidates (mDNS discovery, peer-push, TLS).
 
 ## Architecture
 
-`rokudeckd` is the only component that invokes `rds`, polls devices, or stores device
-configuration. `rokudeckctl` is a thin client of the generated D-Bus proxy. The planned Plasma
-widget and automation engine will use that same service boundary.
+`rokudeckd` is the only component that polls devices, executes commands, evaluates rules, or
+stores configuration. `rokudeckctl` and the Plasma widget are thin clients of the generated
+D-Bus proxy for `io.github.josephur.RokuDeck1`; JSON payloads use `schemaVersion: 1`.
 
 ## Requirements
 
@@ -64,8 +87,8 @@ widget and automation engine will use that same service boundary.
 - Qt 6.7 or newer: Core, DBus, Network, and Test
 - KDE Frameworks 6.0 or newer: Config and CoreAddons
 - A C++20 compiler and Ninja
-- `rds` for live Roku discovery, status, and commands
-- `jq` only for the optional read-only hardware smoke test
+- Plasma 6 for the widget (daemon-only builds use `-DROKUDECK_BUILD_PLASMOID=OFF`)
+- `rds` for live Roku discovery, status, and commands; `wpctl` (PipeWire) for This-PC audio
 
 ## Build
 
@@ -83,33 +106,21 @@ after building (normally through a package or with administrator privileges):
 sudo cmake --install build/dev
 ```
 
-The install includes `rokudeckctl`, the D-Bus-activated daemon, and the versioned D-Bus interface
-and service files. Packagers may set `CMAKE_INSTALL_PREFIX` when configuring; changing only the
-install-time `--prefix` does not rewrite the generated activation paths.
+The install includes `rokudeckctl`, the D-Bus-activated daemon, the Plasma widget, and the
+versioned D-Bus interface and service files. Packagers may set `CMAKE_INSTALL_PREFIX` when
+configuring; changing only the install-time `--prefix` does not rewrite the generated
+activation paths.
 
-## Plasma widget
-
-To run the widget without installing system-wide, use the development install, which builds and
-installs into `~/.local`:
+For a user-local install (including the widget), or for daemon-only machines without Plasma:
 
 ```sh
-bash scripts/install-dev.sh
-plasmoidviewer -a io.github.josephur.rokudeck
+bash scripts/install-dev.sh                                # full install into ~/.local
+cmake -B build/vm -DROKUDECK_BUILD_PLASMOID=OFF \
+      -DROKUDECK_BUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=~/.local  # daemon-only
 ```
 
-A home-directory prefix is not on Plasma's or Qt's default search paths, so export the
-`XDG_DATA_DIRS` and `QT_PLUGIN_PATH` lines the script prints before running Plasma tools in that
-shell. `bash scripts/uninstall-dev.sh` removes exactly the paths CMake recorded and leaves your
+`bash scripts/uninstall-dev.sh` removes exactly the paths CMake recorded and leaves your
 settings in `~/.config/rokudeckrc` alone.
-
-The widget renders only what the daemon reports; it never runs `rds`, opens sockets, or polls on
-its own. Each widget keeps its own device selection, visible information, visible controls, and
-compact layout, while a device's address, automation permission, wake preference, and refresh
-policy belong to the daemon so that every widget and automation sees the same device.
-
-Automated tests cannot tell you whether the widget looks right. See
-[`docs/testing/plasma-widget.md`](docs/testing/plasma-widget.md) for the states a human still has
-to confirm.
 
 ## Usage
 
@@ -122,49 +133,43 @@ rokudeckctl status DEVICE
 rokudeckctl discover
 rokudeckctl command DEVICE Home
 rokudeckctl command DEVICE '{"operation":"launch","appId":"APP_ID"}'
+rokudeckctl peers list
+rokudeckctl peers pair ADDRESS PORT CODE
 ```
 
 Use `--json` for machine-readable output and `--quiet` to suppress successful output. A plain
 `ACTION` is sent as a keypress; a JSON object is passed to the daemon's supported-command schema.
 The CLI returns `2` for usage errors, `3` when the service is unavailable, `4` for an unknown
-device, `5` for an unsupported command, `6` for a safety rejection, and `7` for transport or
-service-response failure. The daemon accepts at most four outstanding commands per device and
-gives every accepted request a bounded completion deadline; the CLI waits beyond that deadline for
-the matching completion signal. A saturated queue is rejected before another TV action is added.
+device, `5` for an unsupported command, `6` for a safety rejection, `7` for transport or
+service-response failure, `8` for an invalid rule, `9` for an unknown rule, and `10` for a
+rejected pairing. The daemon accepts at most four outstanding commands per device and gives
+every accepted request a bounded completion deadline; the CLI waits beyond that deadline for
+the matching completion signal. A saturated queue is rejected before another action is added.
+
+Automations are managed in the widget's **Automations** page (a structured editor for every
+trigger, condition, and action type) or over D-Bus with `AddRule`/`UpdateRule` JSON documents;
+see the design documents in [`docs/superpowers`](docs/superpowers) for the rule schema.
 
 ## Automation Safety
 
-The foundation includes an opt-in, read-only hardware smoke test:
+Automations are safety-gated end to end: every dispatch flows through the same validated,
+queued command pipeline as remote controls; volume actions clamp into a per-device ceiling
+that is always on (0–100, daemon-owned, echoed to every client); audio keypresses against a
+Roku are only accepted once a fresh volume reading was observed; matching mute state is a
+successful no-op rather than a redundant write; and unknown or stale state never satisfies a
+positive rule condition. Rules can opt into **only run while TV is on** (`PowerOn`, which
+includes screensaver mode); screensaver active/inactive is a separate condition.
 
-```sh
-ROKUDECK_TEST_TV_IP=TV_ADDRESS bash tests/hardware/read_only_tv_test.sh
-```
-
-Without `ROKUDECK_TEST_TV_IP`, it clearly skips with exit code `77`. When enabled, it runs only
-device-info, active-app, and audio-device queries. It sends no POST, power, volume, or keypress
-request and prints only the reported power state, never the configured address or device
-identifiers.
-
-The planned automation engine will coordinate Linux audio and Roku TV audio. A rule may react when
-user-selected applications begin or stop playback, when qualifying playback starts or stops, when
-the default output changes, or when a selected output or headset becomes active or inactive. Rules
-will be able to mute a selected TV or lower it to a configured volume, then restore only when no
-other active rule still needs that property and the TV still matches RokuDeck's last applied value.
-Manual changes therefore take precedence instead of being fought by restoration.
-
-The approved safety direction also includes a per-device maximum volume that clamps every
-RokuDeck-issued path and blocks loudness-increasing commands when fresh volume state is unavailable.
 The rule option **Only run while TV is on** means `PowerOn`, which includes screensaver mode;
 screensaver active/inactive is a separate condition. Unknown or stale state will not satisfy a
-positive rule condition. These triggers, mute/lower-volume actions, restoration rules, and guards
-are design commitments for the later automation phase, not implemented features in the current
-foundation.
+positive rule condition.
 
 ## Privacy
 
 RokuDeck is designed to keep device configuration local. Do not commit local device addresses,
 serial numbers, network names, credentials, or diagnostic output containing them. The local
-`.env` file is ignored and should remain untracked.
+`.env` file is ignored and should remain untracked. Peer pairing stores connection tokens only
+in the local config file; they never appear on D-Bus or over the wire after pairing.
 
 ## Contributing
 
