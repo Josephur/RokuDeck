@@ -4,6 +4,17 @@
 
 All notable changes to RokuDeck are documented in this file.
 
+## Unreleased
+
+- stateChange rules gain optional **re-assertion**: `reassertSeconds` on the
+  trigger (1–3600) makes the rule re-run while the trigger predicate still
+  holds, cooldown-gated by the rule's own last run — the answer to "I
+  unmuted the TV but playback is still running". The edge still owns the
+  first fire; re-assertion continues an existing run history, so a daemon
+  restart never surprise-fires an unseen edge, and every re-assertion run
+  records its honest outcome like any other. The editor gains a
+  "Keep re-running while this state holds" switch with an interval field.
+
 ## 0.3.1 - 2026-11-21
 
 - Fixed: automation rules whose trigger watches This PC (or a network peer)
