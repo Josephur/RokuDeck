@@ -4,8 +4,16 @@
 
 All notable changes to RokuDeck are documented in this file.
 
-## Unreleased
+## 0.3.1 - 2026-11-21
 
+- Fixed: automation rules whose trigger watches This PC (or a network peer)
+  while targeting other devices never fired. The synthetic-snapshot edge
+  path filtered candidate rules by the rule's target list, hiding
+  trigger-scoped rules from every edge they watched — "mute the TV when
+  This PC starts playing" was silently inert. Edge eligibility is now
+  "the rule's device list names the serial OR the rule's trigger is scoped
+  to it"; wildcard triggers still never see This-PC or peer edges, and
+  idle-exit parity now honors trigger-scoped rules as well.
 - The rule editor is legible again: field pickers are device-aware and
   human-labeled — a This-PC or peer trigger/condition offers only the fields
   that device actually reports (playing/muted/volume/reachability) and a Roku
