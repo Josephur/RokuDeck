@@ -96,6 +96,45 @@ TestCase {
         editor.destroy();
     }
 
+    function test_reassertControlsRoundTrip() {
+        const editor = editorComponent.createObject(testCase);
+        verify(editor !== null);
+        editor.openForEdit({
+            id: "rReassert",
+            name: "Holding mute",
+            enabled: true,
+            mode: "queued",
+            devices: ["LOCAL-PC"],
+            trigger: {
+                type: "stateChange",
+                device: "LOCAL-PC",
+                field: "muted",
+                op: "is",
+                value: true,
+                reassertSeconds: 45
+            },
+            actions: [{ type: "mute", muted: true }]
+        });
+        const box = findItem(editor, "reassertCheckBox");
+        const spin = findItem(editor, "reassertSecondsBox");
+        verify(box !== null && spin !== null);
+        verify(box.checked, "a stored reassertSeconds must check the box");
+        compare(spin.value, 45);
+
+        // Unchecking zeroes the interval: fire-on-the-crossing only.
+        mouseClick(box);
+        verify(!box.checked);
+        compare(editor.formState.trigger.reassertSeconds, 0);
+        verify(!spin.visible);
+
+        // Re-checking arms the default interval.
+        mouseClick(box);
+        verify(box.checked);
+        compare(editor.formState.trigger.reassertSeconds, 30);
+        compare(spin.value, 30);
+        editor.destroy();
+    }
+
     function test_triggerFieldsFollowTheDevice() {
         const editor = editorComponent.createObject(testCase);
         verify(editor !== null);

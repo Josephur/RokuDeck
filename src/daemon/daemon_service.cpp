@@ -2683,8 +2683,15 @@ void DaemonService::pollDueDevices() {
                 static_cast<void>(service->m_pollScheduler.recordResult(claim, true));
                 Q_EMIT service->DeviceSnapshotChanged(claim.serial, snapshotJson(snapshot));
                 if (hadPrevious) {
-                    service->runStateChangeFirings(
-                        dueStateChangeRuleIds(service->m_rules, claim.serial, previous, snapshot));
+                    QStringList due = dueStateChangeRuleIds(
+                        service->m_rules, claim.serial, previous, snapshot);
+                    // Re-assertion (design: re-assert while the state holds):
+                    // rules with reassertSeconds > 0 whose predicate still
+                    // matches, cooldown elapsed since their last run.
+                    due.append(reassertionDueRuleIds(service->m_rules, claim.serial,
+                                                     snapshot, service->m_wallClock()));
+                    due.removeDuplicates();
+                    service->runStateChangeFirings(due);
                 }
             });
     }
@@ -2881,8 +2888,12 @@ void DaemonService::applySyntheticSnapshot(DeviceSnapshot snapshot) {
                 syntheticCandidates.append(rule);
             }
         }
-        runStateChangeFirings(dueStateChangeRuleIds(syntheticCandidates, snapshot.serial,
-                                                    previous, snapshot));
+        QStringList due = dueStateChangeRuleIds(syntheticCandidates, snapshot.serial,
+                                                previous, snapshot);
+        due.append(reassertionDueRuleIds(syntheticCandidates, snapshot.serial, snapshot,
+                                         m_wallClock()));
+        due.removeDuplicates();
+        runStateChangeFirings(due);
     }
 }
 

@@ -175,6 +175,7 @@ class DaemonDbusTest final : public QObject {
     void peerSnapshotsFlowIntoTheRegistry();
     void peerActionsReachThePeerAndHonorTheCeiling();
     void aSyntheticEdgeFiresARuleTargetingAnotherDevice();
+    void reassertionRerunsAHoldingRule();
     void addRuleAssignsIdPersistsAndAnnounces();
     void addRuleRejectsClientOwnedAndMalformedPayloads();
     void updateRuleReplacesDefinitionInPlaceAndPersists();
@@ -2411,6 +2412,87 @@ void DaemonDbusTest::aSyntheticEdgeFiresARuleTargetingAnotherDevice() {
                 .value(QStringLiteral("lastRun"))
                 .toObject()
                 .contains(QStringLiteral("outcome")));
+}
+
+void DaemonDbusTest::reassertionRerunsAHoldingRule() {
+    // Re-assertion (the answer to "I unmuted the TV but playback is still
+    // running"): a stateChange rule with reassertSeconds keeps re-running
+    // while the trigger predicate still holds, cooldown-gated by its own
+    // last run. Baseline first: unmuted, no run.
+    recreateDaemon(30s, {}, [] { return QDateTime::currentDateTimeUtc(); },
+                   std::chrono::milliseconds(150));
+    m_daemon->upsertDevice({QStringLiteral("SERIAL-A"), QStringLiteral("Fixture TV"),
+                            QStringLiteral("192.0.2.40")});
+    const QDBusMessage added = waitForReply(m_proxy->AddRule(QStringLiteral(
+        R"json({"name":"Re-assert fixture","trigger":{"type":"stateChange","device":"LOCAL-PC","field":"muted","op":"is","value":true,"reassertSeconds":3},"devices":["SERIAL-A"],"actions":[{"type":"mute","muted":true}]})json")));
+    QVERIFY2(added.type() != QDBusMessage::ErrorMessage,
+             qPrintable(added.errorMessage()));
+    QCOMPARE(jsonResult(added).value(QStringLiteral("name")).toString(),
+             QStringLiteral("Re-assert fixture"));
+
+    const auto drain = [this](const QByteArray& output) {
+        while (!m_runner->callbacks.isEmpty()) {
+            m_runner->complete({0, output, {}, false});
+        }
+    };
+    const auto lastFiredAt = [&]() {
+        const QJsonObject rule =
+            QJsonDocument::fromJson(waitForReply(m_proxy->ListRules())
+                .arguments().front().toString().toUtf8()).object()
+                .value(QStringLiteral("rules")).toArray().at(0).toObject();
+        return rule.value(QStringLiteral("lastRun")).toObject()
+            .value(QStringLiteral("lastFiredAt")).toString();
+    };
+
+    drain(QByteArrayLiteral("Volume: 0.50\n"));
+    // Baseline: a REAL unmuted reading — the JSON null of an unpolled
+    // snapshot must not pass for "unmuted" (toBool() is false for null too).
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&]() {
+            drain(QByteArrayLiteral("Volume: 0.50\n"));
+            const QJsonObject snapshot =
+                QJsonDocument::fromJson(waitForReply(m_proxy->GetSnapshot(
+                    QStringLiteral("LOCAL-PC"))).arguments().front().toString().toUtf8())
+                    .object();
+            return snapshot.value(QStringLiteral("muted")).isBool()
+                   && snapshot.value(QStringLiteral("muted")).toBool() == false;
+        }(),
+        5000);
+    QVERIFY2(lastFiredAt().isEmpty(), "no edge, no run");
+
+    // Cross into muted: a REAL muted reading...
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&]() {
+            drain(QByteArrayLiteral("Volume: 0.50 [MUTED]\n"));
+            const QJsonObject snapshot =
+                QJsonDocument::fromJson(waitForReply(m_proxy->GetSnapshot(
+                    QStringLiteral("LOCAL-PC"))).arguments().front().toString().toUtf8())
+                    .object();
+            return snapshot.value(QStringLiteral("muted")).isBool()
+                   && snapshot.value(QStringLiteral("muted")).toBool() == true;
+        }(),
+        5000);
+
+    // ...then the edge fires the rule once.
+    QTRY_VERIFY_WITH_TIMEOUT(!lastFiredAt().isEmpty(), 5000);
+    const QString firstFiredAt = lastFiredAt();
+
+    // Within the cooldown nothing new fires...
+    QTest::qWait(1000);
+    QCOMPARE(lastFiredAt(), firstFiredAt);
+
+    // ...but the state still HOLDS, so once the 3 s cooldown elapses the
+    // rule re-runs (its mute action records its own honest outcome against
+    // the TV each time).
+    // The fake runner needs its polls completed by hand: the drain keeps
+    // the snapshot stream flowing so the cooldown can elapse.
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&]() {
+            drain(QByteArrayLiteral("Volume: 0.50 [MUTED]\n"));
+            return lastFiredAt() != firstFiredAt;
+        }(),
+        10000);
+    QVERIFY2(!lastFiredAt().isEmpty(), "the re-assertion run is recorded");
 }
 
 void DaemonDbusTest::addRuleAssignsIdPersistsAndAnnounces() {

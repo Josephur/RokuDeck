@@ -128,6 +128,7 @@ function blankRule() {
             windowEnabled: false,
             windowStart: "",
             windowEnd: "",
+            reassertSeconds: 0,
             field: "power",
             op: "is",
             value: "on"
@@ -236,16 +237,20 @@ function triggerToForm(trigger) {
               field: state.field, op: state.op, value: state.value },
             common);
     }
-    case "stateChange":
+    case "stateChange": {
+        const reassert = Number(trigger.reassertSeconds);
         return Object.assign(
             { type: "stateChange", kind: state.kind, time: state.time, date: "",
               minutes: state.minutes,
+              reassertSeconds: isNaN(reassert) || reassert < 1 || reassert > 3600
+                  ? 0 : reassert,
               field: fields.indexOf(String(trigger.field)) >= 0
                   ? String(trigger.field) : state.field,
               op: ops.indexOf(String(trigger.op)) >= 0 ? String(trigger.op) : state.op,
               value: canonicalValue(String(trigger.field), String(trigger.op),
                                     trigger.value) },
             common);
+    }
     default:
         // Unknown future trigger: carried verbatim so editing anything else in
         // the rule never silently drops it; validate() flags the rule.
@@ -423,6 +428,9 @@ function triggerJson(trigger) {
         built.value = conditionValueJson({ field: String(trigger.field),
                                            op: String(trigger.op),
                                            value: trigger.value });
+        if (Number(trigger.reassertSeconds) >= 1) {
+            built.reassertSeconds = Number(trigger.reassertSeconds);
+        }
         break;
     }
     default:

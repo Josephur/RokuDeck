@@ -30,4 +30,14 @@ namespace RokuDeck {
                                                 const DeviceSnapshot& previous,
                                                 const DeviceSnapshot& current);
 
+// Enabled stateChange rules with reassertSeconds > 0 whose trigger predicate
+// still matches the CURRENT snapshot and whose cooldown since the last run
+// has elapsed. The edge owns the first fire; re-assertion continues an
+// existing run history, so a daemon restart never surprise-fires an unseen
+// edge.
+[[nodiscard]] QStringList reassertionDueRuleIds(const QList<RuleDocument>& rules,
+                                                const QString& serial,
+                                                const DeviceSnapshot& current,
+                                                const QDateTime& now);
+
 } // namespace RokuDeck

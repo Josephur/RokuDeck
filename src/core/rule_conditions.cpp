@@ -242,4 +242,45 @@ QStringList dueStateChangeRuleIds(const QList<RuleDocument>& rules,
     return due;
 }
 
+QStringList reassertionDueRuleIds(const QList<RuleDocument>& rules,
+                                  const QString& serial,
+                                  const DeviceSnapshot& current,
+                                  const QDateTime& now)
+{
+    QStringList due;
+    const QStringList targets{serial};
+    for (const RuleDocument& rule : rules) {
+        if (!rule.enabled || rule.trigger.type != u"stateChange"_s) {
+            continue;
+        }
+        if (rule.trigger.reassertSeconds <= 0) {
+            continue;
+        }
+        // The same scoping contract as the edge path: an explicitly scoped
+        // trigger observes that serial's edges only; a wildcard keeps
+        // watching every edge it was allowed to watch.
+        const QString& scope = rule.trigger.stateChange.device;
+        if (!scope.isEmpty() && scope != u"*"_s && scope != serial) {
+            continue;
+        }
+        // "Still holds": the predicate matches the current reading.
+        if (!predicateMatches(rule.trigger.stateChange,
+                              QHash<QString, DeviceSnapshot>{{serial, current}},
+                              targets)) {
+            continue;
+        }
+        // The edge owns the first fire; re-assertion continues a run history
+        // that already exists, so a daemon restart never surprise-fires a
+        // rule whose edge was never seen.
+        const QDateTime lastFired =
+            QDateTime::fromString(rule.lastRun.firedAtIso, Qt::ISODateWithMs);
+        if (!lastFired.isValid()
+            || lastFired.addSecs(rule.trigger.reassertSeconds) > now) {
+            continue;
+        }
+        due.append(rule.id);
+    }
+    return due;
+}
+
 } // namespace RokuDeck

@@ -65,6 +65,10 @@ struct TriggerSpec {
     QString date;  // YYYY-MM-DD, once only
     int minutes = 0;  // interval
     FieldPredicate stateChange;
+    // stateChange only: when > 0, the rule re-runs while the trigger
+    // predicate still holds, at most once per this many seconds after the
+    // last run. 0 (absent) = fire on the crossing only.
+    int reassertSeconds = 0;
     std::optional<TimeWindow> activeWindow;  // any type
 };
 

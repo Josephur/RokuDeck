@@ -318,11 +318,17 @@ constexpr int maximumDepth = 16;
 
     // stateChange: the optional device key scopes the trigger to one serial;
     // absent keeps the wildcard "any device" meaning existing rules rely on.
+    // The optional reassertSeconds keeps re-running the rule while the
+    // predicate still holds, at most once per interval.
     const bool hasDevice = object.contains(QStringLiteral("device"));
+    const bool hasReassert = object.contains(QStringLiteral("reassertSeconds"));
     QStringList stateChangeKeys{QStringLiteral("type"), QStringLiteral("field"),
         QStringLiteral("op"), QStringLiteral("value")};
     if (hasDevice) {
         stateChangeKeys.insert(1, QStringLiteral("device"));
+    }
+    if (hasReassert) {
+        stateChangeKeys.append(QStringLiteral("reassertSeconds"));
     }
     if (hasWindow) {
         stateChangeKeys.append(QStringLiteral("activeWindow"));
@@ -344,6 +350,16 @@ constexpr int maximumDepth = 16;
                 QStringLiteral("stateChange device invalid")}};
         }
     }
+    int reassertSeconds = 0;
+    if (hasReassert) {
+        const QJsonValue reassert = object.value(QStringLiteral("reassertSeconds"));
+        if (!reassert.isDouble() || static_cast<int>(reassert.toDouble()) != reassert.toDouble()
+            || reassert.toDouble() < 1 || reassert.toDouble() > 3600) {
+            return {ParseError{ParseError::Code::InvalidValue,
+                QStringLiteral("reassertSeconds must be an integer between 1 and 3600")}};
+        }
+        reassertSeconds = static_cast<int>(reassert.toDouble());
+    }
     auto predicate = parsePredicate(
         QJsonObject{{QStringLiteral("device"), scopedDevice},
             {QStringLiteral("field"), object.value(QStringLiteral("field"))},
@@ -354,6 +370,7 @@ constexpr int maximumDepth = 16;
         return {ParseError{predicate.error()}};
     }
     trigger.stateChange = std::move(predicate.value());
+    trigger.reassertSeconds = reassertSeconds;
     trigger.activeWindow = std::move(window.value());
     return {std::move(trigger)};
 }
@@ -719,6 +736,9 @@ QJsonObject ruleJson(const RuleDocument& rule)
         trigger.insert(QStringLiteral("field"), rule.trigger.stateChange.field);
         trigger.insert(QStringLiteral("op"), rule.trigger.stateChange.op);
         trigger.insert(QStringLiteral("value"), rule.trigger.stateChange.value);
+        if (rule.trigger.reassertSeconds > 0) {
+            trigger.insert(QStringLiteral("reassertSeconds"), rule.trigger.reassertSeconds);
+        }
     }
     if (rule.trigger.activeWindow.has_value()) {
         trigger.insert(QStringLiteral("activeWindow"),

@@ -607,6 +607,51 @@ Kirigami.Dialog {
                     text: KI18n.i18nc("@label",
                         "Fires when the value crosses into this state — e.g. when playback starts, not while it continues.")
                 }
+
+                QQC2.CheckBox {
+                    id: reassertCheckBox
+
+                    objectName: "reassertCheckBox"
+
+                    visible: root.formState !== null
+                             && root.formState.trigger.type === "stateChange"
+                    text: KI18n.i18nc("@label", "Keep re-running while this state holds")
+                    checked: root.formState !== null
+                             && root.formState.trigger.reassertSeconds > 0
+                    onToggled: {
+                        root.formState.trigger.reassertSeconds = checked ? 30 : 0;
+                        reassertSecondsBox.value = root.formState.trigger.reassertSeconds;
+                        // Re-arm the binding: the nested write is invisible to
+                        // the property system (plain-JS form state).
+                        checked = Qt.binding(function() {
+                            return root.formState !== null
+                                && root.formState.trigger.reassertSeconds > 0;
+                        });
+                        root.touchForm();
+                    }
+                }
+
+                QQC2.SpinBox {
+                    id: reassertSecondsBox
+
+                    objectName: "reassertSecondsBox"
+
+                    visible: reassertCheckBox.checked
+                    Kirigami.FormData.label: KI18n.i18nc("@label", "Re-assert every:")
+                    from: 5
+                    to: 3600
+                    stepSize: 5
+                    editable: true
+                    value: root.formState !== null
+                           ? root.formState.trigger.reassertSeconds : 30
+                    onValueModified: {
+                        root.formState.trigger.reassertSeconds = value;
+                        root.touchForm();
+                    }
+                    QQC2.ToolTip.text: KI18n.i18nc("@info:tooltip",
+                        "Seconds between re-runs while the watched state holds")
+                    QQC2.ToolTip.visible: hovered
+                }
             }
 
             Kirigami.Separator {

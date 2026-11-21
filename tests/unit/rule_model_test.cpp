@@ -86,6 +86,7 @@ private Q_SLOTS:
     void parsesAndSerializesACompleteRule();
     void parsesPlayingFieldsAndRejectsNonBooleanValues();
     void parsesDeviceScopedStateChangeTriggers();
+    void parsesReassertSecondsAndRejectsInvalidValues();
     void parsesActiveWindowsOnEveryTriggerType();
     void parsesRunScriptActions();
     void rejectsMalformedRules_data();
@@ -225,6 +226,64 @@ void RuleModelTest::parsesDeviceScopedStateChangeTriggers()
                   .toObject()
                   .contains(QStringLiteral("device")),
         "wildcard stateChange must not serialize a device key");
+}
+
+void RuleModelTest::parsesReassertSecondsAndRejectsInvalidValues()
+{
+    const auto baseDocument = [](const QJsonObject& trigger) {
+        return QJsonObject{
+            {QStringLiteral("name"), QStringLiteral("Re-assert fixture")},
+            {QStringLiteral("devices"), QJsonArray{QStringLiteral("X001")}},
+            {QStringLiteral("trigger"), trigger},
+            {QStringLiteral("actions"),
+                QJsonArray{keypressAction(QStringLiteral("Home"))}}};
+    };
+    const auto mutedTrigger = [](const QJsonValue& reassert) {
+        QJsonObject trigger{
+            {QStringLiteral("type"), QStringLiteral("stateChange")},
+            {QStringLiteral("device"), QStringLiteral("LOCAL-PC")},
+            {QStringLiteral("field"), QStringLiteral("muted")},
+            {QStringLiteral("op"), QStringLiteral("is")},
+            {QStringLiteral("value"), true}};
+        if (!reassert.isUndefined()) {
+            trigger.insert(QStringLiteral("reassertSeconds"), reassert);
+        }
+        return trigger;
+    };
+
+    // Absent: re-assertion off, and the serializer keeps the key out.
+    const auto without = parseRule(baseDocument(mutedTrigger(QJsonValue::Undefined)));
+    if (!without.has_value()) {
+        QFAIL(qPrintable(without.error().message));
+    }
+    QCOMPARE(without.value().trigger.reassertSeconds, 0);
+    QVERIFY(!ruleJson(without.value())
+                 .value(QStringLiteral("trigger"))
+                 .toObject()
+                 .contains(QStringLiteral("reassertSeconds")));
+
+    // Present and valid: parses, round-trips through the serializer.
+    const auto with = parseRule(baseDocument(mutedTrigger(QJsonValue(30))));
+    if (!with.has_value()) {
+        QFAIL(qPrintable(with.error().message));
+    }
+    QCOMPARE(with.value().trigger.reassertSeconds, 30);
+    const auto reparsed = parseRule(ruleJson(with.value()));
+    if (!reparsed.has_value()) {
+        QFAIL(qPrintable(reparsed.error().message));
+    }
+    QCOMPARE(reparsed.value().trigger.reassertSeconds, 30);
+
+    // Out of range or non-numeric: typed rejections.
+    for (const QJsonValue& bad : {QJsonValue(0), QJsonValue(4000), QJsonValue(2.5),
+                                  QJsonValue(QStringLiteral("30"))}) {
+        const auto rejected = parseRule(baseDocument(mutedTrigger(bad)));
+        QVERIFY2(!rejected.has_value(),
+                 qPrintable(QStringLiteral("reassertSeconds %1 must be rejected")
+                                .arg(QJsonDocument(QJsonObject{{QStringLiteral("v"), bad}})
+                                         .toJson(QJsonDocument::Compact))));
+        QCOMPARE(rejected.error().code, ParseError::Code::InvalidValue);
+    }
 }
 
 void RuleModelTest::parsesActiveWindowsOnEveryTriggerType()
